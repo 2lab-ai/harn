@@ -708,6 +708,40 @@ fn apply_journals_the_agent_version_the_resolver_saw() {
 }
 
 #[test]
+fn plan_json_round_trips_agent_version_and_loads_without_it() {
+    let sb = Sandbox::new();
+    // The fake resolver reports no version; stand in for the installed one.
+    let mut tree = sb.resolve();
+    tree.agent_version = Some("9.9.9".to_string());
+    let plan = plan::build_plan(&sb.fake, &sb.target, &tree, SLACK, None).unwrap();
+    assert_eq!(plan.agent_version.as_deref(), Some("9.9.9"));
+
+    let text = serde_json::to_string(&plan).unwrap();
+    assert_eq!(
+        serde_json::from_str::<plan::ActionPlan>(&text).unwrap(),
+        plan
+    );
+    let mut doc: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(doc["agent_version"], json!("9.9.9"));
+
+    // A plan written before the field existed has no `agent_version` key: it still loads, as None.
+    assert!(doc
+        .as_object_mut()
+        .unwrap()
+        .remove("agent_version")
+        .is_some());
+    let old: plan::ActionPlan = serde_json::from_str(&doc.to_string()).unwrap();
+    assert_eq!(old.agent_version, None);
+    assert_eq!(
+        plan::ActionPlan {
+            agent_version: None,
+            ..plan
+        },
+        old
+    );
+}
+
+#[test]
 fn apply_refuses_a_file_changed_since_the_plan() {
     let mut sb = Sandbox::new();
     let plan = sb.plan(SLACK, None).unwrap();
