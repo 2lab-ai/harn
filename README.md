@@ -14,7 +14,8 @@ off reversibly. Claude Code first, Codex CLI second. One binary for macOS and Li
   quit. `--readonly` greys and refuses the keys that write.
 - `harn trim` — the AI decides what to turn off (`/harn-trim` inside Claude Code).
 - `harn report --html <OUT>` — a self-contained, read-only HTML report.
-- `harn --table [DIR]` — the table on stdout; also what `harn` prints when stdout is not a terminal.
+- `harn --table [DIR]` — the table on stdout; also what `harn` prints unless stdin and stdout are
+  both a terminal.
 - `harn --json [DIR]` — the same model as JSON (schema `harn/1`).
 
 Status: **scaffold, P0 in progress** (2026-10-13). The CLI parses every P0 command and the data

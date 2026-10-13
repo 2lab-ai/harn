@@ -22,7 +22,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 # preserve_order: settings JSON is rewritten in its original key order (02-architecture §Stack).
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sha2 = "0.10.9"
+# SIGINT/SIGTERM/SIGHUP become a flag the view polls, so the terminal is restored on the way out.
+signal-hook = "0.3.18"
 similar = "2.7.0"
 time = { version = "0.3.47", features = ["formatting"] }
 toml_edit = "0.25.12"
+# Pane wrapping by terminal columns on grapheme boundaries; both already in the tree via ratatui.
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
 walkdir = "2.5.0"

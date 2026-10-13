@@ -84,13 +84,6 @@ pub(crate) enum Mode {
     },
 }
 
-/// A cursor position that survives a rebuild.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RowKey {
-    Item(String),
-    Off(String),
-}
-
 pub const TRIM_HINT: &str = "AI trim: run `harn trim` in the shell (or /harn-trim in Claude Code)";
 
 pub struct App {
@@ -172,6 +165,11 @@ impl App {
         self.pending.take()
     }
 
+    /// Puts `text` on the message line as an error (the terminal owner's failures).
+    pub fn report_error(&mut self, text: String) {
+        self.error(text);
+    }
+
     pub fn message(&self) -> Option<&Message> {
         self.message.as_ref()
     }
@@ -211,9 +209,7 @@ impl App {
 
     /// Id of the item (or off item) under the cursor.
     pub fn cursor_id(&self) -> Option<String> {
-        match self.cursor_key()? {
-            RowKey::Item(id) | RowKey::Off(id) => Some(id),
-        }
+        self.key_of(self.active)
     }
 
     /// Moves the cursor to `id` (an item, expanding its ancestors, or an off row).
@@ -226,11 +222,7 @@ impl App {
                 items = &items[*i].children;
             }
         }
-        self.rebuild(self.active, Some(RowKey::Item(id.to_string())));
-        if self.cursor_id().as_deref() == Some(id) {
-            return true;
-        }
-        self.rebuild(self.active, Some(RowKey::Off(id.to_string())));
+        self.rebuild(self.active, Some(id.to_string()));
         self.cursor_id().as_deref() == Some(id)
     }
 
@@ -426,14 +418,6 @@ impl App {
         }
     }
 
-    fn cursor_key(&self) -> Option<RowKey> {
-        if let Some(item) = self.cursor_item() {
-            return Some(RowKey::Item(item.id.clone()));
-        }
-        self.cursor_off()
-            .map(|off| RowKey::Off(off.item_id.clone()))
-    }
-
     // ---- rows -------------------------------------------------------------------------------
 
     fn rebuild_all(&mut self) {
@@ -443,32 +427,24 @@ impl App {
         }
     }
 
-    fn key_of(&self, tab: usize) -> Option<RowKey> {
+    /// The id under the cursor of `tab`: an item row and an off row of the same item share it,
+    /// so the cursor follows an item that leaves the tree (off) and comes back (undo, on).
+    fn key_of(&self, tab: usize) -> Option<String> {
         let t = &self.tabs[tab];
-        match &t.rows.get(t.cursor)?.kind {
-            RowKind::Item(path) => {
-                rows::item_at(&t.tree.items, path).map(|i| RowKey::Item(i.id.clone()))
-            }
-            RowKind::Off(i) => t.off.get(*i).map(|o| RowKey::Off(o.item_id.clone())),
-            RowKind::Separator(_) => None,
-        }
+        row_id(t, t.rows.get(t.cursor)?).map(str::to_string)
     }
 
-    /// Recomputes the rows of `tab`; the cursor goes to `keep` when shown, else stays at its
-    /// index (clamped, off separators).
-    fn rebuild(&mut self, tab: usize, keep: Option<RowKey>) {
+    /// Recomputes the rows of `tab`; the cursor goes to the row with id `keep` when shown, else
+    /// stays at its index (clamped, off separators).
+    fn rebuild(&mut self, tab: usize, keep: Option<String>) {
         let filter = Filter::new(&self.filter);
         let sort = self.sort;
         let t = &mut self.tabs[tab];
         t.rows = rows::flatten(&t.tree, &t.expanded, sort, filter.as_ref(), &t.off);
-        let found = keep.and_then(|key| {
-            t.rows.iter().position(|row| match (&row.kind, &key) {
-                (RowKind::Item(path), RowKey::Item(id)) => {
-                    rows::item_at(&t.tree.items, path).is_some_and(|i| i.id == *id)
-                }
-                (RowKind::Off(i), RowKey::Off(id)) => t.off[*i].item_id == *id,
-                _ => false,
-            })
+        let found = keep.and_then(|id| {
+            t.rows
+                .iter()
+                .position(|row| row_id(t, row) == Some(id.as_str()))
         });
         let len = t.rows.len();
         t.cursor = found.unwrap_or(t.cursor.min(len.saturating_sub(1)));
@@ -500,7 +476,7 @@ impl App {
         let id = item.id.clone();
         let tab = &mut self.tabs[self.active];
         if tab.expanded.insert(id.clone()) {
-            self.rebuild(self.active, Some(RowKey::Item(id)));
+            self.rebuild(self.active, Some(id));
         } else {
             self.step(1);
         }
@@ -514,7 +490,7 @@ impl App {
         let has_children = !item.children.is_empty();
         let tab = &mut self.tabs[self.active];
         if has_children && tab.expanded.remove(&id) {
-            self.rebuild(self.active, Some(RowKey::Item(id)));
+            self.rebuild(self.active, Some(id));
             return;
         }
         // A leaf or a folded row: go to the parent.
@@ -752,18 +728,38 @@ impl App {
         }
     }
 
+    /// Undoes `expected`, the entry the user confirmed, only while it is still the newest live
+    /// entry: another harn may have journaled in between, and `u` must not reach that one.
     fn undo(&mut self, expected: &JournalEntry) {
-        match journal::undo(&mut self.journal, 1) {
-            Ok(entries) => {
-                let restored: Vec<String> = entries
+        let newest = match journal::history(&self.journal) {
+            Ok(entries) => entries.into_iter().find(|e| e.undone_at.is_none()),
+            Err(err) => {
+                self.error(describe(&err));
+                return;
+            }
+        };
+        if newest.as_ref().map(|e| e.id.as_str()) != Some(expected.id.as_str()) {
+            let now = newest.map_or_else(|| "no live entry".to_string(), |e| e.id);
+            let refresh = self.refresh();
+            let mut text = format!("journal changed since you confirmed ({now}); press u again");
+            if let Some(err) = refresh {
+                text.push_str(&format!(" · refresh failed: {err}"));
+            }
+            self.error(text);
+            return;
+        }
+        match journal::undo_entry(&mut self.journal, &expected.id) {
+            Ok(entry) => {
+                let restored: Vec<String> = entry
+                    .snapshots
                     .iter()
-                    .flat_map(|e| e.snapshots.iter())
                     .map(|s| s.path.display().to_string())
                     .collect();
-                let id = entries
-                    .first()
-                    .map_or(expected.id.as_str(), |e| e.id.as_str());
-                let mut text = format!("undone: journal {id} · restored {}", restored.join(", "));
+                let mut text = format!(
+                    "undone: journal {} · restored {}",
+                    entry.id,
+                    restored.join(", ")
+                );
                 if let Some(err) = self.refresh() {
                     text.push_str(&format!(" · refresh failed: {err}"));
                 }
@@ -802,6 +798,9 @@ impl App {
     /// `e` after the terminal is suspended: snapshot → `editor <file>` → diff → journal entry,
     /// then re-resolve. An edit that changed nothing journals nothing.
     pub fn edit(&mut self, item_id: &str, editor: &str) {
+        if !self.writable("e") {
+            return;
+        }
         let tab = self.tab();
         let Some(item) = model::walk(&tab.tree).find(|i| i.id == item_id).cloned() else {
             self.error(format!("e: {item_id} is no longer in the tree"));
@@ -833,7 +832,7 @@ impl App {
     /// its item when it still exists. Returns the first error.
     pub fn refresh(&mut self) -> Option<String> {
         // Taken from the rows as drawn: after the re-resolve an index path names another item.
-        let keys: Vec<Option<RowKey>> = (0..self.tabs.len()).map(|i| self.key_of(i)).collect();
+        let keys: Vec<Option<String>> = (0..self.tabs.len()).map(|i| self.key_of(i)).collect();
         let mut first_error = None;
         for tab in &mut self.tabs {
             let resolved = tab
@@ -893,6 +892,15 @@ impl App {
             }
         }
         None
+    }
+}
+
+/// The item id a row shows (an off row: the id of the item it turned off).
+fn row_id<'a>(tab: &'a Tab, row: &Row) -> Option<&'a str> {
+    match &row.kind {
+        RowKind::Item(path) => rows::item_at(&tab.tree.items, path).map(|i| i.id.as_str()),
+        RowKind::Off(i) => tab.off.get(*i).map(|o| o.item_id.as_str()),
+        RowKind::Separator(_) => None,
     }
 }
 

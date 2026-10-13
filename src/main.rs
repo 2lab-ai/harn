@@ -49,8 +49,8 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Print the table instead of opening the interactive view (the default when stdout is not
-    /// a terminal)
+    /// Print the table instead of opening the interactive view (the default unless stdin and
+    /// stdout are both a terminal)
     #[arg(long, conflicts_with = "json")]
     table: bool,
 
@@ -296,7 +296,12 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         width: std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()),
     };
     match &cli.command {
-        None if !cli.json && !cli.table && std::io::stdout().is_terminal() => {
+        None if opens_tui(
+            cli,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        ) =>
+        {
             return tui_cmd(cli, &opts);
         }
         None => {
@@ -455,7 +460,7 @@ fn tui_cmd(cli: &Cli, opts: &RenderOpts) -> Result<ExitCode> {
             .with_context(|| tree.agent.to_string())?;
         tabs.push((resolved.resolver, tree));
     }
-    harn::tui::run(
+    let exit = harn::tui::run(
         target,
         tabs,
         harn::tui::Opts {
@@ -464,7 +469,17 @@ fn tui_cmd(cli: &Cli, opts: &RenderOpts) -> Result<ExitCode> {
             readonly: cli.readonly,
         },
     )?;
-    Ok(ExitCode::SUCCESS)
+    Ok(match exit {
+        harn::tui::Exit::Quit => ExitCode::SUCCESS,
+        // The shell convention: 130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP.
+        harn::tui::Exit::Signal(n) => ExitCode::from(u8::try_from(128 + n).unwrap_or(1)),
+    })
+}
+
+/// The bare command on a terminal (keys come from stdin, frames go to stdout) without
+/// `--json` / `--table`.
+fn opens_tui(cli: &Cli, stdin_tty: bool, stdout_tty: bool) -> bool {
+    cli.command.is_none() && !cli.json && !cli.table && stdin_tty && stdout_tty
 }
 
 /// The report, then the verified tree's header (`--table`: the whole table, freed annotated) so
@@ -788,6 +803,17 @@ mod tests {
                 .unwrap()
                 .table
         );
+    }
+
+    #[test]
+    fn tui_needs_a_terminal_on_both_stdin_and_stdout() {
+        let bare = parse(&["/tmp"]).unwrap();
+        assert!(opens_tui(&bare, true, true));
+        assert!(!opens_tui(&bare, false, true), "keys piped in");
+        assert!(!opens_tui(&bare, true, false), "output piped out");
+        assert!(!opens_tui(&parse(&["--table"]).unwrap(), true, true));
+        assert!(!opens_tui(&parse(&["--json"]).unwrap(), true, true));
+        assert!(!opens_tui(&parse(&["history"]).unwrap(), true, true));
     }
 
     #[test]

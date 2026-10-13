@@ -3,7 +3,7 @@
 //! items harn turned off here (journaled, no longer in the tree). Pure: no terminal, no files.
 
 use crate::model::{Item, Tree};
-use crate::render::common::{is_trailing, request_bytes, sorted};
+use crate::render::common::{is_trailing, request_bytes, sort_key};
 use std::collections::HashSet;
 
 /// Sort key; `s` steps freed ▼ → freed ▲ → cost ▼ → cost ▲ → name ▲ → name ▼ → freed ▼.
@@ -68,26 +68,26 @@ impl Sort {
         format!("{name} {}", if descending { down } else { up })
     }
 
-    fn order(self, items: &[Item]) -> Vec<&Item> {
-        let mut rows = match self.key {
-            SortKey::Freed => sorted(items),
+    /// `items` with their index among their siblings, in this order (stable; reversed = the
+    /// exact reverse of the natural order). Freed is `render::common::sorted`'s key.
+    fn order(self, items: &[Item]) -> Vec<Sorted<'_>> {
+        let mut rows: Vec<Sorted> = items.iter().enumerate().collect();
+        match self.key {
+            SortKey::Freed => rows.sort_by_key(|(_, item)| std::cmp::Reverse(sort_key(item))),
             SortKey::Cost => {
-                let mut rows: Vec<&Item> = items.iter().collect();
-                rows.sort_by_key(|item| std::cmp::Reverse(request_bytes(&item.cost)));
-                rows
+                rows.sort_by_key(|(_, item)| std::cmp::Reverse(request_bytes(&item.cost)))
             }
-            SortKey::Name => {
-                let mut rows: Vec<&Item> = items.iter().collect();
-                rows.sort_by_key(|item| item.label.to_lowercase());
-                rows
-            }
-        };
+            SortKey::Name => rows.sort_by_key(|(_, item)| item.label.to_lowercase()),
+        }
         if self.reversed {
             rows.reverse();
         }
         rows
     }
 }
+
+/// An item with its index among its siblings.
+type Sorted<'a> = (usize, &'a Item);
 
 /// An item turned off by a live journal entry for this target, gone from the resolved tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,22 +183,10 @@ pub fn flatten(
     filter: Option<&Filter>,
     off: &[OffItem],
 ) -> Vec<Row> {
-    let mut main: Vec<(usize, &Item)> = Vec::new();
-    let mut trailing: Vec<(usize, &Item)> = Vec::new();
-    let index = |item: &Item| {
-        tree.items
-            .iter()
-            .position(|i| std::ptr::eq(i, item))
-            .expect("an item of this tree")
-    };
-    for item in sort.order(&tree.items) {
-        let slot = (index(item), item);
-        if is_trailing(item) {
-            trailing.push(slot);
-        } else {
-            main.push(slot);
-        }
-    }
+    let (trailing, main): (Vec<Sorted>, Vec<Sorted>) = sort
+        .order(&tree.items)
+        .into_iter()
+        .partition(|(_, item)| is_trailing(item));
 
     let mut rows = Vec::new();
     for (i, item) in main {
@@ -262,12 +250,7 @@ fn push(
     if item.children.is_empty() || !expanded.contains(&item.id) {
         return;
     }
-    for child in sort.order(&item.children) {
-        let i = item
-            .children
-            .iter()
-            .position(|c| std::ptr::eq(c, child))
-            .expect("a child of this item");
+    for (i, child) in sort.order(&item.children) {
         let mut child_path = path.clone();
         child_path.push(i);
         push(
@@ -311,6 +294,114 @@ pub fn path_of(items: &[Item], id: &str) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Agent, Cost, Kind, Layer, Mode, Origin};
+    use std::path::PathBuf;
+
+    fn item(id: &str, mode: Mode, children: Vec<Item>) -> Item {
+        Item {
+            id: id.to_string(),
+            label: id.to_string(),
+            kind: Kind::Skill,
+            origin: Origin {
+                layer: Layer::Project,
+                path: None,
+                setting: None,
+                plugin: None,
+                why: Vec::new(),
+            },
+            mode,
+            cost: Cost::default(),
+            knobs: Vec::new(),
+            freed: None,
+            signal: None,
+            last_used: None,
+            children,
+        }
+    }
+
+    fn tree(items: Vec<Item>) -> Tree {
+        Tree {
+            agent: Agent::ClaudeCode,
+            target_dir: PathBuf::from("/repo"),
+            agent_version: None,
+            rules_verified_against: "0.0.0".to_string(),
+            tool_search: None,
+            signals: Vec::new(),
+            items,
+            predicted_known: 0,
+            unknown_rows: 0,
+            observed_body: None,
+            warnings: Vec::new(),
+            home: None,
+            observed_regions: Vec::new(),
+            tool_search_cause: None,
+        }
+    }
+
+    fn shape(rows: &[Row]) -> Vec<(RowKind, usize)> {
+        rows.iter().map(|r| (r.kind.clone(), r.depth)).collect()
+    }
+
+    #[test]
+    fn sorted_and_filtered_rows_carry_the_stored_index_paths() {
+        // Stored order: zeta, alpha (with kids "kx-b", "kx-a", "other"), runtime-x, mid.
+        let t = tree(vec![
+            item("zeta", Mode::Always, Vec::new()),
+            item(
+                "alpha",
+                Mode::Always,
+                vec![
+                    item("kx-b", Mode::Always, Vec::new()),
+                    item("kx-a", Mode::Always, Vec::new()),
+                    item("other", Mode::Always, Vec::new()),
+                ],
+            ),
+            item("runtime-x", Mode::Runtime, Vec::new()),
+            item("mid", Mode::Always, Vec::new()),
+        ]);
+        let expanded: HashSet<String> = HashSet::from(["alpha".to_string()]);
+        let name = Sort {
+            key: SortKey::Name,
+            reversed: false,
+        };
+        let item_row = |path: &[usize], depth| (RowKind::Item(path.to_vec()), depth);
+        assert_eq!(
+            shape(&flatten(&t, &expanded, name, None, &[])),
+            [
+                item_row(&[1], 0),
+                item_row(&[1, 1], 1),
+                item_row(&[1, 0], 1),
+                item_row(&[1, 2], 1),
+                item_row(&[3], 0),
+                item_row(&[0], 0),
+                (RowKind::Separator(TRAILING_TITLE), 0),
+                item_row(&[2], 0),
+            ]
+        );
+        // Filtered on "x": the parent of the matches stays, "other", "zeta", "mid" go.
+        let filter = Filter::new("x").unwrap();
+        let reversed = Sort {
+            reversed: true,
+            ..name
+        };
+        let rows = flatten(&t, &expanded, reversed, Some(&filter), &[]);
+        assert_eq!(
+            shape(&rows),
+            [
+                item_row(&[1], 0),
+                item_row(&[1, 0], 1),
+                item_row(&[1, 1], 1),
+                (RowKind::Separator(TRAILING_TITLE), 0),
+                item_row(&[2], 0),
+            ]
+        );
+        for row in &rows {
+            if let RowKind::Item(path) = &row.kind {
+                let found = item_at(&t.items, path).unwrap();
+                assert_eq!(path_of(&t.items, &found.id).as_ref(), Some(path));
+            }
+        }
+    }
 
     #[test]
     fn sort_cycle_visits_every_key_both_ways_and_returns() {

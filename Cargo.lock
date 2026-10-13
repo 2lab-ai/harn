@@ -590,9 +590,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "similar",
  "time",
  "toml_edit",
+ "unicode-segmentation",
+ "unicode-width",
  "walkdir",
 ]
 
