@@ -167,7 +167,8 @@ impl App {
         let tabs = tabs
             .into_iter()
             .map(|(resolver, tree)| {
-                let screen = model::build(&tree, &[], &HashMap::new(), Sort::default());
+                let screen =
+                    model::build_with(&tree, &[], &HashMap::new(), Sort::default(), opts.readonly);
                 Tab {
                     resolver,
                     tree,
@@ -673,10 +674,10 @@ impl App {
 
     /// Rebuilds every tab's screen from its tree and journal state; cursors keep their lines.
     fn rebuild_screens(&mut self) {
-        let sort = self.sort;
+        let (sort, read_only) = (self.sort, self.opts.readonly);
         let keys: Vec<Option<String>> = (0..self.tabs.len()).map(|i| self.key_of(i)).collect();
         for tab in &mut self.tabs {
-            tab.screen = model::build(&tab.tree, &tab.off, &tab.journaled, sort);
+            tab.screen = model::build_with(&tab.tree, &tab.off, &tab.journaled, sort, read_only);
         }
         for (i, keep) in keys.into_iter().enumerate() {
             self.rebuild(i, keep);

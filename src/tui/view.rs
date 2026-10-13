@@ -1025,7 +1025,7 @@ impl App {
         let note = self
             .opts
             .readonly
-            .then(|| indent_wrap("", "read-only: d o u e are off", inner));
+            .then(|| indent_wrap("", "read-only: d, o, u and e are off", inner));
         if need <= inner {
             return rows
                 .iter()
@@ -1367,10 +1367,12 @@ fn is_number(word: &str) -> bool {
             .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
 }
 
-/// `1`, `32`, `(2`: a count from 1 to 999 (a year or an id is no count).
+/// `1`, `32`, `(2`: a count from 1 to 999 (a year, an id, `0` or `00` is no count).
 fn is_count(word: &str) -> bool {
     let digits = word.trim_start_matches('(');
-    (1..=3).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) && digits != "0"
+    (1..=3).contains(&digits.len())
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && digits.parse::<u32>().is_ok_and(|n| (1..=999).contains(&n))
 }
 
 /// `KB`, `KB:`, `B;`, `%)`: a size or percent unit, with what punctuation follows it.
@@ -1523,6 +1525,8 @@ mod tests {
         );
         // Not a count: a year, an arrow after a number.
         assert_eq!(wrap_words("in 2026 now", 7), ["in 2026", "now"]);
+        assert_eq!(wrap_words("00 items", 5), ["00", "items"]);
+        assert_eq!(wrap_words("000 x", 4), ["000", "x"]);
         assert_eq!(wrap_words("(83 → 77)", 4), ["(83", "→", "77)"]);
     }
 

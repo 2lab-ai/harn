@@ -504,11 +504,24 @@ pub fn build(
     journaled: &HashMap<String, String>,
     sort: Sort,
 ) -> Screen {
+    build_with(tree, off, journaled, sort, false)
+}
+
+/// [`build`] for a session started with `--readonly` when `read_only`: the sentences say what
+/// `d` would do (`d would turn it off …`), and promise no `u`.
+pub fn build_with(
+    tree: &Tree,
+    off: &[OffItem],
+    journaled: &HashMap<String, String>,
+    sort: Sort,
+    read_only: bool,
+) -> Screen {
     let b = Builder {
         tree,
         places: Places::of(tree),
         total: denominator(tree),
         journaled,
+        read_only,
     };
     let mut screen = Screen {
         title: b.title(),
@@ -534,6 +547,8 @@ struct Builder<'a> {
     places: Places,
     total: u64,
     journaled: &'a HashMap<String, String>,
+    /// `--readonly`: `d` would act, and does not.
+    read_only: bool,
 }
 
 /// `Claude Code`, `Codex`.
@@ -1086,8 +1101,10 @@ impl Builder<'_> {
                         brings: "MEMORY.md (auto-memory) loads in every session here, up to its \
                              cap."
                             .to_string(),
-                        action: "Open it (→); d turns auto-memory off for this project only."
-                            .to_string(),
+                        action: format!(
+                            "Open it (→); {}",
+                            self.d_clause("turns auto-memory off for this project only")
+                        ),
                         ..Detail::default()
                     },
                 ),
@@ -1104,8 +1121,10 @@ impl Builder<'_> {
                            ~/.claude/CLAUDE.md"
                             .to_string(),
                         brings: "Each one loads in full in every first request.".to_string(),
-                        action: "Open the group (→); d leaves a file out for this project only."
-                            .to_string(),
+                        action: format!(
+                            "Open the group (→); {}",
+                            self.d_clause("leaves a file out for this project only")
+                        ),
                         ..Detail::default()
                     },
                 ),
@@ -1341,11 +1360,13 @@ impl Builder<'_> {
                 what,
                 brings,
                 action: if listing.is_some() {
-                    "Open it (→) to see the entries by owner; d on an entry turns that one off."
+                    format!(
+                        "Open it (→) to see the entries by owner; {}",
+                        self.d_clause_on("on an entry", "turns that one off")
+                    )
                 } else {
-                    "Open it (→); o on an entry turns it back on."
-                }
-                .to_string(),
+                    "Open it (→); o on an entry turns it back on.".to_string()
+                },
                 ..Detail::default()
             },
         }
@@ -1504,7 +1525,10 @@ impl Builder<'_> {
                 what: format!("{name} · {}", count(n, word.trim_end_matches('s'))),
                 brings: about.to_string(),
                 action: match state {
-                    State::On => "Open it (→) and pick one; d turns that one off.".to_string(),
+                    State::On => format!(
+                        "Open it (→) and pick one; {}",
+                        self.d_clause("turns that one off")
+                    ),
                     _ => "They cannot be turned off.".to_string(),
                 },
                 ..Detail::default()
@@ -1688,7 +1712,10 @@ impl Builder<'_> {
                 self.state(p)
             }
             None => {
-                detail.action = "Open it (→) and pick one; d turns that one off.".to_string();
+                detail.action = format!(
+                    "Open it (→) and pick one; {}",
+                    self.d_clause("turns that one off")
+                );
                 if any_on(&children) {
                     State::On
                 } else {
@@ -1880,12 +1907,15 @@ impl Builder<'_> {
                 } else {
                     format!(" ({file})")
                 };
-                detail.action = format!("d {verb} for this project only{file}.");
+                detail.action = self.d_clause(&format!("{verb} for this project only{file}"));
                 if it != "it" {
                     detail.action = detail.action.replacen(" it ", &format!(" {it} "), 1);
                 }
                 detail.saves = self.saves(item, listing);
-                detail.undo = "Reversible with u.".to_string();
+                // Under `--readonly` u does nothing: no promise of it.
+                if !self.read_only {
+                    detail.undo = "Reversible with u.".to_string();
+                }
             }
             (None, Some((_, scope))) => {
                 detail.action = format!(
@@ -1897,6 +1927,34 @@ impl Builder<'_> {
                 detail.action = format!("It cannot be turned off: {}.", fixed_reason(item));
             }
         }
+    }
+
+    /// `d turns it off for …` as a sentence: `d <does>.`; under `--readonly`, `d would <do>.`
+    /// — the header, the key bar and the `?` card say read-only, and a second clause here would
+    /// push the saving out of a small panel (`does` starts with a verb in the third person:
+    /// `turns`, `leaves`, `hides`, `removes`, `moves`).
+    fn d_clause(&self, does: &str) -> String {
+        self.d_clause_on("", does)
+    }
+
+    /// [`Self::d_clause`] with words between `d` and the verb (`d on an entry turns …`).
+    fn d_clause_on(&self, on: &str, does: &str) -> String {
+        let on = if on.is_empty() {
+            String::new()
+        } else {
+            format!(" {on}")
+        };
+        if !self.read_only {
+            return format!("d{on} {does}.");
+        }
+        let (verb, rest) = does.split_once(' ').unwrap_or((does, ""));
+        let verb = verb.strip_suffix('s').unwrap_or(verb);
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(" {rest}")
+        };
+        format!("d{on} would {verb}{rest}.")
     }
 
     /// `turns it off`, `turns off the whole slack plugin`, `turns off every hook`.
@@ -2321,11 +2379,18 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
 
 /// The JSON pointer of an origin link's `#…` part and what follows it. A pointer keeps the
 /// spaces, parentheses and ` = ` of the directory names in it (only `/` and `~` are escaped), so
-/// the tail is read from the right, its form decided first. harn writes two: `<pointer>
-/// (<note>)` — the text ends in `)` and what follows its last ` (` has no `=` and no `/` (a
-/// JSON value never ends in an unquoted `)`) — and `<pointer> = <value>`, split at the last
-/// ` = `. Anything else is all pointer.
+/// the tail is read from the right, its form decided first. harn writes two: `<pointer> =
+/// <value>` and `<pointer> (<note>)`. A value that is a JSON string (the text ends in an
+/// unescaped `"`) is read back to its opening quote, and the ` = ` right before it is the
+/// separator, whatever the string holds. Else a note — the text ends in `)` and what follows
+/// its last ` (` has no `=` and no `/` (a JSON value never ends in an unquoted `)`) — and then
+/// the last ` = `. Anything else is all pointer.
 pub fn split_link(rest: &str) -> (&str, &str) {
+    if let Some(open) = string_tail(rest) {
+        if let Some(at) = rest[..open].strip_suffix(" = ").map(str::len) {
+            return (&rest[..at], &rest[at + 1..]);
+        }
+    }
     if rest.ends_with(')') {
         if let Some(at) = rest.rfind(" (") {
             if !rest[at..].contains(['=', '/']) {
@@ -2337,6 +2402,27 @@ pub fn split_link(rest: &str) -> (&str, &str) {
         return (&rest[..at], rest[at + 1..].trim_start());
     }
     (rest, "")
+}
+
+/// The byte where the JSON string `text` ends with opens: `text` ends in an unescaped `"` and
+/// this is the unescaped `"` before it (a quote after an odd run of `\` is escaped). None when
+/// `text` ends in no such string.
+fn string_tail(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let escaped = |at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    let last = bytes.len().checked_sub(1)?;
+    if bytes[last] != b'"' || escaped(last) {
+        return None;
+    }
+    (0..last).rev().find(|&i| bytes[i] == b'"' && !escaped(i))
 }
 
 /// Whom a setting applies to.
@@ -2499,7 +2585,10 @@ pub fn off_card(
             human_label(tree, &i.label, i.kind, &places)
         }
     };
-    let (start, later): (Vec<&Item>, Vec<&Item>) = gone.iter().partition(|i| at_start(i));
+    // At start (what the header counts), later (runs or is read later; the status line runs
+    // locally), already off (loaded nothing before the change: never counted).
+    let (start, rest): (Vec<&Item>, Vec<&Item>) = gone.iter().partition(|i| at_start(i));
+    let (off, later): (Vec<&Item>, Vec<&Item>) = rest.into_iter().partition(|i| already_off(i));
     // `alpha, 2 skills, 1 MCP server`: the picked item by name, the rest counted by kind.
     let summary = |items: &[&Item]| -> String {
         let mut parts: Vec<String> = items
@@ -2524,11 +2613,14 @@ pub fn off_card(
     if !later.is_empty() {
         groups.push(format!("{} later ({})", later.len(), summary(&later)));
     }
-    let leaves = if groups.is_empty() {
+    let mut leaves = if groups.is_empty() {
         "nothing that loads".to_string()
     } else {
         groups.join(", ")
     };
+    if !off.is_empty() {
+        leaves.push_str(&format!(" · {} already off", off.len()));
+    }
     // `UserPromptSubmit (hook)`: the kind word once. The status line has no row to point at.
     let line = |i: &Item| {
         let word = kind_word(i.kind);
@@ -2553,6 +2645,10 @@ pub fn off_card(
         if !later.is_empty() {
             leave_list.push(format!("when used / later ({})", later.len()));
             leave_list.extend(later.iter().map(|i| line(i)));
+        }
+        if !off.is_empty() {
+            leave_list.push(format!("already off ({})", off.len()));
+            leave_list.extend(off.iter().map(|i| line(i)));
         }
         if !added.is_empty() {
             leave_list.push(format!("appears ({})", added.len()));
@@ -2623,6 +2719,32 @@ fn at_start(item: &Item) -> bool {
     matches!(item.mode, Mode::Always | Mode::Advertised)
 }
 
+/// Loaded nothing before the change (mode none), the status line aside: it runs locally and
+/// stops with the hooks.
+fn already_off(item: &Item) -> bool {
+    item.mode == Mode::None && item.kind != Kind::StatusLine
+}
+
+/// Whether an item of `kind` (labelled `label`) that a change makes appear would load at start,
+/// by its kind: it is not in the tree yet, so its mode is not known (the follow-up list of what
+/// leaves and appears on `ActionPlan` would carry it). A hook loads at start when its event
+/// prints into the request, an MCP server unless tool search defers it.
+fn appears_at_start(kind: Kind, label: &str, tree: &Tree) -> bool {
+    match kind {
+        Kind::Hook => [
+            "SessionStart",
+            "UserPromptSubmit",
+            "UserPromptExpansion",
+            "PostModelSwitch",
+        ]
+        .iter()
+        .any(|event| label.starts_with(&format!("{event} hook"))),
+        Kind::McpServer | Kind::McpTool => tree.tool_search != Some(true),
+        Kind::PermissionRule | Kind::StatusLine | Kind::Unresolved => false,
+        _ => true,
+    }
+}
+
 /// `item` and everything under it.
 fn subtree(item: &Item) -> Vec<&Item> {
     let mut out = vec![item];
@@ -2642,6 +2764,7 @@ fn leaving<'t>(plan: &ActionPlan, tree: &'t Tree) -> (Vec<&'t Item>, Vec<String>
     let places = Places::of(tree);
     let mut side: Vec<&'t Item> = Vec::new();
     let mut added: Vec<String> = Vec::new();
+    let mut appeared_start = 0;
     let mut used: HashSet<&str> = HashSet::new();
     for effect in &plan.side_effects {
         let Some((label, kind, leaves)) = parse_effect(effect) else {
@@ -2650,6 +2773,7 @@ fn leaving<'t>(plan: &ActionPlan, tree: &'t Tree) -> (Vec<&'t Item>, Vec<String>
         if !leaves {
             let shown = human_label(tree, &label, kind, &places);
             added.push(format!("{shown} ({})", kind_word(kind)));
+            appeared_start += usize::from(appears_at_start(kind, &label, tree));
             continue;
         }
         let found = model::walk(tree)
@@ -2681,17 +2805,17 @@ fn leaving<'t>(plan: &ActionPlan, tree: &'t Tree) -> (Vec<&'t Item>, Vec<String>
             }
         }
     }
-    // The header's drop is only what the side effects take from the first request: the picked
-    // items stay where they are. (What appears is not in this tree, so its mode is unknown; a
-    // new permission list, the usual one, loads nothing.) An inference from `items_after`: a
-    // structured list of what leaves (ids and modes, picked items included) on `ActionPlan`
-    // would make it exact — a follow-up.
+    // The picked items stay where they are (a denied agent stays in the roster) when the count
+    // after is the count before less what the side effects take, plus what appears at start
+    // (by its kind: see `appears_at_start`). An inference from `items_after`: a structured list
+    // of what leaves and appears (ids and modes, picked items included) on `ActionPlan` would
+    // make it exact — a follow-up.
     let before = model::walk(tree).filter(|i| at_start(i)).count();
     let side_start = side.iter().filter(|i| at_start(i)).count();
     let own_start = own.iter().filter(|i| at_start(i)).count();
     let stays = plan.items_after > 0
         && own_start > 0
-        && before.saturating_sub(plan.items_after) == side_start;
+        && before + appeared_start == plan.items_after + side_start;
     if stays {
         own.clear();
     }
@@ -2969,6 +3093,20 @@ mod tests {
         assert_eq!(
             split_link("/env/NOTE = \"a (b)\""),
             ("/env/NOTE", "= \"a (b)\"")
+        );
+        // A ` = ` inside a quoted value is the value's: the separator is the one before it.
+        assert_eq!(
+            split_link("/env/NOTE = \"a = b\""),
+            ("/env/NOTE", "= \"a = b\"")
+        );
+        assert_eq!(
+            split_link("/projects/~1home~1me~1my app/env/X = \"x (y) = z\""),
+            ("/projects/~1home~1me~1my app/env/X", "= \"x (y) = z\"")
+        );
+        // An escaped quote inside the value does not open it.
+        assert_eq!(
+            split_link(r#"/env/Q = "say \"hi\" = ok""#),
+            ("/env/Q", r#"= "say \"hi\" = ok""#)
         );
     }
 
@@ -3325,6 +3463,92 @@ mod tests {
             observed_regions: Vec::new(),
             tool_search_cause: None,
         }
+    }
+
+    /// A plan turning `picked` off through its first knob, with these side effects and this
+    /// count at start after it.
+    fn plan_off(picked: &Item, side_effects: &[&str], items_after: usize) -> ActionPlan {
+        ActionPlan {
+            target_dir: PathBuf::from("/home/me/2lab.ai/zbrain"),
+            agent: Agent::ClaudeCode,
+            agent_version: None,
+            ops: vec![crate::plan::PlannedOp {
+                item_id: picked.id.clone(),
+                knob: picked.knobs[0].clone(),
+                file: None,
+                hash_before: None,
+                reason: None,
+            }],
+            predicted_before: 0,
+            predicted_after: 0,
+            items_after,
+            freed: crate::model::Freed {
+                known: 0,
+                delta_unknown: false,
+                is_estimate: false,
+            },
+            side_effects: side_effects.iter().map(|e| e.to_string()).collect(),
+            warnings: Vec::new(),
+            diff: String::new(),
+        }
+    }
+
+    fn count_at_start(tree: &Tree) -> usize {
+        model::walk(tree).filter(|i| at_start(i)).count()
+    }
+
+    #[test]
+    fn what_was_already_off_is_its_own_group_and_never_counted() {
+        let mut tree = synthetic();
+        let mut hook = item(
+            "slack-stop",
+            "Stop hook · 1 cmd · plugin slack",
+            Kind::Hook,
+            Some(SLACK),
+            Layer::Plugin,
+            None,
+        );
+        hook.mode = Mode::None;
+        hook.signal = Some(OFF_ALL_HOOKS.to_string());
+        tree.items[0].children.push(hook);
+        let picked = tree.items[0].clone();
+        let plan = plan_off(&picked, &[], count_at_start(&tree) - 1);
+        let card = off_card(&plan, &tree, &picked, "slack", "→", None);
+        assert_eq!(card.leaves, "1 at start (slack) · 1 already off");
+        assert_eq!(
+            card.leave_list,
+            [
+                "at start (1)",
+                "  slack (plugin)",
+                "already off (1)",
+                "  Stop (hook)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_picked_item_that_goes_is_listed_even_when_another_appears() {
+        let tree = synthetic();
+        let picked = tree.items[4].children[2].clone();
+        assert_eq!(picked.label, "mine");
+        // `mine` goes, a skill of the same count appears: the count at start does not move.
+        let before = count_at_start(&tree);
+        let plan = plan_off(&picked, &["mine-too (skill) appears"], before);
+        let card = off_card(&plan, &tree, &picked, "mine", "→", None);
+        assert_eq!(card.leaves, "1 at start (mine)");
+        assert_eq!(
+            card.leave_list,
+            [
+                "at start (1)",
+                "  mine (skill)",
+                "appears (1)",
+                "  mine-too (skill)"
+            ]
+        );
+        // With nothing appearing and the count unmoved, the picked item stays (a denied agent).
+        let plan = plan_off(&picked, &[], before);
+        let card = off_card(&plan, &tree, &picked, "mine", "→", None);
+        assert_eq!(card.leaves, "nothing that loads");
     }
 
     #[test]

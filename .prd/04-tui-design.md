@@ -73,7 +73,8 @@ Rules that produce it:
   Built-in rows say why they cannot be turned off. Group rows describe the group.
 - **Key bar in words**, only the keys valid now. `d turn off` (not `off`), `u undo`, `→← open/close`.
   Under `--readonly` d, o, u and e are absent (the `?` card still lists them, with the line
-  `read-only: d o u e are off`; the header says `read-only`); the Built-in group row has no `d`.
+  `read-only: d, o, u and e are off`; the header says `read-only`; the detail says what `d`
+  would do — "d would turn it off …" — and promises no `u`); the Built-in group row has no `d`.
 - **Footer honesty**: `345 items · 5 shown · filter: none` only when a filter or fold hides rows
   that would otherwise be visible; otherwise no footer (the panel is the footer).
 

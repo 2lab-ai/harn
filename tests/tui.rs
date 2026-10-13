@@ -1190,28 +1190,90 @@ fn the_bare_question_mark_guard_catches_a_size_cell_anywhere_in_a_list_row() {
     ]));
 }
 
-/// The `w` card for `name` is drawn: its title whole, or — wider than the 80-column card —
-/// cut at the end with `…`, never anywhere else.
-fn where_card_shown(frame: &[String], name: &str) {
-    let title = format!("Where {name} comes from");
-    // An 80-column card: 78 inside, the title with a space each side.
-    if title.chars().count() <= 76 {
-        card(frame, &title);
-        return;
+/// The title an 80-column card draws for `title`, by the view's rule (`draw_box` →
+/// `cut_right` at the card's inside less a space each side, 76 columns): whole when it fits,
+/// else as many graphemes as fit in 75 columns and `…`.
+fn shown_title(title: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    const ROOM: usize = 76;
+    if title.width() <= ROOM {
+        return title.to_string();
     }
+    let mut out = String::new();
+    for g in title.graphemes(true) {
+        if out.width() + g.width() > ROOM - 1 {
+            break;
+        }
+        out.push_str(g);
+    }
+    out.push('…');
+    out
+}
+
+/// The `w` card for `name` in `frame`: Ok when its top border shows exactly the title the view
+/// draws for that name, cut or not; Err saying what it shows instead.
+fn where_card_matches(frame: &[String], name: &str) -> Result<(), String> {
+    let expected = shown_title(&format!("Where {name} comes from"));
+    // The card's border, without the blank band either side of it.
     let top = frame
         .iter()
-        .map(|l| l.trim_start())
+        .map(|l| l.trim())
         .find(|l| l.starts_with("┌ Where "))
-        .unwrap_or_else(|| panic!("no w card for {name}:\n{}", frame.join("\n")));
+        .ok_or_else(|| format!("no w card for {name}"))?;
+    // `┌ <title> ─…─┐`, or `┌ <title> ┐` when the title fills the border.
     let shown = top
-        .trim_start_matches("┌ ")
-        .split(" ─")
-        .next()
+        .strip_prefix("┌ ")
         .unwrap()
-        .trim_end_matches(['┐', ' ']);
-    let head = shown.strip_suffix('…').unwrap_or_else(|| panic!("{top}"));
-    assert!(title.starts_with(head), "{top} is not the start of {title}");
+        .trim_end_matches(['┐', '─'])
+        .strip_suffix(' ')
+        .ok_or_else(|| format!("no space after the title: {top}"))?;
+    if shown == expected {
+        Ok(())
+    } else {
+        Err(format!("{shown:?} is not {expected:?}"))
+    }
+}
+
+/// [`where_card_matches`], or the frame and why not.
+fn where_card_shown(frame: &[String], name: &str) {
+    if let Err(why) = where_card_matches(frame, name) {
+        panic!("{why}:\n{}", frame.join("\n"));
+    }
+}
+
+#[test]
+fn the_where_title_oracle_takes_only_the_exact_title() {
+    let border = |title: &str| {
+        let top = format!("┌ {title} ");
+        let fill = 80usize.saturating_sub(top.chars().count() + 1);
+        vec![format!("{top}{}┐", "─".repeat(fill))]
+    };
+    let long = format!("~/.claude/projects/{}/memory/MEMORY.md", "x".repeat(70));
+    let exact = shown_title(&format!("Where {long} comes from"));
+    assert_eq!(
+        exact.chars().count(),
+        76,
+        "a cut title fills the allowed width"
+    );
+    assert!(exact.ends_with('…'));
+    assert!(where_card_matches(&border(&exact), &long).is_ok());
+    // Undersized cuts of the same title.
+    for short in ["Where …", "Where ~…", &format!("{}…", &exact[..40])] {
+        assert!(
+            where_card_matches(&border(short), &long).is_err(),
+            "{short}"
+        );
+    }
+    // Another long name sharing the start: its cut title differs where the two differ.
+    let other = format!("~/.claude/projects/{}/memory/MEMORY.md", "y".repeat(70));
+    assert!(where_card_matches(&border(&exact), &other).is_err());
+    // A title filling the border with no space before `┐` is no title the view draws.
+    let tight = format!("┌ {exact}┐");
+    assert!(where_card_matches(&[tight], &long).is_err());
+    assert!(where_card_matches(&border("Where alpha comes from"), "alpha-other").is_err());
+    assert!(where_card_matches(&border("Where alpha-other comes from"), "alpha").is_err());
+    assert!(where_card_matches(&border("Where alpha comes from"), "alpha").is_ok());
 }
 
 /// What `d` must do on a line, decided from the model before any key acts on it.
@@ -1501,6 +1563,26 @@ fn readonly_refuses_every_write_key_and_leaves_it_out_of_the_key_bar() {
     let before = snapshot(&f.root);
     let mut app = app_with(&f, true);
     assert!(app.select(ALPHA));
+    // The detail says what d would do (the header, key bar and ? card say read-only); no "u"
+    // promise; and at 80×24 the saving still fits.
+    let detail = panel(&screen(&app, 120, 40)).join(" ");
+    assert!(
+        detail.contains("d would turn it off for this project only (.claude/settings.local.json)."),
+        "{detail}"
+    );
+    assert!(!detail.contains("this session is read-only"), "{detail}");
+    assert!(!detail.contains("Reversible with u"), "{detail}");
+    assert!(!detail.contains("d turns"), "{detail}");
+    let small = panel(&screen(&app, 80, 24)).join(" ");
+    assert!(small.contains("Turning it off frees 0.1 KB"), "{small}");
+    // Group rows too.
+    assert!(app.select_group("Memory"));
+    let detail = panel(&screen(&app, 120, 40)).join(" ");
+    assert!(
+        detail.contains("d would turn auto-memory off for this project only."),
+        "{detail}"
+    );
+    assert!(app.select(ALPHA));
     for key in ['d', ' ', 'o', 'u', 'e'] {
         press(&mut app, KeyCode::Char(key));
         let m = app.message().expect("a message").clone();
@@ -1516,7 +1598,7 @@ fn readonly_refuses_every_write_key_and_leaves_it_out_of_the_key_bar() {
             " read-only: d would change files; harn was started with --readonly",
             " alpha · plugin from the market-one marketplace · enabled for every project",
             " Brings 2 skills, 1 MCP server and 1 hook.",
-            " d turns it off for this project only (.claude/settings.local.json).",
+            " d would turn it off for this project only (.claude/settings.local.json).",
         ]
     );
     assert!(!text(&app, 80, 24).contains('…'));
@@ -1548,7 +1630,7 @@ fn readonly_refuses_every_write_key_and_leaves_it_out_of_the_key_bar() {
     press(&mut app, KeyCode::Char('?'));
     let keys = card(&screen(&app, 80, 24), "Keys").join("\n");
     assert!(keys.contains("d    turn off"), "{keys}");
-    assert!(keys.contains(" read-only: d o u e are off"), "{keys}");
+    assert!(keys.contains(" read-only: d, o, u and e are off"), "{keys}");
 }
 
 #[test]
