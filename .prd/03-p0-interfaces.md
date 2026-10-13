@@ -178,3 +178,32 @@ Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
 - Deferred to WU-F (integration): selector 4th tier (unique substring, so `plugin:slack` matches
   `…/plugin:slack:slack`), `--assume-bytes-per-token`, exit-code collision notes (clap usage = 2 =
   ambiguous selector; generic error = 1 = verify diff).
+
+## Amendments after WU-D (2026-10-13) — ids and bytes the resolver must match
+
+- `Capture.init: Option<InitEvent>`; `InitEvent.cwd`, `.session_id`; exports `oracle::{find_init_event,
+  settings_fingerprint, InitMcpServer, InitPlugin}`, `oracle::claude::{names, NAME_ONLY, LAUNCH_ARGS}`,
+  `oracle::capture::LLMUX_SCAN_LIMIT`, `Region::{SEP, group}`, `verify::{CONTENT_TOLERANCE, gated, conformance}`.
+- **Fixed ids (Layer::Builtin unless noted)** — import `oracle::claude::names`: SystemPrompt `system`
+  (children `system/billing-header`, `system/identity`, `system/harness-rules`); SkillListing `skills`;
+  AgentRoster `agents`; EnvBlock `environment` and `date`; GitBlock `gitStatus`; Attribution
+  `userEmail`; MCP tools `mcp-tool/<layer>/<server>/<tool>`; built-in tools by the body's names
+  (`Agent`, not init's `Task`); plugins by `name@marketplace`; Memory = Layer::User; Instruction and
+  Memory items also join by realpath with the layer ignored. Listing names drop a display alias
+  (`x (alias)` → `x`).
+- **Predicted bytes for content conformance (tolerance 2 B)**: instruction/memory section =
+  `len("Contents of <realpath> (<desc>):") + 3 + file bytes`, where **YAML frontmatter plus the
+  blank line after it is stripped** before embedding (PRINCIPLES.md: 4,557 → 4,261). Descriptions:
+  "user's private global instructions for all projects" (user) · "project instructions, checked into
+  the codebase" (project) · "…not checked in" (local) · "user's auto-memory, persists across
+  conversations" (memory). Listing and roster entries include their trailing newline; a multi-line
+  entry runs to the next `- name`; roster lines carry ` (Tools: …)`. The skill listing also lists
+  slash commands (verify joins a listing entry to a static Skill or Command of that name). Skills
+  with `disable-model-invocation: true` never appear → mode OnDemand (not gated).
+- **cwd evidence** in a capture: Environment "Primary working directory" → init `cwd` → deepest
+  project CLAUDE.md dir; gitStatus has no cwd line (spec §Source of truth corrected in v3.1).
+- Hook stdout is never promoted (no join key between a config hook and its stdout); hooks stay `?`
+  and are not gated. Version mismatch tree↔capture = warning; cwd mismatch = `passed=false`.
+- Spec §Problem byte corrections (v3.1): SessionStart hook 3,456 B (not 3,444 chars), MEMORY.md
+  23,429 + 18 B closing tag as wrapper, `messages[0]` block 1 = wrapper 107 + userEmail 276 +
+  gitStatus 3,166.
