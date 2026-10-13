@@ -1,0 +1,25 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:3456"
+  },
+  "enabledPlugins": {
+    "alpha@market-one": true,
+    "beta@market-two": true,
+    "gamma@market-two": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "echo session-context" }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "true" }]
+      }
+    ]
+  },
+  "statusLine": { "type": "command", "command": "echo status" }
+}

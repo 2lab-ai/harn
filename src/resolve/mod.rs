@@ -30,8 +30,8 @@ impl Resolver for ClaudeCode {
         Self::VERIFIED_AGAINST
     }
 
-    fn resolve(&self, _target: &Target, _overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
-        Err(anyhow!("not implemented: WU-B"))
+    fn resolve(&self, target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
+        claude::resolve(target, overlay)
     }
 }
 

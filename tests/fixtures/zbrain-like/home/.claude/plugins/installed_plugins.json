@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "plugins": {
+    "alpha@market-one": [
+      {
+        "scope": "user",
+        "installPath": "@HOME@/.claude/plugins/cache/market-one/alpha/1.0.0",
+        "version": "1.0.0"
+      }
+    ],
+    "beta@market-two": [
+      {
+        "scope": "user",
+        "installPath": "@HOME@/.claude/plugins/cache/market-two/beta/2.0.0",
+        "version": "2.0.0"
+      }
+    ],
+    "gamma@market-two": [
+      {
+        "scope": "user",
+        "installPath": "@HOME@/.claude/plugins/cache/market-two/gamma/0.1.0",
+        "version": "0.1.0"
+      }
+    ]
+  }
+}
