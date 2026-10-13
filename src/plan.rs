@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlannedOp {
@@ -66,6 +67,71 @@ pub fn build_plan(
             reason: None,
         }],
     )
+}
+
+/// `harn why`: the plan of every scope with a knob, narrowest first. A scope whose knob is one
+/// already planned (a `project` request falling back to the `local` knob) is listed once: knobs
+/// are the same when they write the same file, pointer and value.
+pub fn plans_by_scope(
+    resolver: &dyn Resolver,
+    target: &Target,
+    tree: &Tree,
+    item_id: &str,
+) -> anyhow::Result<Vec<ActionPlan>> {
+    let item = model::walk(tree)
+        .find(|item| item.id == item_id)
+        .ok_or_else(|| SelectError::NotFound(item_id.to_string()))?;
+    let mut planned: Vec<KnobKey> = Vec::new();
+    let mut plans = Vec::new();
+    for scope in Scope::ALL {
+        // No knob in this scope: not a candidate, not an error.
+        let Ok(knob) = choose_knob(item, Some(*scope)) else {
+            continue;
+        };
+        let key = knob_key(target, knob);
+        if planned.contains(&key) {
+            continue;
+        }
+        planned.push(key);
+        plans.push(build(
+            resolver,
+            target,
+            tree,
+            &[Pick {
+                item,
+                knob,
+                reason: None,
+            }],
+        )?);
+    }
+    Ok(plans)
+}
+
+/// What a knob writes: (file, JSON pointer or quarantine destination, value).
+type KnobKey = (Option<PathBuf>, String, serde_json::Value);
+
+fn knob_key(target: &Target, knob: &Knob) -> KnobKey {
+    match knob {
+        Knob::Setting {
+            file,
+            pointer,
+            value,
+            ..
+        } => (Some(file.clone()), pointer.clone(), value.clone()),
+        Knob::Env {
+            name, value, scope, ..
+        } => (
+            Some(settings_file(target, *scope)),
+            env_pointer(name),
+            serde_json::Value::String(value.clone()),
+        ),
+        Knob::Quarantine { from, to, .. } => (
+            Some(from.clone()),
+            to.display().to_string(),
+            serde_json::Value::Null,
+        ),
+        Knob::None { reason } => (None, reason.clone(), serde_json::Value::Null),
+    }
 }
 
 /// Schema of an AI-authored plan file (`harn apply <plan.json>`).
@@ -179,7 +245,9 @@ pub fn build_plan_from_request(
 /// Fills `Item.freed` for `knobs[0]` of every item via an overlay re-resolve.
 ///
 /// Only the local-scope default is annotated (an item whose knobs are all wider keeps `None`).
-/// Re-resolves are memoized by overlay, so a plugin's rows share one. Over
+/// A knob the resolver proves removes only its own row ([`Resolver::after_removal`]) is computed
+/// from the tree without a re-resolve; every other knob re-resolves once per distinct overlay
+/// (a plugin's rows share one), the overlays spread over the available cores. Over
 /// [`ANNOTATE_CAP`] candidates, only top-level items and the first [`ANNOTATE_CHILDREN_CAP`]
 /// children of each are annotated and the tree says so. Spawns no process.
 pub fn annotate_freed(
@@ -207,23 +275,32 @@ pub fn annotate_freed(
     let mut results: Vec<(Vec<usize>, Result<Freed, String>)> = Vec::new();
     {
         let before = Index::of(tree);
-        let mut memo: HashMap<String, Result<Freed, String>> = HashMap::new();
+        let mut slots: Vec<(Vec<usize>, Slot)> = Vec::new();
+        let mut overlays: Vec<Overlay> = Vec::new();
+        let mut overlay_index: HashMap<String, usize> = HashMap::new();
         for (path, knob) in candidates {
+            let item = item_at(&tree.items, &path).expect("a collected candidate path");
+            if let Some(after) = resolver.after_removal(tree, item, &knob) {
+                let freed = Delta::between(&before, &Index::of(&after)).freed(tree, &after);
+                slots.push((path, Slot::Known(freed)));
+                continue;
+            }
             let overlay = Overlay {
                 ops: overlay_op(target, &knob).into_iter().collect(),
             };
             let key = serde_json::to_string(&overlay)?;
-            let freed = memo
-                .entry(key)
-                .or_insert_with(|| {
-                    resolver
-                        .resolve(target, Some(&overlay))
-                        .map(|after| {
-                            Delta::between(&before, &Index::of(&after)).freed(tree, &after)
-                        })
-                        .map_err(|e| format!("{e:#}"))
-                })
-                .clone();
+            let index = *overlay_index.entry(key).or_insert_with(|| {
+                overlays.push(overlay);
+                overlays.len() - 1
+            });
+            slots.push((path, Slot::Overlay(index)));
+        }
+        let resolved = freed_of_overlays(resolver, target, tree, &before, &overlays);
+        for (path, slot) in slots {
+            let freed = match slot {
+                Slot::Known(freed) => Ok(freed),
+                Slot::Overlay(index) => resolved[index].clone(),
+            };
             results.push((path, freed));
         }
     }
@@ -257,6 +334,63 @@ pub fn annotate_freed(
         ));
     }
     Ok(())
+}
+
+/// A candidate's freed: computed without a re-resolve, or the index of its overlay.
+enum Slot {
+    Known(Freed),
+    Overlay(usize),
+}
+
+/// Re-resolve threads at most: past this the file-system calls of the resolves contend in the
+/// kernel (zbrain, 18 cores: 8 threads 0.35 s wall / 2.1 s sys, 18 threads 0.30 s / 3.8 s).
+const RESOLVE_THREADS: usize = 8;
+
+/// The freed bytes of each overlay (same order), one re-resolve each, on up to
+/// [`RESOLVE_THREADS`] threads pulling the next overlay from a shared counter.
+fn freed_of_overlays(
+    resolver: &dyn Resolver,
+    target: &Target,
+    tree: &Tree,
+    before: &Index,
+    overlays: &[Overlay],
+) -> Vec<Result<Freed, String>> {
+    let one = |overlay: &Overlay| {
+        resolver
+            .resolve(target, Some(overlay))
+            .map(|after| Delta::between(before, &Index::of(&after)).freed(tree, &after))
+            .map_err(|e| format!("{e:#}"))
+    };
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(RESOLVE_THREADS)
+        .min(overlays.len());
+    if workers <= 1 {
+        return overlays.iter().map(one).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let mut out: Vec<(usize, Result<Freed, String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(overlay) = overlays.get(i) else {
+                            return done;
+                        };
+                        done.push((i, one(overlay)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    out.sort_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, freed)| freed).collect()
 }
 
 /// Above this many candidate items, [`annotate_freed`] annotates a bounded subset.
@@ -577,6 +711,16 @@ fn collect_candidates(items: &[Item], path: &mut Vec<usize>, out: &mut Vec<(Vec<
         }
         collect_candidates(&item.children, path, out);
         path.pop();
+    }
+}
+
+fn item_at<'a>(items: &'a [Item], path: &[usize]) -> Option<&'a Item> {
+    let (first, rest) = path.split_first()?;
+    let item = items.get(*first)?;
+    if rest.is_empty() {
+        Some(item)
+    } else {
+        item_at(&item.children, rest)
     }
 }
 

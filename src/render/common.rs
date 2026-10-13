@@ -388,8 +388,16 @@ pub(crate) fn facts(tree: &Tree, g: &Glyphs, unit: fn(u64) -> String) -> Facts {
     };
     let totals = match tree.observed_body {
         Some(body) => format!(
-            "first request: observed {} (bound capture) {} static prediction {}{unknown}",
+            "first request: observed {}{} (bound capture) {} static prediction {}{unknown}",
             unit(body),
+            observed_split(tree)
+                .map(|(a, p, f)| format!(
+                    " = attributed {} + parameters {} + framing {}",
+                    unit(a),
+                    unit(p),
+                    unit(f)
+                ))
+                .unwrap_or_default(),
             g.dot,
             unit(tree.predicted_known)
         ),
@@ -398,14 +406,17 @@ pub(crate) fn facts(tree: &Tree, g: &Glyphs, unit: fn(u64) -> String) -> Facts {
             unit(tree.predicted_known)
         ),
     };
+    let cause = tree.tool_search_cause.as_deref();
     let tool_search = match tree.tool_search {
         Some(true) => vec![format!(
-            "tool search: ON {} MCP tool schemas deferred (stubs until used)",
+            "tool search: ON{} {} MCP tool schemas deferred (stubs until used)",
+            cause.map(|c| format!(" ({c})")).unwrap_or_default(),
             g.arrow
         )],
         Some(false) => vec![
             format!(
-                "tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) {} MCP tool schemas load eagerly",
+                "tool search: OFF ({}) {} MCP tool schemas load eagerly",
+                cause.unwrap_or("ANTHROPIC_BASE_URL is non-first-party"),
                 g.arrow
             ),
             format!(
@@ -413,9 +424,10 @@ pub(crate) fn facts(tree: &Tree, g: &Glyphs, unit: fn(u64) -> String) -> Facts {
                 g.dash
             ),
         ],
-        None if tree.agent == Agent::ClaudeCode => {
-            vec!["tool search: ? (undecidable from settings and env)".to_string()]
-        }
+        None if tree.agent == Agent::ClaudeCode => vec![format!(
+            "tool search: ? (undecidable from settings and env{})",
+            cause.map(|c| format!(": {c}")).unwrap_or_default()
+        )],
         None => Vec::new(),
     };
     Facts {
@@ -434,6 +446,24 @@ pub(crate) fn facts(tree: &Tree, g: &Glyphs, unit: fn(u64) -> String) -> Facts {
             .map(|w| format!("warning: {w}"))
             .collect(),
     }
+}
+
+/// The observed body split by region (`Tree.observed_regions`, a partition of the body):
+/// `(attributed, request parameters, framing)`. None without regions.
+pub(crate) fn observed_split(tree: &Tree) -> Option<(u64, u64, u64)> {
+    if tree.observed_regions.is_empty() {
+        return None;
+    }
+    let (mut attributed, mut parameters, mut framing) = (0, 0, 0);
+    for (name, bytes) in &tree.observed_regions {
+        let group = name.split(" · ").next().unwrap_or(name);
+        match group {
+            "request parameters" => parameters += bytes,
+            "framing" => framing += bytes,
+            _ => attributed += bytes,
+        }
+    }
+    Some((attributed, parameters, framing))
 }
 
 /// Whether any row's freed bytes were computed (the table names its sort key from this).

@@ -231,7 +231,7 @@ pub fn resolve(target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tre
         warnings,
     };
 
-    let tool_search = tool_search(&ctx);
+    let (tool_search, tool_search_cause) = tool_search(&ctx);
     let plugins = plugins::discover(&mut ctx);
     let mut items = Vec::new();
     items.extend(builtins::blocks(&ctx));
@@ -277,11 +277,52 @@ pub fn resolve(target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tre
         unknown_rows: 0,
         observed_body: None,
         warnings,
+        home: Some(target.home.clone()),
+        observed_regions: Vec::new(),
+        tool_search_cause: Some(tool_search_cause),
     };
     let (known, unknown) = totals(&tree);
     tree.predicted_known = known;
     tree.unknown_rows = unknown;
     Ok(tree)
+}
+
+/// [`crate::resolve::Resolver::after_removal`] for Claude Code. Only a bare tool name appended
+/// to `permissions.deny` qualifies: `builtins::blocks` drops exactly the built-in tool row of
+/// that name; the deny list concatenates across layers, so no other layer can undo the entry;
+/// the only other reader of `permissions.deny` is the `permission-rule` row, which has no
+/// first-request cost. Every other knob returns None and is re-resolved, notably
+/// `skillOverrides` (an `off` user skill un-shadows a bundled skill or built-in command of the
+/// same name, `skills.rs` `Listing::push`), env knobs (settings env layers and the process env
+/// decide together; `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0` overrides `autoMemoryEnabled`) and
+/// `claudeMdExcludes` (a glob; imports re-home under another importer).
+pub(crate) fn after_removal(tree: &Tree, item: &Item, knob: &Knob) -> Option<Tree> {
+    let Knob::Setting {
+        pointer,
+        value: Value::String(tool),
+        ..
+    } = knob
+    else {
+        return None;
+    };
+    let tool_row = item_id(Agent::ClaudeCode, Kind::BuiltinTool, Layer::Builtin, tool);
+    if pointer != "/permissions/deny/-" || item.id != tool_row || tool.contains('(') {
+        return None;
+    }
+    // Another row carrying the same entry would leave too.
+    if walk(tree).filter(|i| i.knobs.contains(knob)).count() != 1 {
+        return None;
+    }
+    let mut after = tree.clone();
+    let before = after.items.len();
+    after.items.retain(|i| i.id != item.id);
+    if after.items.len() + 1 != before {
+        return None;
+    }
+    let (known, unknown) = totals(&after);
+    after.predicted_known = known;
+    after.unknown_rows = unknown;
+    Some(after)
 }
 
 pub(crate) fn totals(tree: &Tree) -> (u64, u32) {
@@ -305,24 +346,41 @@ pub(crate) fn totals(tree: &Tree) -> (u64, u32) {
 
 /// `ENABLE_TOOL_SEARCH` decides when set (`auto*` is undecidable); otherwise tool search is on
 /// for the first-party endpoint and off behind any other `ANTHROPIC_BASE_URL` (`research/01` §7).
-fn tool_search(ctx: &Ctx) -> Option<bool> {
+/// Returns the state and its cause (host only: a base URL may carry credentials).
+fn tool_search(ctx: &Ctx) -> (Option<bool>, String) {
     if let Some(v) = ctx.env("ENABLE_TOOL_SEARCH") {
-        return match v.trim() {
+        let state = match v.trim() {
             "true" | "1" => Some(true),
             "false" | "0" => Some(false),
             _ => None,
         };
+        return (state, format!("ENABLE_TOOL_SEARCH={}", v.trim()));
     }
     if ctx.env_on("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
-        return Some(false);
+        return (
+            Some(false),
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS is set".to_string(),
+        );
     }
     match ctx.env("ANTHROPIC_BASE_URL") {
-        None => Some(true),
-        Some(url) if url.trim().is_empty() => Some(true),
+        None => (
+            Some(true),
+            "ANTHROPIC_BASE_URL unset (first-party)".to_string(),
+        ),
+        Some(url) if url.trim().is_empty() => (
+            Some(true),
+            "ANTHROPIC_BASE_URL empty (first-party)".to_string(),
+        ),
         Some(url) => match url_host(&url) {
-            Some(host) if host == "anthropic.com" || host.ends_with(".anthropic.com") => Some(true),
-            Some(_) => Some(false),
-            None => None,
+            Some(host) if host == "anthropic.com" || host.ends_with(".anthropic.com") => (
+                Some(true),
+                format!("ANTHROPIC_BASE_URL is first-party ({host})"),
+            ),
+            Some(host) => (
+                Some(false),
+                format!("ANTHROPIC_BASE_URL is non-first-party ({host})"),
+            ),
+            None => (None, "ANTHROPIC_BASE_URL has no parsable host".to_string()),
         },
     }
 }

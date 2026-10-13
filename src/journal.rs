@@ -129,8 +129,14 @@ pub fn history(journal: &Journal) -> anyhow::Result<Vec<JournalEntry>> {
 
 /// Snapshot → `$EDITOR <realpath>` → diff → entry; a JSON/TOML/frontmatter file that no longer
 /// parses is journaled with a warning, not reverted. An edit that changed nothing is not
-/// journaled (error).
-pub fn edit(item: &Item, journal: &mut Journal, editor: &str) -> anyhow::Result<JournalEntry> {
+/// journaled (error). The entry's `context.cwd` is `target.dir`, the directory `item` was resolved
+/// for.
+pub fn edit(
+    item: &Item,
+    target: &Target,
+    journal: &mut Journal,
+    editor: &str,
+) -> anyhow::Result<JournalEntry> {
     if matches!(item.origin.layer, Layer::Builtin | Layer::Managed) {
         return Err(Refused(format!(
             "{} is a {} item; harn edit opens only files you own",
@@ -209,8 +215,7 @@ pub fn edit(item: &Item, journal: &mut Journal, editor: &str) -> anyhow::Result<
     let entry = JournalEntry {
         id,
         context: RunContext {
-            cwd: std::env::current_dir()
-                .unwrap_or_else(|_| path.parent().unwrap_or(Path::new("/")).to_path_buf()),
+            cwd: target.dir.clone(),
             agent: agent_of(&item.id),
             agent_version: None,
             model: None,

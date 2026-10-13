@@ -125,8 +125,18 @@ enum Cmd {
 }
 
 #[derive(Args, Debug)]
-#[group(required = true, multiple = false)]
 struct VerifyArgs {
+    #[command(flatten)]
+    source: VerifySource,
+    /// After the report, print the whole verified table (observed costs, freed) instead of only
+    /// its header (text output)
+    #[arg(long)]
+    table: bool,
+}
+
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+struct VerifySource {
     /// Read an existing capture (OTEL raw-body dir or llmux raw-io.jsonl); never writes
     #[arg(long, value_name = "PATH")]
     capture: Option<PathBuf>,
@@ -221,16 +231,10 @@ where
     Ok(cli)
 }
 
-/// `<ver> (<channel> <rev12>) rules: claude-code <VERIFIED_AGAINST>`; clap prefixes `harn `.
+/// [`harn::version_line`] without its `harn ` prefix (clap adds it).
 fn version_text() -> String {
-    let channel = option_env!("HARN_BUILD_CHANNEL").unwrap_or("dev");
-    let build_id = option_env!("HARN_BUILD_ID").unwrap_or("unknown");
-    let rev12: String = build_id.chars().take(12).collect();
-    let rules = resolve::for_agent(Agent::ClaudeCode).rules_verified_against();
-    format!(
-        "{} ({channel} {rev12}) rules: claude-code {rules}",
-        env!("CARGO_PKG_VERSION")
-    )
+    let line = harn::version_line();
+    line.strip_prefix("harn ").unwrap_or(&line).to_string()
 }
 
 fn exit_code_for(err: &anyhow::Error) -> u8 {
@@ -257,7 +261,10 @@ fn write_command(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Undo { .. } => Some("undo"),
         Cmd::Apply { .. } => Some("apply"),
         Cmd::History { prune: Some(_) } => Some("history --prune"),
-        Cmd::Verify(VerifyArgs { run: true, .. }) => Some("verify --run"),
+        Cmd::Verify(VerifyArgs {
+            source: VerifySource { run: true, .. },
+            ..
+        }) => Some("verify --run"),
         _ => None,
     }
 }
@@ -302,21 +309,12 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             let target = target(cli, None)?;
             let trees = resolve_trees(cli, &target)?;
             let (resolved, item) = pick(&trees, selector)?;
-            let mut plans = Vec::new();
-            for scope in Scope::ALL {
-                match plan::build_plan(
-                    resolved.resolver.as_ref(),
-                    &target,
-                    &resolved.tree,
-                    &item.id,
-                    Some(*scope),
-                ) {
-                    Ok(plan) => plans.push(plan),
-                    // No knob in this scope: not a candidate, not an error.
-                    Err(err) if err.chain().any(|c| c.is::<Refused>()) => {}
-                    Err(err) => return Err(err),
-                }
-            }
+            let plans = plan::plans_by_scope(
+                resolved.resolver.as_ref(),
+                &target,
+                &resolved.tree,
+                &item.id,
+            )?;
             if cli.json {
                 print_json(&serde_json::json!({ "item": item, "plans": plans }))?;
             } else {
@@ -394,7 +392,14 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             }
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
             let mut journal = open_journal()?;
-            let entry = journal::edit(item, &mut journal, &editor)?;
+            let entry = journal::edit(item, &target, &mut journal, &editor)?;
+            // Text: the diff, then the journal line (`--json` carries the diff in the entry).
+            if let (false, Some(diff)) = (cli.json, entry.diff.as_deref()) {
+                print!("{diff}");
+                if !diff.ends_with('\n') {
+                    println!();
+                }
+            }
             print_entries(cli, std::slice::from_ref(&entry))?;
         }
         Some(Cmd::Undo { n }) => {
@@ -412,7 +417,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             };
             print_entries(cli, &entries)?;
         }
-        Some(Cmd::Verify(args)) => return verify_cmd(cli, args),
+        Some(Cmd::Verify(args)) => return verify_cmd(cli, args, &opts),
         Some(Cmd::Completions { shell }) => {
             clap_complete::generate(*shell, &mut Cli::command(), "harn", &mut std::io::stdout());
         }
@@ -420,14 +425,16 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn verify_cmd(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
+/// The report, then the verified tree's header (`--table`: the whole table, freed annotated) so
+/// the observed totals and their region split are visible; `--json` prints the report only.
+fn verify_cmd(cli: &Cli, args: &VerifyArgs, opts: &RenderOpts) -> Result<ExitCode> {
     if cli.agent == Some(AgentArg::Codex) {
         bail!("not implemented: codex verify (P0.5)");
     }
     let target = target(cli, None)?;
     let resolver = resolve::for_agent(Agent::ClaudeCode);
     let mut tree = resolver.resolve(&target, None).context("claude-code")?;
-    let capture = match (&args.capture, args.run) {
+    let capture = match (&args.source.capture, args.source.run) {
         (Some(path), _) => oracle::read_capture(path, &target)?,
         (None, _) => {
             let claude =
@@ -447,6 +454,13 @@ fn verify_cmd(cli: &Cli, args: &VerifyArgs) -> Result<ExitCode> {
         print_json(&report)?;
     } else {
         println!("{}", render::verify_report(&report));
+        println!();
+        if args.table {
+            plan::annotate_freed(resolver.as_ref(), &target, &mut tree).context("claude-code")?;
+            println!("{}", render::table(&tree, opts));
+        } else {
+            println!("{}", render::header(&tree, opts));
+        }
     }
     Ok(if report.passed {
         ExitCode::SUCCESS
@@ -590,9 +604,7 @@ fn target_for(dir: &Path) -> Result<Target> {
 }
 
 fn open_journal() -> Result<Journal> {
-    Ok(Journal {
-        dir: Journal::state_dir()?,
-    })
+    Journal::open()
 }
 
 fn print_entries(cli: &Cli, entries: &[journal::JournalEntry]) -> Result<()> {
@@ -722,6 +734,16 @@ mod tests {
         assert!(parse(&["verify", "--run", "--capture", "x"]).is_err());
         assert!(parse(&["verify", "--run"]).is_ok());
         assert!(parse(&["verify", "--capture", "x", "--agent", "claude-code"]).is_ok());
+        assert!(parse(&["verify", "--table"]).is_err());
+        assert!(parse(&["verify", "--run", "--table"])
+            .unwrap()
+            .command
+            .is_some());
+        let cli = parse(&["verify", "--capture", "x", "--table"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Cmd::Verify(VerifyArgs { table: true, .. }))
+        ));
     }
 
     #[test]

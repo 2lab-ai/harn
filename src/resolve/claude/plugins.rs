@@ -331,7 +331,7 @@ pub(crate) fn discover(ctx: &mut Ctx) -> Vec<Plugin> {
     for name in BUILTIN_PLUGINS {
         let id = format!("{name}@builtin");
         let mut why =
-            vec!["built-in plugin (static table, Claude Code 2.1.296 init event)".to_string()];
+            vec!["built-in plugin [static]: not in installed_plugins.json; name from the Claude Code 2.1.296 init event".to_string()];
         let mut setting = None;
         if let Some((b, origin, _)) = enabled_setting(ctx, &id) {
             if !b {
