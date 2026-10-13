@@ -203,8 +203,8 @@ jobs:
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           done < old-preview-tags.txt
 
-  # The tap credential lives only in this job: no third-party action runs here,
-  # and the publish (prerelease + prune) never sees the secret or depends on it.
+  # The tap credential is used only in this job, and only by the bump step: the
+  # publish (prerelease + prune) never sees the secret or depends on it.
   tap-bump:
     needs: [preflight, publish]
     runs-on: ubuntu-latest
@@ -212,10 +212,11 @@ jobs:
     permissions:
       contents: read
     env:
-      # Job-level, not step-level: a step's own `env` is not visible to its
-      # `if:`, and `secrets` cannot appear in `if:` at all. Empty while the repo
-      # has no TAP_DISPATCH_TOKEN.
-      TAP_DISPATCH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+      # Presence only, at job level: a step's own `env` is not visible to its
+      # `if:`, and `secrets` cannot appear in `if:` at all. The token itself is
+      # injected on the bump step alone. 'false' while the repo has no
+      # TAP_DISPATCH_TOKEN.
+      HAS_TAP_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -224,7 +225,7 @@ jobs:
       # The same build artifacts the publish job uploaded to the prerelease, so
       # the rendered sha256s are the ones brew will download.
       - name: Download the published binaries
-        if: env.TAP_DISPATCH_TOKEN != ''
+        if: env.HAS_TAP_TOKEN == 'true'
         uses: actions/download-artifact@v4
         with:
           pattern: harn-*
@@ -232,7 +233,7 @@ jobs:
           path: release
 
       - name: Tap bump skipped (no TAP_DISPATCH_TOKEN)
-        if: env.TAP_DISPATCH_TOKEN == ''
+        if: env.HAS_TAP_TOKEN == 'false'
         run: echo "::notice::TAP_DISPATCH_TOKEN is not set; 2lab-ai/homebrew-tap was not bumped to ${{ needs.preflight.outputs.tag }}"
 
       - name: Bump Homebrew tap to this preview
@@ -243,10 +244,10 @@ jobs:
         # it does, the script is fail-closed (a failed bump fails the job).
         # Logic + its regression test live in .github/scripts/ (see the
         # tap-bump-test job).
-        if: env.TAP_DISPATCH_TOKEN != ''
+        if: env.HAS_TAP_TOKEN == 'true'
         env:
           # Consumed by `gh auth setup-git`, never placed in a remote URL.
-          GH_TOKEN: ${{ env.TAP_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
           TAG: ${{ needs.preflight.outputs.tag }}
           BUILD_ID: ${{ needs.preflight.outputs.build_id }}
           RELEASE_DIR: release

@@ -53,7 +53,7 @@ render() {
     "$TAP_DIR/Formula/harn-preview.rb.tmpl" > "$TAP_DIR/Formula/harn-preview.rb"
   ruby -c "$TAP_DIR/Formula/harn-preview.rb" > /dev/null ||
     fail "rendered formula is not valid ruby"
-  if grep -q "@[A-Z_]\+@" "$TAP_DIR/Formula/harn-preview.rb"; then
+  if grep -q "@[A-Z0-9_]\+@" "$TAP_DIR/Formula/harn-preview.rb"; then
     fail "unrendered @TOKEN@ left in the tap formula; template contract drifted"
   fi
 }

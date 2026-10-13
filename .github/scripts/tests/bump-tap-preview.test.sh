@@ -177,6 +177,14 @@ run_bump() {
 }
 
 pushed_formula() { git -C "$ORIGIN" show "master:Formula/harn-preview.rb"; }
+# sha_after_url <formula-text> <asset> — the sha256 on the line right after the
+# url line that downloads <asset> (empty when that line is not a sha256).
+sha_after_url() {
+  awk -v want="/$2\"" '
+    hit { if ($1 == "sha256") { gsub(/"/, "", $2); print $2 }; exit }
+    $1 == "url" && index($0, want) { hit = 1 }
+  ' <<< "$1"
+}
 commit_count() { git -C "$ORIGIN" rev-list --count master; }
 
 # --- case: invoked without a credential ----------------------------------
@@ -230,16 +238,14 @@ formula="$(pushed_formula)"
 expect_true "pushed formula carries the brew version" \
   grep -q "version \"$VERSION\"" <<< "$formula"
 expect_true "pushed formula points at this tag" grep -q "download/$TAG/" <<< "$formula"
-expect_true "pushed formula carries the published macos-aarch64 sha256" \
-  grep -q "$(sha256_of "$WORK/release/harn-macos-aarch64")" <<< "$formula"
-expect_true "pushed formula carries the published macos-x86_64 sha256" \
-  grep -q "$(sha256_of "$WORK/release/harn-macos-x86_64")" <<< "$formula"
-expect_true "pushed formula carries the published linux-aarch64 sha256" \
-  grep -q "$(sha256_of "$WORK/release/harn-linux-aarch64")" <<< "$formula"
-expect_true "pushed formula carries the published linux-x86_64 sha256" \
-  grep -q "$(sha256_of "$WORK/release/harn-linux-x86_64")" <<< "$formula"
+# Per platform, not "somewhere in the file": a swapped pair would still carry
+# all four hashes, but brew would reject (or worse, accept) the wrong binary.
+for asset in harn-macos-aarch64 harn-macos-x86_64 harn-linux-aarch64 harn-linux-x86_64; do
+  expect_true "pushed formula pairs the $asset url with its own sha256" \
+    [ "$(sha_after_url "$formula" "$asset")" = "$(sha256_of "$WORK/release/$asset")" ]
+done
 expect_absent "no unrendered template token reaches the tap" \
-  grep -q "@[A-Z_]\+@" <<< "$formula"
+  grep -q "@[A-Z0-9_]\+@" <<< "$formula"
 expect_absent "the token never reaches the log" grep -qF "$TOKEN" <<< "$OUT"
 expect_absent "the token never reaches the clone" \
   grep -rqF "$TOKEN" "$WORK/$TAP_CLONE/.git"
@@ -300,6 +306,18 @@ git -C "$seed_work" commit --quiet -am "drifted template"
 git -C "$seed_work" push --quiet "$ORIGIN" HEAD:master
 run_bump
 expect_nonzero "an unrendered template token fails the step"
+
+# Tokens carry digits (@SHA_MACOS_X86_64@), so the detector must too: a
+# digit-bearing leftover is valid ruby and slips past `ruby -c`.
+new_case drift-digits
+seed_work="$CASE_DIR/tap-seed"
+printf '  sha256 "@SHA_UNEXPECTED_X86_64@"\n' >> "$seed_work/Formula/harn-preview.rb.tmpl"
+git -C "$seed_work" commit --quiet -am "drifted template (digit-bearing token)"
+git -C "$seed_work" push --quiet "$ORIGIN" HEAD:master
+before="$(commit_count)"
+run_bump
+expect_nonzero "an unrendered digit-bearing template token fails the step"
+expect_true "the digit-bearing drift case pushes nothing" [ "$before" = "$(commit_count)" ]
 
 echo
 if [ "$FAILURES" -eq 0 ]; then
