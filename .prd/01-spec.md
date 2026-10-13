@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; CLI only — no TUI; a GUI only as a read-only view.
 
-Status: **planned** — v3.1, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **in-progress** — v3.2, 2026-10-13 (P0 implementation under way; receipts in `p0-claude-code/`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -413,13 +413,13 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A3 | `harn verify --run --dir ~/2lab.ai/zbrain --agent claude-code` | prints what it will execute, makes one headless run; within the Claude Code projection (modes `runtime`/`none` excluded, capture-only children attached under their `?` parent) the report lists 0 `predicted-not-seen` and 0 `seen-not-predicted` **among statically discoverable ids (the A1 set)** and 0 content-conformance failures on reproducible static contributions; `?` rows become `observed`; the header switches to `observed` for the matched regions only |
 | A3b | `just check` | the fixture suite includes before/after `freed` cases, each fixture defining **both** renderings (before and after) so the assertion is against the fixture's actual byte difference and never against a rule such as "at cap → 0": a token-budgeted listing (asserts `Δ?` statically and the exact delta when the fixture supplies the after-listing), a plugin whose skills leave with it, an item shared by two origins (counted once), and an excluded `CLAUDE.md` taking its `@imports` along |
 | A4 | `harn off plugin:slack --dir ~/2lab.ai/zbrain` then `claude -p hi --output-format stream-json --verbose` in that directory | the plan showed target dir, diff, freed and side effects; `.claude/settings.local.json` gained `enabledPlugins["slack@claude-plugins-official"]: false`; the new `init` event lists no `plugin:slack:slack` and none of its 8 skills; `harn history` shows the op with its `RunContext`; `harn undo` restores the file byte-for-byte |
-| A5 | `harn off <item>` on an item with no knob | `builtin` → refused with the reason; a project skill dir → moved to `.claude/harn-off/skills/<name>` with a manifest, the next `init` does not list it, `harn undo` moves it back; `--scope` was never widened silently |
+| A5 | `harn off <item>` on an item with no knob | `builtin` → refused with the reason (exit 3); `--scope` was never widened silently (refused, exit 3). Quarantine half: every Claude Code item the resolver emits today has an official knob (skills and commands → `skillOverrides`, plugin items → `enabledPlugins`), so no row reaches the quarantine path; it stays covered by the plan/journal unit tests (move, manifest, undo) until an item without a knob exists |
 | A6 | `harn edit rules/DEV.md --dir ~/2lab.ai/zbrain` | `$EDITOR` opened the realpath; on exit the diff was printed and journaled; `harn undo` restores the previous bytes |
 | A7 | `harn --dir ~/2lab.ai/zbrain --agent codex --json` | AGENTS.md chain, skills roots, hooks, MCP servers, plugins match `codex -C … debug prompt-input` + `codex mcp list --json` + `codex plugin list --json`; the three trust gates are reflected (zbrain is `trusted`) |
 | A8 | `harn verify --run --agent codex` | 0 presence diffs on instructions, skills listing and blocks; the report states that tools and hook output are outside Codex's dump |
 | A9 | same binary on `cachy-z13` (`harn --version`, A1, A2) | identical columns and semantics; Linux paths (`/etc/claude-code/CLAUDE.md`, XDG state dir) resolved |
 | A10 | `harn --readonly off anything` · `harn --readonly verify --run` | both exit non-zero without writing or running |
-| A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target |
+| A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target (exit 1, the verify family, with the mismatch named) |
 | A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
 | A13 | `harn report --dir ~/2lab.ai/zbrain --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
 
@@ -474,6 +474,9 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v3.2 (2026-10-13, integration)** — A5's quarantine half recorded as unreachable for Claude
+  Code today (every emitted item has an official knob); A11 refusal exit code fixed at 1; status
+  to in-progress with the P0 drive.
 - **v3.1 (2026-10-13, WU-D parser reproduces the capture to the byte)** — §Problem rows corrected
   to bytes (hook stdout 3,456; MEMORY.md 23,429 with the reminder wrappers shown separately;
   block 1 split into wrapper/userEmail/gitStatus; PRINCIPLES.md embedded without its frontmatter);
