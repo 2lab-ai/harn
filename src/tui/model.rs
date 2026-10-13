@@ -17,7 +17,12 @@ use std::path::{Path, PathBuf};
 pub struct OffItem {
     pub item_id: String,
     pub entry_id: String,
+    /// The JSON pointer the journal op wrote (`/disableAllHooks`); None for other switches.
+    pub pointer: Option<String>,
 }
+
+/// The one switch Claude Code has for hooks: every hook at once.
+pub const ALL_HOOKS: &str = "/disableAllHooks";
 
 /// Row order inside a group; `s` toggles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -245,6 +250,9 @@ pub struct Group {
     pub overlap: bool,
     /// `count_line` for a narrow frame.
     pub count_short: String,
+    /// One switch turned the whole group off (every hook): no count, no size; `count_line`
+    /// says so.
+    pub all_off: bool,
     pub rows: Vec<Row>,
     /// `d` can act on some row inside.
     pub can_turn_off: bool,
@@ -562,6 +570,16 @@ fn market_phrase(key: &str) -> String {
     }
 }
 
+/// A plugin's identity, `name@marketplace`: its `origin.plugin`, else its label. Every lookup of
+/// a plugin (its group row, its parts, its owner rows in the listings) goes through this.
+fn plugin_key(plugin: &Item) -> &str {
+    plugin
+        .origin
+        .plugin
+        .as_deref()
+        .unwrap_or(plugin.label.as_str())
+}
+
 /// The plugin (`name@marketplace`) an item belongs to, when it is a plugin's part.
 fn owner_plugin(item: &Item) -> Option<&str> {
     if item.kind == Kind::Plugin {
@@ -603,6 +621,7 @@ pub fn count(n: usize, word: &str) -> String {
     let plural = match word {
         "MCP server" => "MCP servers".to_string(),
         "memory file" => "memory files".to_string(),
+        "entry" => "entries".to_string(),
         w if w.ends_with('s') => w.to_string(),
         w => format!("{w}s"),
     };
@@ -650,6 +669,8 @@ struct PluginFreed {
     total: Option<u64>,
     /// Of `total`, its listing lines (counted in the listing groups too).
     listing: u64,
+    /// Of `total`, its own parts (MCP servers, hooks) whose size is known.
+    own: u64,
     /// Some own part is in the request with a size nobody knows yet.
     unknown: bool,
     /// The whole of it in words (`3.7 KB: 3.7 KB of its entries in the skill listing, plus its
@@ -689,6 +710,7 @@ fn plugin_freed(facets: &[&Item]) -> PluginFreed {
     PluginFreed {
         total: Some(listing + mine).filter(|t| *t > 0),
         listing,
+        own: mine,
         unknown,
         text: Some(text).filter(|t| !t.is_empty()),
     }
@@ -930,10 +952,7 @@ impl Builder<'_> {
             .iter()
             .filter(|i| i.kind == Kind::Plugin && i.origin.layer != Layer::Builtin)
             .collect();
-        let keys: HashSet<&str> = plugins
-            .iter()
-            .map(|p| p.origin.plugin.as_deref().unwrap_or(p.label.as_str()))
-            .collect();
+        let keys: HashSet<&str> = plugins.iter().map(|p| plugin_key(p)).collect();
         let mut facets: HashMap<&str, Vec<&Item>> = HashMap::new();
         collect_facets(&tree.items, &keys, &mut facets);
         let claimed: HashSet<&str> = facets.values().flatten().map(|i| i.id.as_str()).collect();
@@ -941,26 +960,22 @@ impl Builder<'_> {
         let mut plugin_rows: Vec<Row> = plugins
             .iter()
             .map(|p| {
-                let key = p.origin.plugin.as_deref().unwrap_or(p.label.as_str());
-                self.plugin_row(p, facets.get(key).map(Vec::as_slice).unwrap_or(&[]))
+                self.plugin_row(
+                    p,
+                    facets.get(plugin_key(p)).map(Vec::as_slice).unwrap_or(&[]),
+                )
             })
             .collect();
-        // The listing lines all plugins bring (the listing groups count them).
-        let plugin_listing: u64 = plugins
+        // What all plugins bring: listing lines (the listing groups count them) and their own.
+        let (plugin_listing, plugin_own) = plugins
             .iter()
-            .map(|p| {
-                let key = p.origin.plugin.as_deref().unwrap_or(p.label.as_str());
-                plugin_freed(facets.get(key).map(Vec::as_slice).unwrap_or(&[])).listing
-            })
-            .sum();
+            .map(|p| plugin_freed(facets.get(plugin_key(p)).map(Vec::as_slice).unwrap_or(&[])))
+            .fold((0u64, 0u64), |(l, o), f| (l + f.listing, o + f.own));
         // What turning each plugin off frees, for its owner rows in the listings.
         let savings: HashMap<String, Option<String>> = plugins
             .iter()
             .zip(&plugin_rows)
-            .map(|(p, row)| {
-                let key = p.origin.plugin.clone().unwrap_or_else(|| p.label.clone());
-                (key, row.saving.clone())
-            })
+            .map(|(p, row)| (plugin_key(p).to_string(), row.saving.clone()))
             .collect();
 
         let mut skill_owners: Vec<Row> = Vec::new();
@@ -1048,13 +1063,15 @@ impl Builder<'_> {
 
         let mut groups = Vec::new();
         if !plugin_rows.is_empty() {
-            groups.push(self.plugins_group(plugin_rows, plugin_listing));
+            groups.push(self.plugins_group(plugin_rows, plugin_listing, plugin_own));
         }
-        if let Some(listing) = skill_listing {
-            groups.push(self.listing_group(GroupKind::SkillListing, listing, skill_owners));
+        // A listing shows when it is in the tree or when harn turned some of its entries off
+        // (they stay findable for `o`, even with no live listing left).
+        if skill_listing.is_some() || !skill_owners.is_empty() {
+            groups.push(self.listing_group(GroupKind::SkillListing, skill_listing, skill_owners));
         }
-        if let Some(listing) = agent_listing {
-            groups.push(self.listing_group(GroupKind::AgentListing, listing, agent_owners));
+        if agent_listing.is_some() || !agent_owners.is_empty() {
+            groups.push(self.listing_group(GroupKind::AgentListing, agent_listing, agent_owners));
         }
         if !memory.is_empty() {
             groups.push(
@@ -1092,7 +1109,28 @@ impl Builder<'_> {
                 ),
             );
         }
-        if !hook_rows.is_empty() {
+        let hooks_all_off = off.iter().any(|o| o.pointer.as_deref() == Some(ALL_HOOKS));
+        if !hook_rows.is_empty() && hooks_all_off {
+            // The resolver drops every hook once the switch is on: a count would be a lie.
+            let mut group = self.group(
+                GroupKind::Hooks,
+                "Hooks",
+                hook_rows,
+                Detail {
+                    what: "Hooks · all off for this project".to_string(),
+                    brings: "harn turned every hook off here with Claude Code's one switch for \
+                             them; none runs until it is turned back on."
+                        .to_string(),
+                    action: "u undoes the change; o on the hook below does too.".to_string(),
+                    ..Detail::default()
+                },
+            );
+            group.name = "Hooks".to_string();
+            group.count_line = "all off for this project · u undoes".to_string();
+            group.all_off = true;
+            group.absent = None;
+            groups.push(group);
+        } else if !hook_rows.is_empty() {
             groups.push(
                 self.group(
                     GroupKind::Hooks,
@@ -1156,14 +1194,16 @@ impl Builder<'_> {
             share: self.share(bytes),
             overlap: false,
             count_short: String::new(),
+            all_off: false,
             can_turn_off: any_on(&rows),
             rows,
             detail,
         }
     }
 
-    /// `listing` = bytes of listing lines the plugins bring (counted in the listing groups).
-    fn plugins_group(&self, rows: Vec<Row>, listing: u64) -> Group {
+    /// `listing` = bytes of the listing lines the plugins bring (the listing groups count them);
+    /// `own` = the known bytes of their own parts.
+    fn plugins_group(&self, rows: Vec<Row>, listing: u64, own: u64) -> Group {
         let enabled = rows.iter().filter(|r| r.state != State::Off).count();
         let detail = Detail {
             what: format!(
@@ -1179,47 +1219,71 @@ impl Builder<'_> {
             action: "Open the group (→) to see each plugin with its size.".to_string(),
             ..Detail::default()
         };
-        let total = sum_known(rows.iter().filter_map(|r| r.bytes));
         let mut group = self.group(GroupKind::Plugins, "Plugins", rows, detail);
-        // Each row is what turning that plugin off frees, mostly listing lines the listing
-        // groups count already: the group has no size, bar or share of its own.
-        if let Some(total) = total {
-            let listed = listing > 0;
+        // Each row is what turning that plugin off frees: its listing lines (the listing groups
+        // count them already) and its own parts. The group line says which is which and has no
+        // size, bar or share of its own.
+        if listing + own > 0 {
+            let (l, o, t) = (size(listing), size(own), size(listing + own));
             group.bytes = None;
             group.share = None;
             group.absent = None;
             group.overlap = true;
-            group.count_line = if listed {
-                format!(
-                    "{} would leave with them · counted in the listings above",
-                    size(total)
-                )
-            } else {
-                format!("{} would leave with them", size(total))
-            };
-            group.count_short = if listed {
-                format!("{} in the listings above", size(total))
-            } else {
-                format!("{} would leave with them", size(total))
+            (group.count_line, group.count_short) = match (listing > 0, own > 0) {
+                (true, false) => (
+                    format!("{t} would leave with them · counted in the listings above"),
+                    format!("{l} in the listings above"),
+                ),
+                (true, true) => (
+                    format!("{t} would leave with them · {l} counted in the listings above"),
+                    format!("{l} in the listings above + {o} of their own"),
+                ),
+                _ => (
+                    format!("{o} would leave with them"),
+                    format!("{o} would leave with them"),
+                ),
             };
         }
         group
     }
 
-    fn listing_group(&self, kind: GroupKind, listing: &Item, owners: Vec<Row>) -> Group {
-        let entries = listing
-            .children
-            .iter()
-            .filter(|c| c.mode == Mode::Advertised)
-            .count();
-        let cut = listing.signal.as_deref().and_then(cut_count);
-        let count_line = match cut {
-            Some((dropped, total)) => format!("{total} entries · {dropped} descriptions cut"),
-            None => format!("{entries} entries"),
+    /// `listing` = the live listing item; None when only entries harn turned off are left.
+    fn listing_group(&self, kind: GroupKind, listing: Option<&Item>, owners: Vec<Row>) -> Group {
+        let entries = listing.map_or(0, |l| {
+            l.children
+                .iter()
+                .filter(|c| c.mode == Mode::Advertised)
+                .count()
+        });
+        let off = off_count(&owners);
+        let cut = listing
+            .and_then(|l| l.signal.as_deref())
+            .and_then(cut_count);
+        let count_line = match (cut, listing) {
+            (Some((dropped, total)), _) => format!("{total} entries · {dropped} descriptions cut"),
+            (None, Some(_)) => format!("{entries} entries"),
+            (None, None) => format!("{off} turned off here"),
         };
-        let bytes =
-            request_bytes(&listing.cost).or(sum_known(owners.iter().filter_map(|r| r.bytes)));
+        let bytes = listing
+            .and_then(|l| request_bytes(&l.cost))
+            .or(sum_known(owners.iter().filter_map(|r| r.bytes)));
         let (name, what, brings) = match kind {
+            _ if listing.is_none() => (
+                if kind == GroupKind::SkillListing {
+                    "Skill listing"
+                } else {
+                    "Agent listing"
+                },
+                format!(
+                    "{} · nothing is listed now",
+                    if kind == GroupKind::SkillListing {
+                        "Skill listing"
+                    } else {
+                        "Agent listing"
+                    }
+                ),
+                format!("harn turned {} off here.", count(off, "entry")),
+            ),
             GroupKind::SkillListing => (
                 "Skill listing",
                 format!("Skill listing · {entries} entries, one line per skill or command"),
@@ -1251,14 +1315,18 @@ impl Builder<'_> {
             share: self.share(bytes),
             overlap: false,
             count_short: String::new(),
+            all_off: false,
             can_turn_off: any_on(&owners),
             rows: owners,
             detail: Detail {
                 what,
                 brings,
-                action: "Open it (→) to see the entries by owner; d on an entry turns that one \
-                         off."
-                    .to_string(),
+                action: if listing.is_some() {
+                    "Open it (→) to see the entries by owner; d on an entry turns that one off."
+                } else {
+                    "Open it (→); o on an entry turns it back on."
+                }
+                .to_string(),
                 ..Detail::default()
             },
         }
@@ -1416,11 +1484,7 @@ impl Builder<'_> {
     }
 
     fn plugin_row(&self, plugin: &Item, facets: &[&Item]) -> Row {
-        let key = plugin
-            .origin
-            .plugin
-            .clone()
-            .unwrap_or_else(|| plugin.label.clone());
+        let key = plugin_key(plugin).to_string();
         let name = plugin_name(&key).to_string();
         let freed = plugin_freed(facets);
         let saving = freed.text.clone();
@@ -1445,7 +1509,7 @@ impl Builder<'_> {
                 "{name} · plugin from {}{} · enabled {}",
                 market_phrase(&key),
                 version.map(|v| format!(", {v}")).unwrap_or_default(),
-                enabled_scope(plugin, &self.places).unwrap_or("here")
+                enabled_scope(plugin, &self.places).unwrap_or_else(|| "here".to_string())
             )
         };
         let what = what_with(plugin_version(plugin));
@@ -1559,12 +1623,8 @@ impl Builder<'_> {
         savings: &HashMap<String, Option<String>>,
     ) -> Row {
         let first = entries[0];
-        let plugin = owner_plugin(first).and_then(|p| {
-            plugins
-                .iter()
-                .find(|i| i.origin.plugin.as_deref() == Some(p))
-                .copied()
-        });
+        let plugin =
+            owner_plugin(first).and_then(|p| plugins.iter().find(|i| plugin_key(i) == p).copied());
         let (name, source) = match owner_plugin(first) {
             Some(p) => (plugin_name(p).to_string(), market_word(p)),
             None => owner_words(first),
@@ -1776,15 +1836,7 @@ impl Builder<'_> {
                 );
             }
             (None, None) => {
-                let reason = item
-                    .knobs
-                    .iter()
-                    .find_map(|k| match k {
-                        Knob::None { reason } => Some(reason_words(reason)),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "harn knows no switch for it".to_string());
-                detail.action = format!("It cannot be turned off: {}.", places.text(&reason));
+                detail.action = format!("It cannot be turned off: {}.", fixed_reason(item));
             }
         }
     }
@@ -1860,6 +1912,30 @@ impl Builder<'_> {
         let (kind, layer) = (parts.nth(1).unwrap_or_default(), parts.next());
         let kind = Kind::ALL.iter().copied().find(|k| k.as_str() == kind);
         let (display, source) = id_name(&off.item_id, &self.places);
+        // The hooks switch is one for all: this row says the others went with it.
+        let all_hooks = kind == Some(Kind::Hook) && off.pointer.as_deref() == Some(ALL_HOOKS);
+        let detail = if all_hooks {
+            Detail {
+                what: format!(
+                    "{display} · turned off with every other hook · u undoes · takes effect next \
+                     session"
+                ),
+                brings: "Claude Code turns hooks off all at once: harn turned every hook off \
+                         here, and none runs until they are turned back on."
+                    .to_string(),
+                action: "o turns them all back on (the change is reversed byte for byte)."
+                    .to_string(),
+                ..Detail::default()
+            }
+        } else {
+            Detail {
+                what: format!("{display} · turned off · u undoes · takes effect next session"),
+                brings: "harn turned it off here; it stays off until it is turned back on."
+                    .to_string(),
+                action: "o turns it back on (the change is reversed byte for byte).".to_string(),
+                ..Detail::default()
+            }
+        };
         let row = Row {
             key: off.item_id.clone(),
             id: Some(off.item_id.clone()),
@@ -1868,18 +1944,16 @@ impl Builder<'_> {
             kind_word: kind.map(kind_word).unwrap_or("item").to_string(),
             bytes: None,
             share: None,
-            absent: Some("off"),
+            absent: Some(if all_hooks {
+                "off, with every other hook"
+            } else {
+                "off"
+            }),
             weight: None,
             saving: None,
             children: Vec::new(),
             state: State::Off,
-            detail: Detail {
-                what: format!("{display} · turned off · u undoes · takes effect next session"),
-                brings: "harn turned it off here; it stays off until it is turned back on."
-                    .to_string(),
-                action: "o turns it back on (the change is reversed byte for byte).".to_string(),
-                ..Detail::default()
-            },
+            detail,
         };
         let into_owner = |owners: &mut Vec<Row>, row: Row| {
             let key = format!("owner:off:{}", layer.unwrap_or_default());
@@ -1955,6 +2029,37 @@ fn common_absent(bytes: Option<u64>, rows: &[Row]) -> Option<&'static str> {
     } else {
         Some("none up front")
     }
+}
+
+/// Why `item` has no switch at all, in words (`it is part of Claude Code`).
+fn fixed_reason(item: &Item) -> String {
+    item.knobs
+        .iter()
+        .find_map(|k| match k {
+            Knob::None { reason } => Some(reason_words(reason)),
+            _ => None,
+        })
+        .unwrap_or_else(|| "harn knows no switch for it".to_string())
+}
+
+/// Why `d` cannot turn `item` off for this project, to follow its name: `cannot be turned off:
+/// it is part of Claude Code`, or where its only switch is.
+pub fn refusal(item: &Item) -> String {
+    match any_knob(item) {
+        Some((_, scope)) => format!(
+            "has no switch for this project only; its only switch is {}: `harn off --scope \
+             {scope}` changes it there",
+            scope_words(scope)
+        ),
+        None => format!("cannot be turned off: {}", fixed_reason(item)),
+    }
+}
+
+/// Rows harn turned off, at any depth.
+fn off_count(rows: &[Row]) -> usize {
+    rows.iter()
+        .map(|r| usize::from(r.state == State::Off && r.id.is_some()) + off_count(&r.children))
+        .sum()
 }
 
 /// Items under `item`, at any depth.
@@ -2125,13 +2230,53 @@ fn plugin_version(plugin: &Item) -> Option<String> {
 }
 
 /// Where `enabledPlugins` turns the plugin on, in words, from the first link of its chain.
-fn enabled_scope(plugin: &Item, places: &Places) -> Option<&'static str> {
+fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
     let first = plugin.origin.why.first()?;
     if first.starts_with("synced from claude.ai") {
-        return Some("through claude.ai");
+        return Some("through claude.ai".to_string());
     }
-    let file = first.split('#').next()?;
-    Some(file_scope(Path::new(file), places))
+    let (file, rest) = first.split_once('#')?;
+    let pointer = rest.split([' ', '(']).next().unwrap_or_default();
+    Some(setting_scope(Path::new(file), pointer, places).sentence())
+}
+
+/// Whom a setting applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// What the file alone says ([`file_scope`]): `for every project`, `by this repository`,
+    /// `for this project only`, `by your organisation`.
+    File(&'static str),
+    /// A key under `projects/<dir>` (`~/.claude.json`): that project only, whatever the file.
+    Project(String),
+}
+
+impl Reach {
+    /// After a verb: `for every project`, `for this project only`, `for ~/other/dir only`.
+    pub fn sentence(&self) -> String {
+        match self {
+            Reach::File(words) => words.to_string(),
+            Reach::Project(dir) => format!("for {dir} only"),
+        }
+    }
+
+    /// In parentheses after a setting: `every project`, `this project`, `~/other/dir`.
+    pub fn short(&self) -> String {
+        match self {
+            Reach::File(words) => words.strip_prefix("for ").unwrap_or(words).to_string(),
+            Reach::Project(dir) => dir.clone(),
+        }
+    }
+}
+
+/// Whom the setting at `pointer` in `file` applies to: the pointer first (a key under
+/// `projects/<dir>` is that project's, `this project` when it is the target dir), the file only
+/// for any other pointer.
+pub fn setting_scope(file: &Path, pointer: &str, places: &Places) -> Reach {
+    let words = pointer_words(pointer, places);
+    match words.as_slice() {
+        [first, dir, ..] if first == "projects" => Reach::Project(dir.clone()),
+        _ => Reach::File(file_scope(file, places)),
+    }
 }
 
 /// `for every project` (`~/.claude/settings.json`), `by this repository`
@@ -2208,6 +2353,8 @@ fn sort_rows(rows: &mut [Row], sort: Sort) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffCard {
     pub title: String,
+    /// A sentence before Writes when the switch does more than the row (every hook at once).
+    pub lead: Option<String>,
     pub writes: Vec<String>,
     /// `8 skills, 5 commands, 1 MCP server (next session)`.
     pub leaves: String,
@@ -2308,8 +2455,19 @@ pub fn off_card(
         (0, false) => "nothing in the first request".to_string(),
         (known, false) => format!("{} of the first request", size(known)),
     };
+    let all_hooks = plan
+        .ops
+        .iter()
+        .any(|op| matches!(&op.knob, Knob::Setting { pointer, .. } if pointer == ALL_HOOKS));
     OffCard {
-        title: format!("Turn off {name} for {}", scope_short(scope)),
+        title: if all_hooks {
+            format!("Turn off all hooks for {}", scope_short(scope))
+        } else {
+            format!("Turn off {name} for {}", scope_short(scope))
+        },
+        lead: all_hooks.then(|| {
+            format!("{name} has no switch of its own; Claude Code turns hooks off all at once.")
+        }),
         writes,
         leaves,
         leave_list,
@@ -2402,11 +2560,15 @@ fn where_link(link: &str, places: &Places) -> String {
     if let Some(rest) = link.strip_prefix("contributes: ") {
         let parts: Vec<String> = rest
             .split(" · ")
-            .map(|p| match p.split_once(' ') {
-                Some(("1", word)) => format!("1 {}", word.trim_end_matches('s')),
-                _ => p.to_string(),
+            .filter_map(|p| match p.split_once(' ') {
+                Some(("0", _)) => None,
+                Some(("1", word)) => Some(format!("1 {}", word.trim_end_matches('s'))),
+                _ => Some(p.to_string()),
             })
             .collect();
+        if parts.is_empty() {
+            return "contributes nothing that loads".to_string();
+        }
         return format!("contributes {}", parts.join(" · "));
     }
     // `[words ]<file>#/a/b = value` or `<file>#/a/b (http)`
@@ -2418,8 +2580,7 @@ fn where_link(link: &str, places: &Places) -> String {
             None => (rest, ""),
         };
         let words = pointer_words(pointer, places).join(" › ");
-        let scope = file_scope(Path::new(file), places);
-        let scope = scope.strip_prefix("for ").unwrap_or(scope);
+        let scope = setting_scope(Path::new(file), pointer, places).short();
         let tail = places.text(tail);
         let tail = if tail.is_empty() {
             String::new()
@@ -2540,6 +2701,64 @@ mod tests {
     }
 
     #[test]
+    fn a_setting_reaches_whom_its_pointer_says_then_whom_its_file_says() {
+        let p = places();
+        let home = Path::new("/home/me/.claude.json");
+        let user = Path::new("/home/me/.claude/settings.json");
+        let local = Path::new("/home/me/2lab.ai/zbrain/.claude/settings.local.json");
+        let scope = |file, pointer| setting_scope(file, pointer, &p);
+        assert_eq!(
+            scope(user, "/enabledPlugins/slack@claude-plugins-official").sentence(),
+            "for every project"
+        );
+        assert_eq!(
+            scope(local, "/enabledPlugins/x").sentence(),
+            "for this project only"
+        );
+        let this = scope(
+            home,
+            "/projects/~1home~1me~12lab.ai~1zbrain/disabledMcpServers/-",
+        );
+        assert_eq!(
+            (this.sentence(), this.short()),
+            ("for this project only".into(), "this project".into())
+        );
+        let other = scope(home, "/projects/~1home~1me~1other~1app/disabledMcpServers");
+        assert_eq!(
+            (other.sentence(), other.short()),
+            (
+                "for ~/other/app only".to_string(),
+                "~/other/app".to_string()
+            )
+        );
+        // Only a key under `projects` is a project's; anything else in the file is the file's.
+        assert_eq!(scope(home, "/mcpServers/x").short(), "every project");
+    }
+
+    #[test]
+    fn a_target_outside_home_keeps_absolute_paths_absolute() {
+        let p = Places {
+            dir: PathBuf::from("/srv/app"),
+            home: Some(PathBuf::from("/home/me")),
+        };
+        assert_eq!(p.path(Path::new("/srv/other/f.md")), "/srv/other/f.md");
+        assert_eq!(
+            p.path(Path::new("/etc/claude/managed.json")),
+            "/etc/claude/managed.json"
+        );
+        assert_eq!(
+            p.path(Path::new("/srv/app/.claude/settings.json")),
+            ".claude/settings.json"
+        );
+        assert_eq!(
+            p.path(Path::new("/home/me/.claude/CLAUDE.md")),
+            "~/.claude/CLAUDE.md"
+        );
+        assert_eq!(p.text("read /srv/other/f.md"), "read /srv/other/f.md");
+        assert!(!p.path(Path::new("/srv/other/f.md")).contains('~'));
+    }
+
+    #[test]
     fn where_links_read_as_words() {
         let p = places();
         assert_eq!(
@@ -2561,7 +2780,15 @@ mod tests {
                 "disabled by /home/me/.claude.json#/projects/~1home~1me~12lab.ai~1zbrain/disabledMcpServers",
                 &p
             ),
-            "disabled by ~/.claude.json › projects › this project › disabledMcpServers   (every project)"
+            "disabled by ~/.claude.json › projects › this project › disabledMcpServers   (this project)"
+        );
+        // Another project's key in the same file is that project's, never every project's.
+        assert_eq!(
+            where_link(
+                "disabled by /home/me/.claude.json#/projects/~1home~1me~1other~1app/disabledMcpServers",
+                &p
+            ),
+            "disabled by ~/.claude.json › projects › ~/other/app › disabledMcpServers   (~/other/app)"
         );
         assert_eq!(
             where_link("/home/me/.claude/plugins/cache/x/slack/1.4.1", &p),
@@ -2572,7 +2799,14 @@ mod tests {
                 "contributes: 8 skills · 5 commands · 0 agents · 0 hooks · 1 MCP servers",
                 &p
             ),
-            "contributes 8 skills · 5 commands · 0 agents · 0 hooks · 1 MCP server"
+            "contributes 8 skills · 5 commands · 1 MCP server"
+        );
+        assert_eq!(
+            where_link(
+                "contributes: 0 skills · 0 commands · 0 agents · 0 hooks · 0 MCP servers",
+                &p
+            ),
+            "contributes nothing that loads"
         );
     }
 
@@ -2631,7 +2865,7 @@ mod tests {
         }
     }
 
-    /// slack: its MCP server (0.4 KB) and its lines in both listings (2.0 + 1.0 KB); zworkflow:
+    /// slack: its MCP server (4.0 KB) and its lines in both listings (2.0 + 1.0 KB); zworkflow:
     /// 32 KB of listing lines and a hook that runs later; a user skill, memory, a CLAUDE.md.
     fn synthetic() -> Tree {
         let (s, z, p) = (Some(SLACK), Some(ZWORKFLOW), Layer::Plugin);
@@ -2704,7 +2938,7 @@ mod tests {
                 Kind::McpServer,
                 s,
                 p,
-                Some(400),
+                Some(4000),
             ),
             item(
                 "zw-stop",
@@ -2742,7 +2976,7 @@ mod tests {
             signals: Vec::new(),
             items,
             // The resolver's totals rule: every leaf once, the listings by their entries.
-            predicted_known: 400 + 22_700 + 13_000 + 5000 + 3000,
+            predicted_known: 4000 + 22_700 + 13_000 + 5000 + 3000,
             unknown_rows: 0,
             observed_body: None,
             warnings: Vec::new(),
@@ -2764,9 +2998,9 @@ mod tests {
         assert_eq!(
             order,
             [
-                (GroupKind::SkillListing, Some(22_700), Some(51)),
-                (GroupKind::AgentListing, Some(13_000), Some(29)),
-                (GroupKind::Memory, Some(5000), Some(11)),
+                (GroupKind::SkillListing, Some(22_700), Some(47)),
+                (GroupKind::AgentListing, Some(13_000), Some(27)),
+                (GroupKind::Memory, Some(5000), Some(10)),
                 (GroupKind::ProjectFiles, Some(3000), Some(6)),
                 (GroupKind::Plugins, None, None),
             ]
@@ -2775,28 +3009,32 @@ mod tests {
         // repeat listing lines); slack's server is the only byte no sized group holds.
         let sized: Vec<&Group> = screen.groups.iter().filter(|g| !g.overlap).collect();
         let bytes: u64 = sized.iter().filter_map(|g| g.bytes).sum();
-        assert_eq!(bytes, tree.predicted_known - 400);
+        assert_eq!(bytes, tree.predicted_known - 4000);
         let shares: u64 = sized.iter().filter_map(|g| g.share).sum();
         assert!(shares <= 100, "{shares}");
 
         let plugins = &screen.groups[4];
         assert!(plugins.overlap);
+        // The overlap claim is the listing lines only; their own bytes are named apart.
         assert_eq!(
             plugins.count_line,
-            "35 KB would leave with them · counted in the listings above"
+            "39 KB would leave with them · 35 KB counted in the listings above"
         );
-        assert_eq!(plugins.count_short, "35 KB in the listings above");
+        assert_eq!(
+            plugins.count_short,
+            "35 KB in the listings above + 4.0 KB of their own"
+        );
         let names: Vec<(&str, Option<u64>)> = plugins
             .rows
             .iter()
             .map(|r| (r.name.as_str(), r.bytes))
             .collect();
-        assert_eq!(names, [("zworkflow", Some(32_000)), ("slack", Some(3400))]);
+        assert_eq!(names, [("zworkflow", Some(32_000)), ("slack", Some(7000))]);
         assert_eq!(size(32_000), "32 KB");
         assert_eq!(
             plugins.rows[0].share,
-            Some(72),
-            "32,000 of 44,100, rounded down"
+            Some(67),
+            "32,000 of 47,700, rounded down"
         );
         // Its parts keep their own bytes; the hook runs later.
         let slack = &plugins.rows[1];
@@ -2805,11 +3043,11 @@ mod tests {
             (r.bytes, r.absent)
         };
         assert_eq!(part("block-kit"), (Some(2000), None));
-        assert_eq!(part("slack"), (Some(400), None));
+        assert_eq!(part("slack"), (Some(4000), None));
         // The detail names both parts of what turning it off frees.
         assert_eq!(
             slack.detail.saves,
-            "Turning it off frees 3.4 KB: 0.4 KB of its own plus 3.0 KB of its entries in the \
+            "Turning it off frees 7.0 KB: 4.0 KB of its own plus 3.0 KB of its entries in the \
              skill and agent listings."
         );
         assert_eq!(
@@ -2824,6 +3062,117 @@ mod tests {
             .unwrap();
         assert_eq!(owner.bytes, Some(2000));
         assert_eq!(owner.detail.saves, slack.detail.saves);
+    }
+
+    #[test]
+    fn plugins_with_only_their_own_bytes_say_so_without_the_listings() {
+        let mut tree = synthetic();
+        // Only slack's server: no plugin brings listing lines.
+        for item in &mut tree.items {
+            if matches!(item.kind, Kind::SkillListing | Kind::AgentRoster) {
+                item.children.retain(|c| c.origin.plugin.is_none());
+            }
+        }
+        let screen = build(&tree, &[], &HashMap::new(), Sort::Size);
+        let plugins = screen
+            .groups
+            .iter()
+            .find(|g| g.kind == GroupKind::Plugins)
+            .unwrap();
+        assert_eq!(plugins.count_line, "4.0 KB would leave with them");
+        assert_eq!(plugins.count_short, "4.0 KB would leave with them");
+    }
+
+    #[test]
+    fn a_plugin_without_its_origin_field_keeps_its_owner_rows_and_action() {
+        let mut tree = synthetic();
+        // The plugin item names itself only by its label; its parts still say `slack@…`.
+        let plugin = tree
+            .items
+            .iter_mut()
+            .find(|i| i.kind == Kind::Plugin && i.label == SLACK);
+        plugin.unwrap().origin.plugin = None;
+        let screen = build(&tree, &[], &HashMap::new(), Sort::Size);
+        let plugins = screen
+            .groups
+            .iter()
+            .find(|g| g.kind == GroupKind::Plugins)
+            .unwrap();
+        let slack = plugins.rows.iter().find(|r| r.name == "slack").unwrap();
+        assert_eq!(slack.children.len(), 3, "its server and two listing lines");
+        let id = slack.id.clone().unwrap();
+        for kind in [GroupKind::SkillListing, GroupKind::AgentListing] {
+            let group = screen.groups.iter().find(|g| g.kind == kind).unwrap();
+            let owner = group.rows.iter().find(|r| r.name == "slack").unwrap();
+            assert_eq!(
+                owner.id.as_ref(),
+                Some(&id),
+                "{kind:?}: d on it turns slack off"
+            );
+            assert_eq!(owner.saving, slack.saving, "{kind:?}");
+        }
+    }
+
+    /// A tree with no listings at all: harn turned off every skill and agent it had.
+    fn without_listings() -> Tree {
+        let mut tree = synthetic();
+        tree.items
+            .retain(|i| !matches!(i.kind, Kind::SkillListing | Kind::AgentRoster));
+        tree
+    }
+
+    #[test]
+    fn skills_turned_off_stay_listed_with_no_live_skill_listing() {
+        let tree = without_listings();
+        let off = [OffItem {
+            item_id: "claude-code/skill/user/mine".to_string(),
+            entry_id: "e1".to_string(),
+            pointer: None,
+        }];
+        let screen = build(&tree, &off, &HashMap::new(), Sort::Size);
+        let group = screen
+            .groups
+            .iter()
+            .find(|g| g.kind == GroupKind::SkillListing)
+            .expect("the skill listing group, for its off row");
+        assert_eq!(group.count_line, "1 turned off here");
+        assert_eq!(group.bytes, None);
+        let (g, path) = screen.find(&off[0].item_id).expect("o can find it");
+        let row = screen.row(g, &path).unwrap();
+        assert_eq!((row.name.as_str(), row.state), ("mine", State::Off));
+        assert!(screen
+            .groups
+            .iter()
+            .all(|g| g.kind != GroupKind::AgentListing));
+    }
+
+    #[test]
+    fn agents_turned_off_stay_listed_with_no_live_agent_roster() {
+        let tree = without_listings();
+        let off = [
+            OffItem {
+                item_id: "claude-code/sub-agent/project/helper".to_string(),
+                entry_id: "e1".to_string(),
+                pointer: None,
+            },
+            OffItem {
+                item_id: "claude-code/sub-agent/user/critic".to_string(),
+                entry_id: "e2".to_string(),
+                pointer: None,
+            },
+        ];
+        let screen = build(&tree, &off, &HashMap::new(), Sort::Size);
+        let group = screen
+            .groups
+            .iter()
+            .find(|g| g.kind == GroupKind::AgentListing)
+            .expect("the agent listing group, for its off rows");
+        assert_eq!(group.count_line, "2 turned off here");
+        assert_eq!(group.absent, Some("off"));
+        for o in &off {
+            let (g, path) = screen.find(&o.item_id).expect("o can find it");
+            assert_eq!(screen.row(g, &path).unwrap().state, State::Off);
+        }
     }
 
     #[test]

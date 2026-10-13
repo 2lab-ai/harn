@@ -9,7 +9,7 @@ mod app;
 pub mod model;
 mod view;
 
-pub use app::{App, Message, Pending, Staged, Tone, TRIM_HINT};
+pub use app::{App, Message, Part, Pending, Staged, Tone, TRIM_HINT};
 pub use model::Sort;
 
 use crate::journal::Journal;

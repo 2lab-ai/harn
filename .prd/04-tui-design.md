@@ -129,7 +129,7 @@ Enter the detail panel shows `turned off · u undoes · takes effect next sessio
 │ 1  ~/.claude/settings.json › enabledPlugins › slack = true   (every project) │
 │ 2  installed from claude-plugins-official, version 1.4.1                     │
 │ 3  files: ~/.claude/plugins/cache/claude-plugins-official/slack/1.4.1        │
-│ 4  contributes 8 skills · 5 commands · 1 MCP server · 0 agents · 0 hooks      │
+│ 4  contributes 8 skills · 5 commands · 1 MCP server                          │
 │ Switches  this project (.claude/settings.local.json) · you (~/.claude/…)     │
 │                                                              Esc close      │
 └──────────────────────────────────────────────────────────────────────────────┘

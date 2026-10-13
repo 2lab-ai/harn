@@ -10,15 +10,16 @@ use common::{fixture, target, Fixture};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harn::journal::{self, Journal, KIND_EDIT};
 use harn::model::{self, Kind, Tree};
-use harn::plan;
+use harn::plan::{self, PlanOp, PlanRequest, PLAN_SCHEMA};
 use harn::resolve::{ClaudeCode, Resolver};
 use harn::tui::model::{GroupKind, Row, State};
-use harn::tui::{App, Opts, Pending, Sort, Tone, TRIM_HINT};
+use harn::tui::{App, Opts, Part, Pending, Sort, Tone, TRIM_HINT};
 use harn::writers;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::Modifier;
 use ratatui::Terminal;
+use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -110,7 +111,7 @@ fn local_settings(f: &Fixture) -> PathBuf {
 }
 
 fn message(app: &App) -> String {
-    app.message().map(|m| m.text.clone()).unwrap_or_default()
+    app.message().map(|m| m.text()).unwrap_or_default()
 }
 
 /// The frame row drawn reversed below the header (the cursor line).
@@ -175,19 +176,34 @@ fn row<'a>(rows: &'a [Row], name: &str) -> &'a Row {
     })
 }
 
-/// Opens every group and row, top to bottom.
+/// Opens every group and row, top to bottom, and leaves the cursor on the first line.
 fn open_all(app: &mut App) {
     press(app, KeyCode::Char('g'));
-    let mut last = None;
-    for _ in 0..5000 {
+    loop {
         press(app, KeyCode::Char('l'));
+        let at = app.cursor();
         press(app, KeyCode::Char('j'));
-        let now = (app.cursor_name(), app.rows().len());
-        if last.as_ref() == Some(&now) {
+        if app.cursor() == at {
             break;
         }
-        last = Some(now);
     }
+    press(app, KeyCode::Char('g'));
+}
+
+/// The list rows of a frame: from under the header rule to the next rule, cards over it left
+/// out (their lines carry a border).
+fn list_rows(frame: &str) -> Vec<&str> {
+    frame
+        .lines()
+        .skip(3)
+        .take_while(|l| !l.starts_with('─') && !l.starts_with('-'))
+        .filter(|l| !l.contains(['│', '┌', '└', '|', '+']))
+        .collect()
+}
+
+/// Bytes of every file under the fixture (its project, its home, the journal).
+fn files(f: &Fixture) -> Vec<(PathBuf, Vec<u8>)> {
+    snapshot(&f.root)
 }
 
 // ---- view-model ------------------------------------------------------------------------------
@@ -650,8 +666,16 @@ fn d_opens_one_card_enter_applies_through_the_journal_and_u_restores_the_bytes()
     let before = std::fs::read(local_settings(&f)).unwrap();
     let mut app = app(&f);
     assert!(app.select(ALPHA));
+    let untouched = files(&f);
     press(&mut app, KeyCode::Char('d'));
     assert!(app.staged().is_some());
+    // Nothing is written while the card is open, nor while the list of what leaves is.
+    assert_eq!(files(&f), untouched, "d wrote before Enter");
+    press(&mut app, KeyCode::Right);
+    card(&screen(&app, 80, 24), "What leaves with alpha");
+    assert_eq!(files(&f), untouched, "the leaves list wrote before Enter");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(files(&f), untouched);
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         let frame = screen(&app, width, height);
         let inside = card(&frame, "Turn off alpha for this project");
@@ -751,15 +775,21 @@ fn the_leaves_line_opens_the_list_of_what_leaves() {
 #[test]
 fn esc_on_the_card_writes_nothing() {
     let f = fixture();
-    let before = std::fs::read(local_settings(&f)).unwrap();
+    let before = files(&f);
     let mut app = app(&f);
     assert!(app.select(ALPHA));
+    // Checked at every step, not only after Esc: writing on `d` and rolling back on Esc fails.
     press(&mut app, KeyCode::Char('d'));
+    assert_eq!(files(&f), before, "after d");
+    press(&mut app, KeyCode::Right);
+    assert_eq!(files(&f), before, "with the leaves list open");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(files(&f), before, "back on the card");
     press(&mut app, KeyCode::Esc);
     assert!(app.staged().is_none());
     assert_eq!(message(&app), "cancelled: nothing written");
-    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), before);
-    assert!(journal::history(&journal(&f)).unwrap().is_empty());
+    assert_eq!(files(&f), before, "after Esc");
+    assert!(!f.root.join("state").exists(), "not even the journal dir");
     assert!(!app.should_quit());
 }
 
@@ -775,7 +805,7 @@ fn w_shows_where_it_comes_from_home_relative_and_wrapped_on_slashes() {
             " 1  ~/.claude/settings.json › enabledPlugins › alpha = true   (every project)",
             " 2  installed from market-one, version 1.0.0",
             " 3  files: ~/.claude/plugins/cache/market-one/alpha/1.0.0",
-            " 4  contributes 2 skills · 0 commands · 0 agents · 1 hook · 1 MCP server",
+            " 4  contributes 2 skills · 1 hook · 1 MCP server",
             " Switches  this project (.claude/settings.local.json)",
             "                                                                    Esc close",
         ]
@@ -982,11 +1012,48 @@ fn assert_clean(frame: &str, words: &[String], what: &str) {
         );
     }
     for line in frame.lines() {
-        // A bare `?` for a size, or a sentence cut with an ellipsis.
+        // A sentence cut with an ellipsis.
         let line = line.trim_end().trim_end_matches(['│', '|']).trim_end();
-        assert!(!line.ends_with(" ?"), "{what}: a bare ? in\n{frame}");
         assert!(!line.ends_with('…'), "{what}: a cut sentence in\n{frame}");
     }
+    // A bare `?` size cell anywhere in a list row. A `?` in a card, the key bar or a question
+    // is no size: only list rows are searched, for a `?` standing alone between spaces.
+    for row in list_rows(frame) {
+        assert!(
+            !row.split_whitespace().any(|w| w == "?"),
+            "{what}: a bare ? size in {row:?}\n{frame}"
+        );
+    }
+}
+
+/// [`assert_clean`] on the frame at 80×24 and at 120×40.
+fn clean_both(app: &App, words: &[String], what: &str) {
+    for (w, h) in [(80, 24), (120, 40)] {
+        assert_clean(&text(app, w, h), words, &format!("{what} at {w}x{h}"));
+    }
+}
+
+#[test]
+fn the_bare_question_mark_guard_catches_a_size_cell_anywhere_in_a_list_row() {
+    let rule = "─".repeat(20);
+    let frame = |row: &str| format!("head\nhead\n{rule}\n{row}\n{rule}\npanel\n{rule}\n ? keys");
+    let caught = |row: &str| {
+        let frame = frame(row);
+        std::panic::catch_unwind(|| assert_clean(&frame, &[], "probe")).is_err()
+    };
+    assert!(caught(" ▸ Hooks (2)    ?   0%"), "mid-row");
+    assert!(
+        caught(" ▸ Hooks (2)                                              ?"),
+        "row end"
+    );
+    assert!(!caught(
+        " ▸ Hooks (2)                                     unmeasured"
+    ));
+    // In a card over the list, in the key bar, in a question: no size.
+    assert!(!caught(
+        "│ ?     this card      q Esc  quit / close              r   refresh │"
+    ));
+    assert!(!caught(" ▸│Undo the last change?                    │%"));
 }
 
 #[test]
@@ -994,62 +1061,81 @@ fn no_frame_shows_a_raw_id_an_absolute_path_a_hash_or_an_internal_tag() {
     let f = fixture();
     let words = forbidden(&f);
     let mut app = app(&f);
-    for (w, h) in [(80, 24), (120, 40)] {
-        assert_clean(&text(&app, w, h), &words, "first screen");
+    clean_both(&app, &words, "first screen");
+    for key in ['i', '?'] {
+        press(&mut app, KeyCode::Char(key));
+        clean_both(&app, &words, &format!("{key} card"));
+        press(&mut app, KeyCode::Esc);
     }
-    press(&mut app, KeyCode::Char('i'));
-    assert_clean(&text(&app, 80, 24), &words, "notes");
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Char('?'));
-    assert_clean(&text(&app, 80, 24), &words, "keys");
-    press(&mut app, KeyCode::Esc);
     open_all(&mut app);
-    // Every line: its panel, its `w` card, its `d` card and the list of what leaves.
-    press(&mut app, KeyCode::Char('g'));
     let total = app.rows().len();
     assert!(total > 60, "{total}");
-    for _ in 0..total {
-        let name = app.cursor_name().unwrap();
-        for (w, h) in [(80, 24), (120, 40)] {
-            assert_clean(&text(&app, w, h), &words, &name);
+    // Everything is open: no folded marker anywhere in the list.
+    let tall = text(&app, 120, u16::try_from(total + 20).unwrap());
+    assert!(
+        list_rows(&tall).iter().all(|l| !l.contains('▸')),
+        "a folded line left:\n{tall}"
+    );
+    // Every line in every state: its panel, its `w` card, its `d` card, the list of what
+    // leaves, then applied (its off row), the `o` card, the `u` confirm, and the frame after
+    // the undo. Each at 80×24 and 120×40.
+    let mut visited = BTreeSet::new();
+    let mut applied = 0;
+    for at in 0..total {
+        // Back on line `at`: a change and its undo may have moved the cursor.
+        press(&mut app, KeyCode::Char('g'));
+        for _ in 0..at {
+            press(&mut app, KeyCode::Char('j'));
         }
+        assert_eq!(app.cursor(), at);
+        visited.insert(app.cursor());
+        let name = app.cursor_name().unwrap();
+        clean_both(&app, &words, &name);
         press(&mut app, KeyCode::Char('w'));
-        assert_clean(&text(&app, 80, 24), &words, &format!("w {name}"));
-        if app.message().is_none() {
+        clean_both(&app, &words, &format!("w {name}"));
+        if app.has_card() {
             press(&mut app, KeyCode::Esc);
         }
         press(&mut app, KeyCode::Char('d'));
-        assert_clean(&text(&app, 80, 24), &words, &format!("d {name}"));
+        clean_both(&app, &words, &format!("d {name}"));
         if app.staged().is_some() {
             press(&mut app, KeyCode::Right);
-            let frame = text(&app, 80, 24);
-            assert_clean(&frame, &words, &format!("leaves {name}"));
-            if frame.contains("┌ What leaves with") {
+            clean_both(&app, &words, &format!("leaves {name}"));
+            if text(&app, 80, 24).contains("┌ What leaves with") {
                 press(&mut app, KeyCode::Esc);
             }
-            press(&mut app, KeyCode::Esc);
+            press(&mut app, KeyCode::Enter);
+            clean_both(&app, &words, &format!("applied {name}"));
+            press(&mut app, KeyCode::Char('o'));
+            clean_both(&app, &words, &format!("o {name}"));
+            if app.has_card() {
+                press(&mut app, KeyCode::Esc);
+            }
+            press(&mut app, KeyCode::Char('u'));
+            clean_both(&app, &words, &format!("u {name}"));
+            if app.has_card() {
+                press(&mut app, KeyCode::Char('y'));
+                applied += 1;
+            }
+            clean_both(&app, &words, &format!("restored {name}"));
+            assert_eq!(
+                app.rows().len(),
+                total,
+                "{name}: the undo brought every line back"
+            );
         }
         assert!(
             !app.should_quit(),
             "{name}: a key meant for a card reached the list"
         );
-        press(&mut app, KeyCode::Char('j'));
     }
-    // After a change: the off row, its cards, the undo confirm and the messages.
-    assert!(app.select(ALPHA));
-    press(&mut app, KeyCode::Char('d'));
-    press(&mut app, KeyCode::Enter);
-    assert_clean(&text(&app, 80, 24), &words, "applied");
-    press(&mut app, KeyCode::Char('w'));
-    assert_clean(&text(&app, 80, 24), &words, "w on the off row");
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Char('o'));
-    assert_clean(&text(&app, 80, 24), &words, "o card");
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Char('u'));
-    assert_clean(&text(&app, 80, 24), &words, "u confirm");
-    press(&mut app, KeyCode::Char('y'));
-    assert_clean(&text(&app, 80, 24), &words, "undone");
+    // Every expanded line was visited once, and most had a change applied and undone.
+    assert_eq!(visited.len(), total);
+    assert!(applied > 40, "{applied} changes applied and undone");
+    assert!(journal::history(&journal(&f))
+        .unwrap()
+        .iter()
+        .all(|e| e.undone_at.is_some()));
 }
 
 // ---- lifecycle --------------------------------------------------------------------------------
@@ -1076,7 +1162,7 @@ fn readonly_refuses_every_write_key_and_greys_it() {
         press(&mut app, KeyCode::Char(key));
         let m = app.message().expect("a message").clone();
         assert_eq!(m.tone, Tone::Error);
-        assert!(m.text.starts_with("readonly:"), "{key}: {}", m.text);
+        assert!(m.text().starts_with("readonly:"), "{key}: {}", m.text());
     }
     // The refusal takes the panel's first line; the detail loses whole sentences from its end,
     // never a sentence cut with `…`.
@@ -1194,7 +1280,7 @@ fn edit_called_directly_under_readonly_refuses_and_journals_nothing() {
     app.edit(&rule.id, editor.to_str().unwrap());
     let m = app.message().unwrap().clone();
     assert_eq!(m.tone, Tone::Error);
-    assert!(m.text.starts_with("readonly:"), "{}", m.text);
+    assert!(m.text().starts_with("readonly:"), "{}", m.text());
     assert_eq!(
         std::fs::read(rule.origin.path.as_ref().unwrap()).unwrap(),
         before
@@ -1224,7 +1310,7 @@ fn u_undoes_only_the_entry_it_confirmed() {
     let m = app.message().unwrap().clone();
     assert_eq!(m.tone, Tone::Error);
     assert_eq!(
-        m.text,
+        m.text(),
         "the journal changed since you confirmed; press u again to see the newest change"
     );
     assert_eq!(
@@ -1253,7 +1339,9 @@ fn o_on_an_off_row_opens_the_back_on_card_and_enter_turns_it_on() {
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.cursor_id().as_deref(), Some(ALPHA), "the off row");
     assert!(screen(&app, 80, 24)[23].contains("o turn back on"));
+    let off = files(&f);
     press(&mut app, KeyCode::Char('o'));
+    assert_eq!(files(&f), off, "o wrote before Enter");
     let inside = card(&screen(&app, 80, 24), "Turn alpha back on");
     assert_eq!(
         inside[..3],
@@ -1342,7 +1430,25 @@ fn filter_shows_matches_with_their_group_and_esc_restores() {
         ]
     );
     assert_eq!(app.cursor_name().as_deref(), Some("beta-reviewer"));
+    // What is drawn: exactly these lines, in this order, nothing else in the list.
     let frame = screen(&app, 80, 24);
+    let drawn: Vec<String> = list_rows(&frame.join("\n"))
+        .iter()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let starts = [
+        " ▾ Agent listing  10 entries",
+        "   ▾ beta ",
+        "       beta-reviewer ",
+        " ▾ Plugins (2)  0.3 KB in the listings above",
+        "   ▾ beta ",
+        "       beta-reviewer ",
+    ];
+    assert_eq!(drawn.len(), starts.len(), "{drawn:#?}");
+    for (line, start) in drawn.iter().zip(starts) {
+        assert!(line.starts_with(start), "{line:?} is not {start:?}");
+    }
     assert!(frame[23].starts_with(" /beta-rev_"), "{}", frame[23]);
     let footer = frame
         .iter()
@@ -1382,10 +1488,23 @@ fn s_toggles_size_and_name_order() {
     press(&mut app, KeyCode::Right);
     let names =
         |app: &App| -> Vec<String> { app.rows()[5..7].iter().map(|r| r.1.clone()).collect() };
+    // The order drawn, not only the order kept.
+    let drawn = |app: &App| -> Vec<String> {
+        screen(app, 80, 24)[8..10]
+            .iter()
+            .map(|l| l.split_whitespace().nth(1).unwrap_or_default().to_string())
+            .collect()
+    };
     assert_eq!(names(&app), ["beta", "alpha"]);
+    assert_eq!(
+        drawn(&app),
+        ["beta", "alpha"],
+        "by size: 0.2 KB, then 0.1 KB"
+    );
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(app.sort(), Sort::Name);
     assert_eq!(names(&app), ["alpha", "beta"]);
+    assert_eq!(drawn(&app), ["alpha", "beta"]);
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(app.sort(), Sort::Size);
 }
@@ -1411,8 +1530,144 @@ fn tiny_frames_draw_without_panic() {
     press(&mut app, KeyCode::Char('d'));
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('u'));
-    let short = text(&app, 80, 8);
-    assert!(short.contains("y = yes"), "the answer line stays: {short}");
+    // A confirm taller than the frame is not drawn: the message row says what it needs and
+    // `y` undoes nothing the reader cannot see.
+    let short = screen(&app, 80, 8);
+    assert!(
+        short
+            .iter()
+            .any(|l| l.starts_with(" terminal too small for this card; needs at least 40×10")),
+        "{}",
+        short.join("\n")
+    );
+    assert!(!short.join("\n").contains("y = yes"));
+    press(&mut app, KeyCode::Char('y'));
+    assert!(journal::history(&journal(&f)).unwrap()[0]
+        .undone_at
+        .is_none());
+    assert!(app.has_card(), "still asking");
+    assert!(text(&app, 80, 24).contains("y = yes · n/Esc = no"));
+    press(&mut app, KeyCode::Char('y'));
+    assert!(journal::history(&journal(&f)).unwrap()[0]
+        .undone_at
+        .is_some());
+}
+
+#[test]
+fn a_card_too_big_for_the_frame_is_not_drawn_and_enter_writes_nothing() {
+    let f = fixture();
+    let before = files(&f);
+    let mut app = app(&f);
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Char('d'));
+    // 30 columns: under the 40 a card needs. Not drawn; one message row, cut at a word.
+    let small = screen(&app, 30, 12);
+    let all = small.join("\n");
+    assert!(!all.contains("Turn off alpha"), "not drawn:\n{all}");
+    assert_eq!(panel(&small)[0], " terminal too small for this", "{all}");
+    assert!(small[11].starts_with(" Esc close"), "{all}");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(files(&f), before, "Enter applied a card nobody saw");
+    assert!(app.staged().is_some(), "the card is still open");
+    // Wide enough to say it whole: the size it needs.
+    let short = screen(&app, 80, 9);
+    assert_eq!(
+        panel(&short)[0],
+        " terminal too small for this card; needs at least 40×10",
+        "{}",
+        short.join("\n")
+    );
+    // 40×12 passes the minimum, but at 40 columns the card's body wraps past 12 rows: still
+    // not drawn, and Enter still writes nothing.
+    let narrow = screen(&app, 40, 12);
+    assert!(
+        panel(&narrow)[0].starts_with(" terminal too small"),
+        "{}",
+        narrow.join("\n")
+    );
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(files(&f), before);
+    card(&screen(&app, 40, 20), "Turn off alpha for this project");
+    // Drawn whole at 80×24: Enter applies.
+    card(&screen(&app, 80, 24), "Turn off alpha for this project");
+    press(&mut app, KeyCode::Enter);
+    let applied = files(&f);
+    assert_ne!(applied, before, "applied once drawn");
+    // The `o` card too.
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.has_card());
+    let small = screen(&app, 30, 12);
+    assert!(!small.join("\n").contains("back on ─"));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(files(&f), applied, "o applied unseen");
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.has_card());
+    assert_eq!(message(&app), "cancelled: nothing written");
+}
+
+#[test]
+fn a_message_takes_one_row_of_whole_sentences_and_the_detail_keeps_the_rest() {
+    let f = fixture();
+    let mut app = app(&f);
+    // Three sentences; two fit in 79 columns.
+    app.report_error(
+        "The first sentence is here. The second one fits as well. The third sentence is far too \
+         long to fit on the same row."
+            .to_string(),
+    );
+    let rows = panel(&screen(&app, 80, 24));
+    assert_eq!(
+        rows,
+        [
+            " The first sentence is here. The second one fits as well.",
+            " Memory · notes Claude Code keeps for this directory",
+            " MEMORY.md (auto-memory) loads in every session here, up to its cap.",
+            " Open it (→); d turns auto-memory off for this project only.",
+        ]
+    );
+    // One sentence longer than the row: cut at a word, no ellipsis, still one row.
+    let long = format!("cannot read the journal: {}", "a-long-word ".repeat(12));
+    app.report_error(long.trim_end().to_string());
+    let rows = panel(&screen(&app, 80, 24));
+    assert_eq!(
+        rows[0],
+        " cannot read the journal: a-long-word a-long-word a-long-word a-long-word"
+    );
+    assert!(!rows[0].ends_with('…'));
+    assert_eq!(
+        rows[1], " Memory · notes Claude Code keeps for this directory",
+        "a detail sentence below it"
+    );
+}
+
+#[test]
+fn bars_stay_put_when_the_largest_line_scrolls_out_of_view() {
+    let f = fixture();
+    let mut app = app(&f);
+    open_all(&mut app);
+    // The two largest lines are the first two: the Memory group and MEMORY.md, 13 KB each.
+    let rows = app.rows();
+    assert_eq!(rows[0].1, "Memory (1)");
+    assert_eq!(rows[1].1, "MEMORY.md (auto-memory)");
+    let top = screen(&app, 80, 24);
+    // 14 list lines at 80×24: the cursor on line 15 scrolls both out of view.
+    for _ in 0..15 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    let scrolled = screen(&app, 80, 24);
+    assert!(
+        !scrolled.iter().any(|l| l.contains("MEMORY.md")),
+        "{}",
+        scrolled.join("\n")
+    );
+    // Lines 2..=13 are in both frames: the same text, bars included.
+    assert_eq!(top[3 + 2..3 + 14], scrolled[3..3 + 12]);
+    assert!(
+        scrolled[3..15]
+            .iter()
+            .any(|l| l.contains('█') || l.contains('▍')),
+        "some bar in view"
+    );
 }
 
 #[test]
@@ -1469,4 +1724,346 @@ fn trim_hint_refresh_and_quit() {
     assert!(message(&app).starts_with("refreshed"), "{}", message(&app));
     press(&mut app, KeyCode::Char('q'));
     assert!(app.should_quit());
+}
+
+/// Every item of `plugin` (`name@market`), at any depth, renamed `to`.
+fn rename_plugin(items: &mut [model::Item], plugin: &str, to: &str) {
+    for item in items {
+        if item.origin.plugin.as_deref() == Some(plugin) {
+            item.origin.plugin = Some(to.to_string());
+        }
+        rename_plugin(&mut item.children, plugin, to);
+    }
+}
+
+#[test]
+fn a_wide_cjk_name_is_cut_on_the_left_and_keeps_its_tail_its_marker_and_the_width() {
+    let f = fixture();
+    let mut t = tree(&f);
+    let wide = format!("{}尾部", "技能一覧".repeat(12)); // 50 chars, 100 columns
+    rename_plugin(
+        &mut t.items,
+        "alpha@market-one",
+        &format!("{wide}@market-one"),
+    );
+    let mut app = app_on(&f, t, false, true);
+    assert!(app.select_group("Plugins"));
+    press(&mut app, KeyCode::Right);
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        let frame = screen(&app, width, height);
+        let row = frame
+            .iter()
+            .find(|l| l.contains("尾部"))
+            .unwrap_or_else(|| panic!("{width}: no wide row:\n{}", frame.join("\n")));
+        assert!(row.contains('…'), "{width}: cut: {row}");
+        assert!(row.contains("一覧尾部"), "{width}: its tail: {row}");
+        assert!(!row.contains(&wide), "{width}: {row}");
+        assert!(row.starts_with("   ▸ …"), "{width}: its marker: {row}");
+        assert!(row.contains("0.1 KB"), "{width}: its size: {row}");
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(row.as_str()),
+            usize::from(width),
+            "{width}: {row}"
+        );
+    }
+}
+
+#[test]
+fn a_wide_cjk_off_row_draws_at_every_width_from_1_to_12() {
+    let f = fixture();
+    // A journal op for an item whose id names `漢字`: built from a tree where alpha has that id,
+    // applied for real (alpha turns off). The fresh tree has no such item: an off row.
+    let t = target(&f);
+    let mut renamed = tree(&f);
+    let wide_id = "claude-code/plugin/plugin/漢字";
+    renamed.items.iter_mut().find(|i| i.id == ALPHA).unwrap().id = wide_id.to_string();
+    let plan = plan::build_plan(&ClaudeCode, &t, &renamed, wide_id, None).unwrap();
+    writers::apply(&plan, &mut journal(&f)).unwrap();
+    let mut app = app(&f);
+    assert!(app.select(wide_id), "the off row");
+    assert_eq!(app.cursor_name().as_deref(), Some("漢字"));
+    for width in 1..=12u16 {
+        let buffer = draw(&app, width, 12);
+        let rows = lines(&buffer);
+        let reversed: Vec<u16> = (3..12)
+            .filter(|&y| (0..width).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED)))
+            .collect();
+        assert_eq!(reversed.len(), 1, "{width}: {rows:#?}");
+        let y = reversed[0];
+        assert!(
+            buffer[(0, y)].modifier.contains(Modifier::REVERSED),
+            "{width}: the cursor row from its first cell: {rows:#?}"
+        );
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(rows[usize::from(y)].as_str()),
+            usize::from(width),
+            "{width}: {rows:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_label_equal_to_another_items_id_is_shown_as_it_is() {
+    let f = fixture();
+    let mut t = tree(&f);
+    let prompt = t
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SystemPrompt)
+        .unwrap();
+    prompt.label = ALPHA.to_string();
+    let id = prompt.id.clone();
+    let mut app = app_on(&f, t, false, true);
+    assert!(app.select(&id));
+    press(&mut app, KeyCode::Char('d'));
+    // Not rewritten into `alpha`, the item that id belongs to.
+    assert_eq!(
+        message(&app),
+        format!("refused: {ALPHA} cannot be turned off: it is part of Claude Code")
+    );
+    assert_eq!(
+        app.message().unwrap().parts[1],
+        Part::Item {
+            id,
+            name: ALPHA.to_string()
+        }
+    );
+}
+
+#[test]
+fn ids_sharing_a_prefix_each_resolve_to_their_own_name() {
+    let f = fixture();
+    let mut t = tree(&f);
+    let one = "claude-code/skill/user/user-one";
+    let longer = format!("{one}-two");
+    // user-two's id now starts with user-one's.
+    let listing = t
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    let two = listing
+        .children
+        .iter_mut()
+        .find(|c| c.label == "user-two")
+        .unwrap();
+    two.id = longer.clone();
+    let op = |selector: &str| PlanOp {
+        selector: selector.to_string(),
+        scope: None,
+        knob: None,
+        reason: "test".to_string(),
+    };
+    let request = PlanRequest {
+        schema: PLAN_SCHEMA.to_string(),
+        target_dir: f.project.clone(),
+        ops: vec![op(one), op(&longer)],
+    };
+    let plan = plan::build_plan_from_request(&ClaudeCode, &target(&f), &t, &request).unwrap();
+    writers::apply(&plan, &mut journal(&f)).unwrap();
+    let mut app = app_on(&f, t, false, true);
+    press(&mut app, KeyCode::Char('u'));
+    let confirm = text(&app, 100, 30);
+    assert!(confirm.contains("user-one comes back on"), "{confirm}");
+    assert!(confirm.contains("user-two comes back on"), "{confirm}");
+    assert!(
+        !confirm.contains("user-one comes back on\n  user-one"),
+        "{confirm}"
+    );
+    press(&mut app, KeyCode::Char('y'));
+    assert_eq!(
+        message(&app),
+        "undone: user-one, user-two back · .claude/settings.local.json restored byte for byte"
+    );
+    let items: Vec<&Part> = app
+        .message()
+        .unwrap()
+        .parts
+        .iter()
+        .filter(|p| matches!(p, Part::Item { .. }))
+        .collect();
+    assert_eq!(
+        items,
+        [
+            &Part::Item {
+                id: one.to_string(),
+                name: "user-one".to_string()
+            },
+            &Part::Item {
+                id: longer,
+                name: "user-two".to_string()
+            },
+        ]
+    );
+}
+
+#[test]
+fn o_says_why_when_the_journal_cannot_turn_it_back_on() {
+    let f = fixture();
+    let mut app = app(&f);
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.cursor_id().as_deref(), Some(ALPHA), "the off row");
+    // The entry is gone from disk (pruned by another harn): a message, no card.
+    let entries = f.root.join("state/journal");
+    let aside = f.root.join("aside");
+    std::fs::rename(&entries, &aside).unwrap();
+    press(&mut app, KeyCode::Char('o'));
+    assert!(!app.has_card());
+    assert_eq!(message(&app), "no journal entry turns alpha back on");
+    // An entry that does not read: the journal's error, no card.
+    std::fs::rename(&aside, &entries).unwrap();
+    let entry = std::fs::read_dir(&entries)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("entry.json");
+    let good = std::fs::read(&entry).unwrap();
+    std::fs::write(&entry, b"{ not json").unwrap();
+    press(&mut app, KeyCode::Char('o'));
+    assert!(!app.has_card());
+    assert!(
+        message(&app).starts_with("cannot read the journal: "),
+        "{}",
+        message(&app)
+    );
+    assert_eq!(app.message().unwrap().tone, Tone::Error);
+    // Readable again: the card.
+    std::fs::write(&entry, good).unwrap();
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.has_card());
+    card(&screen(&app, 80, 24), "Turn alpha back on");
+}
+
+#[test]
+fn turning_off_a_hook_turns_off_every_hook_and_the_screen_says_so() {
+    let f = fixture();
+    let mut app = app(&f);
+    let id = model::walk(app.tree())
+        .find(|i| i.label.starts_with("PreToolUse hook"))
+        .unwrap()
+        .id
+        .clone();
+    assert!(app.select(&id));
+    // The card names what the switch really does before what it writes.
+    press(&mut app, KeyCode::Char('d'));
+    let inside = card(&screen(&app, 80, 24), "Turn off all hooks for this project");
+    assert_eq!(
+        inside[..3],
+        [
+            " PreToolUse hook has no switch of its own; Claude Code turns hooks off all at",
+            " once.",
+            " Writes   .claude/settings.local.json → disableAllHooks = true",
+        ]
+    );
+    card(
+        &screen(&app, 120, 40),
+        "Turn off all hooks for this project",
+    );
+    // Applied: the resolver drops every hook, so the group gives no count, only the fact.
+    press(&mut app, KeyCode::Enter);
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        let frame = screen(&app, width, height);
+        let all = frame.join("\n");
+        let group = frame.iter().find(|l| l.starts_with(" ▾ Hooks")).unwrap();
+        assert_eq!(
+            group.trim_end(),
+            " ▾ Hooks  all off for this project · u undoes",
+            "{all}"
+        );
+        assert!(!all.contains("Hooks ("), "{all}");
+        let row = frame
+            .iter()
+            .find(|l| l.contains("PreToolUse hook  user"))
+            .unwrap();
+        assert!(row.starts_with("     PreToolUse hook  user "), "{row}");
+        assert!(
+            row.trim_end().ends_with("—  off, with every other hook"),
+            "{width}: the whole words, never cut: {row}"
+        );
+    }
+    let detail = panel(&screen(&app, 80, 24));
+    assert_eq!(
+        format!("{} {}", detail[0], detail[1].trim_start()),
+        " PreToolUse hook · turned off with every other hook · u undoes · takes effect next session"
+    );
+    // Undone: every hook is back, and the count with them.
+    press(&mut app, KeyCode::Char('u'));
+    press(&mut app, KeyCode::Char('y'));
+    let frame = screen(&app, 80, 24);
+    let group = frame.iter().find(|l| l.starts_with(" ▾ Hooks")).unwrap();
+    assert!(group.starts_with(" ▾ Hooks (2) "), "{}", frame.join("\n"));
+    assert!(frame.iter().any(|l| l.contains("SessionStart hook")));
+}
+
+/// Rows from a box's top border to its bottom border, with whatever is drawn beside the box on
+/// each: the text before its left border and after its right border.
+fn beside_box(frame: &[String]) -> Vec<(String, String)> {
+    let top = frame.iter().position(|l| l.contains('┌')).expect("a box");
+    let bottom = top + frame[top..].iter().position(|l| l.contains('└')).unwrap();
+    frame[top..=bottom]
+        .iter()
+        .map(|row| {
+            let left = row.find(['┌', '│', '└']).unwrap();
+            let right = row.rfind(['┐', '│', '┘']).unwrap();
+            let after = right + row[right..].chars().next().unwrap().len_utf8();
+            (row[..left].to_string(), row[after..].to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn a_card_blanks_the_full_width_of_the_rows_it_takes() {
+    let f = fixture();
+    let mut app = app(&f);
+    // Every group open: list text runs under every row a card can take.
+    open_all(&mut app);
+    assert!(app.select(ALPHA));
+    // At 120×40 an 80-column card sits over a 120-column list: no half-words beside it.
+    for key in ['w', 'd', '?', 'i'] {
+        press(&mut app, KeyCode::Char(key));
+        let frame = screen(&app, 120, 40);
+        let (top, bottom) = (
+            frame.iter().position(|l| l.contains('┌')).unwrap(),
+            frame.iter().rposition(|l| l.contains('└')).unwrap(),
+        );
+        assert!(
+            bottom < 34,
+            "{key}: the card is over the list, not the panel"
+        );
+        assert!(top > 3, "{key}");
+        for (before, after) in beside_box(&frame) {
+            assert!(
+                before.trim().is_empty() && after.trim().is_empty(),
+                "{key}: {before:?} | {after:?}\n{}",
+                frame.join("\n")
+            );
+        }
+        press(&mut app, KeyCode::Esc);
+    }
+}
+
+#[test]
+fn the_undo_confirm_blanks_its_rows_across_the_frame() {
+    let f = fixture();
+    let mut app = app(&f);
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('u'));
+    // 76 columns in 80: the list's markers must not show at its edges.
+    let frame = screen(&app, 80, 24);
+    let rows = beside_box(&frame);
+    assert!(rows.len() >= 5, "{}", frame.join("\n"));
+    for (before, after) in rows {
+        assert!(
+            before.trim().is_empty() && after.trim().is_empty(),
+            "{before:?} | {after:?}\n{}",
+            frame.join("\n")
+        );
+        assert!(!before.contains(['▸', '▾']) && !after.contains(['▸', '▾']));
+    }
 }

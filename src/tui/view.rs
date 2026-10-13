@@ -18,6 +18,10 @@ use unicode_width::UnicodeWidthStr;
 
 /// The widest a card is drawn.
 const CARD_MAX: u16 = 80;
+/// The smallest frame a card or the `u` confirm is drawn in. Smaller, it is not drawn, its keys
+/// do nothing but close it, and the message row says so. An action card (`d`, `o`, `u`) also
+/// needs its whole body in view: Enter never applies what the reader cannot see.
+pub(crate) const CARD_MIN: (u16, u16) = (40, 10);
 /// The size column (`  48 KB`, `0.7 KB`, `?`, `—`).
 const SIZE_W: usize = 7;
 /// The share column (` 32%`).
@@ -28,7 +32,8 @@ const UNMEASURED: &str = "unmeasured";
 const LABEL_W: usize = 9;
 
 /// Harn's glyphs and their ASCII stand-ins under `--no-unicode`.
-const ASCII_SWAPS: [(&str, &str); 11] = [
+const ASCII_SWAPS: [(&str, &str); 12] = [
+    ("×", "x"),
     ("·", "|"),
     ("—", "-"),
     ("→", "->"),
@@ -132,14 +137,17 @@ impl App {
         ])
         .areas(area);
         let width = area.width as usize;
+        let blocked = self.card_blocked(area);
+        self.blocked.set(blocked.is_some());
         frame.render_widget(Paragraph::new(self.header(width)), head);
         frame.render_widget(Paragraph::new(self.rule(width, None)), rule1);
         let footer = self.draw_list(frame, list);
         frame.render_widget(Paragraph::new(self.rule(width, footer)), rule2);
-        self.draw_panel(frame, panel);
+        self.draw_panel(frame, panel, blocked.as_deref());
         frame.render_widget(Paragraph::new(self.rule(width, None)), rule3);
         frame.render_widget(Paragraph::new(self.key_bar(width)), keys);
         match &self.mode {
+            _ if blocked.is_some() => {}
             Mode::Card(card) => self.draw_card(frame, area, card),
             Mode::Undo { entry } => {
                 let lines: Vec<String> = self.undo_lines(entry).iter().map(|l| self.t(l)).collect();
@@ -318,7 +326,7 @@ impl App {
                 None => (group.bytes, group.share, group.absent),
             };
             // The Plugins group line has no size, bar or share: its rows overlap the listings.
-            let overlap = row.is_none() && group.overlap;
+            let overlap = row.is_none() && (group.overlap || group.all_off);
             let right = if overlap {
                 " ".repeat(cols_fit.right())
             } else {
@@ -459,9 +467,16 @@ impl App {
         if c.bar > 0 {
             let cell = match (bytes, absent) {
                 (Some(b), _) => bar(b, max, c.bar, self.opts.unicode),
-                (None, Some(word)) => format!(" {}", cut_right(word, c.bar - 1, self.g())),
+                (None, Some(word)) => format!(" {word}"),
                 (None, None) => String::new(),
             };
+            // A word wider than the bar runs on over the share column (the names give it room),
+            // never cut.
+            if cols(&cell) > c.bar {
+                let room = c.bar + if c.share { 1 + SHARE_W } else { 0 };
+                parts.push(pad_right(&cell, room));
+                return parts.join(" ");
+            }
             parts.push(pad_right(&cell, c.bar));
         }
         if c.share {
@@ -485,24 +500,34 @@ impl App {
     }
 
     /// The panel: a message first (until the next key), then the cursor line's sentences.
-    fn draw_panel(&self, frame: &mut Frame, area: Rect) {
+    /// The panel: one message row (a card too big for the frame says so there), then the
+    /// cursor line's sentences.
+    fn draw_panel(&self, frame: &mut Frame, area: Rect, blocked: Option<&str>) {
         let height = area.height as usize;
         let width = (area.width as usize).saturating_sub(1).max(1);
         if height == 0 {
             return;
         }
         let mut lines: Vec<(String, Style)> = Vec::new();
-        if let Some(message) = &self.message {
-            let style = match message.tone {
-                Tone::Error if self.opts.color => {
-                    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
-                }
-                Tone::Error => Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                Tone::Info => Style::new().add_modifier(Modifier::BOLD),
-            };
-            for l in wrap_words(&self.t(&message.text), width) {
-                lines.push((l, style));
-            }
+        let error = if self.opts.color {
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        };
+        let message = match (blocked, &self.message) {
+            (Some(text), _) => Some((text.to_string(), error)),
+            (None, Some(message)) => Some((
+                message.text(),
+                match message.tone {
+                    Tone::Error => error,
+                    Tone::Info => Style::new().add_modifier(Modifier::BOLD),
+                },
+            )),
+            (None, None) => None,
+        };
+        // Exactly one row: the detail keeps the rest of the panel.
+        if let Some((text, style)) = message {
+            lines.push((one_row(&self.t(&text), width), style));
         }
         lines.truncate(height);
         let room = height - lines.len();
@@ -570,6 +595,10 @@ impl App {
             keys.push((k.to_string(), w.to_string(), enabled, p));
         };
         match &self.mode {
+            // A card too big for the frame: closing it is all its keys do.
+            Mode::Card(_) | Mode::Undo { .. } if self.blocked.get() => {
+                push("Esc", "close", true, 9);
+            }
             Mode::Filter => {
                 let prompt = format!("/{}_", self.filter);
                 let mut spans = vec![Span::styled(
@@ -703,13 +732,9 @@ impl App {
 
     // ---- cards ------------------------------------------------------------------------------
 
-    fn draw_card(&self, frame: &mut Frame, area: Rect, card: &Card) {
-        let width = area.width.min(CARD_MAX);
-        if width < 8 || area.height < 3 {
-            return;
-        }
-        let inner = usize::from(width - 2);
-        let (title, body, answer) = match card {
+    /// A card's title, body lines (wrapped to `inner` columns) and answer line.
+    fn card_parts(&self, card: &Card, inner: usize) -> (String, Vec<String>, String) {
+        match card {
             Card::Off {
                 card, list: false, ..
             } => (
@@ -788,7 +813,42 @@ impl App {
                     .collect();
                 ("Notes".to_string(), body, "Esc close".to_string())
             }
+        }
+    }
+
+    /// Why the open card or confirm cannot be drawn in `area`, as the message row says it;
+    /// None when it can.
+    pub(crate) fn card_blocked(&self, area: Rect) -> Option<String> {
+        let (min_w, min_h) = CARD_MIN;
+        let need_h = match &self.mode {
+            Mode::Card(card) => match card.as_ref() {
+                Card::Off { list: false, .. } | Card::On { .. } if area.width >= min_w => {
+                    let inner = usize::from(area.width.min(CARD_MAX) - 2);
+                    let (_, body, _) = self.card_parts(card, inner);
+                    u16::try_from(body.len() + 3).unwrap_or(u16::MAX).max(min_h)
+                }
+                _ => min_h,
+            },
+            Mode::Undo { entry } => {
+                let lines: Vec<String> = self.undo_lines(entry).iter().map(|l| self.t(l)).collect();
+                // The confirm with every line of the change, its blank and its answer.
+                let whole = confirm_layout(Rect::new(0, 0, area.width, u16::MAX), &lines, self.g())
+                    .map_or(min_h, |(popup, _)| popup.height);
+                whole.max(min_h)
+            }
+            Mode::Normal | Mode::Filter => return None,
         };
+        (area.width < min_w || area.height < need_h)
+            .then(|| format!("terminal too small for this card; needs at least {min_w}×{need_h}"))
+    }
+
+    fn draw_card(&self, frame: &mut Frame, area: Rect, card: &Card) {
+        let width = area.width.min(CARD_MAX);
+        if width < 8 || area.height < 3 {
+            return;
+        }
+        let inner = usize::from(width - 2);
+        let (title, body, answer) = self.card_parts(card, inner);
         let title = cut_right(&self.t(&title), inner.saturating_sub(2), self.g());
         let rows = usize::from(area.height - 2).saturating_sub(1);
         let max = body.len().saturating_sub(rows);
@@ -814,7 +874,9 @@ impl App {
             width,
             height,
         };
-        frame.render_widget(Clear, popup);
+        // The band the card takes is blank across the whole frame: no half-words of the list
+        // beside it.
+        frame.render_widget(Clear, band(area, popup));
         frame.render_widget(
             Paragraph::new(text).block(bordered(&format!(" {title} "), self.opts.unicode)),
             popup,
@@ -824,6 +886,9 @@ impl App {
     /// The `d` card's body: Writes, Leaves (with `→ list`), Saves, Undo, then the plan's notes.
     fn off_lines(&self, card: &OffCard, inner: usize) -> Vec<String> {
         let mut body = Vec::new();
+        if let Some(lead) = &card.lead {
+            body.extend(indent_wrap("", &self.t(lead), inner));
+        }
         for (i, w) in card.writes.iter().enumerate() {
             let label = if i == 0 { "Writes" } else { "" };
             body.extend(labelled(label, &self.t(w), inner, None));
@@ -1033,6 +1098,16 @@ fn bordered(title: &str, unicode: bool) -> Block<'static> {
     }
 }
 
+/// The rows `popup` takes in `area`, across the full width of `area`.
+fn band(area: Rect, popup: Rect) -> Rect {
+    Rect {
+        x: area.x,
+        y: popup.y,
+        width: area.width,
+        height: popup.height,
+    }
+}
+
 /// The first of `candidates` that fits `width` columns.
 fn first_fitting(candidates: Vec<String>, width: usize) -> Option<String> {
     candidates.into_iter().find(|c| cols(c) <= width)
@@ -1111,7 +1186,7 @@ pub(crate) fn confirm_box(
     let Some((popup, text)) = confirm_layout(area, body, g) else {
         return;
     };
-    frame.render_widget(Clear, popup);
+    frame.render_widget(Clear, band(area, popup));
     let text: Vec<Line> = text.into_iter().map(Line::from).collect();
     frame.render_widget(
         Paragraph::new(text).block(bordered(" confirm ", unicode)),
@@ -1195,6 +1270,49 @@ pub(crate) fn cut_left(text: &str, max: usize, g: &Glyphs) -> String {
         return format!("{mark}{}", " ".repeat(max - cols(&mark)));
     }
     format!("{mark}{}{}", " ".repeat(room - used), tail.concat())
+}
+
+/// `text` in one row of `width` columns: as many whole sentences from its start as fit (a
+/// sentence ends at `. ` or at the ` · ` between a message's clauses); when not even the first
+/// fits, that sentence cut at a word boundary, with no ellipsis.
+pub(crate) fn one_row(text: &str, width: usize) -> String {
+    let mut pieces: Vec<(&str, &str)> = Vec::new();
+    let mut rest = text;
+    loop {
+        let next = [". ", " · ", " | "]
+            .iter()
+            .filter_map(|sep| rest.find(sep).map(|at| (at, *sep)))
+            .min_by_key(|(at, _)| *at);
+        match next {
+            // `. ` keeps its full stop with the sentence; a clause dot goes between.
+            Some((at, ". ")) => {
+                pieces.push((&rest[..=at], " "));
+                rest = &rest[at + 2..];
+            }
+            Some((at, sep)) => {
+                pieces.push((&rest[..at], sep));
+                rest = &rest[at + sep.len()..];
+            }
+            None => {
+                pieces.push((rest, ""));
+                break;
+            }
+        }
+    }
+    let mut kept = String::new();
+    let mut between = "";
+    for (piece, sep) in &pieces {
+        let next = format!("{kept}{between}{piece}");
+        if cols(&next) > width {
+            break;
+        }
+        kept = next;
+        between = sep;
+    }
+    if kept.is_empty() {
+        return wrap_words(pieces[0].0, width).swap_remove(0);
+    }
+    kept
 }
 
 /// Where a word too wide for a row may break: right after one of these.
@@ -1318,6 +1436,22 @@ mod tests {
             ["a = true   (every project)"]
         );
         assert_eq!(wrap_words("", 5), [""]);
+    }
+
+    #[test]
+    fn a_message_row_keeps_whole_sentences_and_cuts_a_lone_one_at_a_word() {
+        let text = "undone: alpha back · .claude/settings.local.json restored byte for byte";
+        assert_eq!(one_row(text, 80), text);
+        assert_eq!(one_row(text, 40), "undone: alpha back");
+        assert_eq!(one_row(&ascii(text), 40), "undone: alpha back");
+        assert_eq!(one_row("One. Two words. Three", 15), "One. Two words.");
+        assert_eq!(one_row("One. Two words. Three", 3), "One");
+        // A first sentence wider than the row: cut at a word, never an ellipsis.
+        assert_eq!(
+            one_row("terminal too small for this card", 20),
+            "terminal too small"
+        );
+        assert_eq!(one_row("", 10), "");
     }
 
     #[test]
