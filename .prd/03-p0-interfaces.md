@@ -213,7 +213,8 @@ Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
 - `Cmd::Trim { dir_pos, dry_run: bool, yes: bool, agent_cmd: Option<String> }` — `src/trim.rs` as built:
   `DEFAULT_AGENT_CMD = ["claude","-p","--output-format","json","-"]` (a trailing `-` = prompt on
   stdin; otherwise the prompt is the last argument), `TrimOpts { agent_cmd: Vec<String>, dry_run,
-  yes }`, `trim(resolver, target, tree, &opts, confirm: &mut dyn FnMut(&ActionPlan) -> bool,
+  yes, unicode }` (`unicode` = the glyph set for the printed plan, `--no-unicode` → false; added at the merge
+  because `render::plan` took the glyph argument in the TUI unit), `trim(resolver, target, tree, &opts, confirm: &mut dyn FnMut(&ActionPlan) -> bool,
   out: &mut dyn Write) -> Result<TrimOutcome>` with `TrimOutcome::{DryRun, Declined, Applied,
   Nothing}` (`Nothing` = the agent returned `ops: []`, exit 0). The agent runs in a fresh temp
   directory (so the target's CLAUDE.md/hooks/MCP do not load into the planning request), its
