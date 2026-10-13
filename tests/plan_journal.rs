@@ -1017,7 +1017,15 @@ fn edit_journals_the_diff_and_undo_restores() {
     let before = read(&path);
     let item = find(&sb.resolve(), &sb.id("rules/a.md")).unwrap().clone();
     let editor = sb.editor("append.sh", "printf 'added by the editor\\n' >> \"$1\"");
-    let entry = journal::edit(&item, &sb.target, &mut sb.journal, &editor).unwrap();
+    // The fake resolver reports no version; stand in for the installed one.
+    let entry = journal::edit(
+        &item,
+        &sb.target,
+        &mut sb.journal,
+        &editor,
+        Some("9.9.9".to_string()),
+    )
+    .unwrap();
     assert!(entry
         .diff
         .as_deref()
@@ -1027,6 +1035,11 @@ fn edit_journals_the_diff_and_undo_restores() {
     assert_eq!(entry.context.capture_kind, journal::KIND_EDIT);
     // The target the item was resolved for, not the shell's working directory.
     assert_eq!(entry.context.cwd, sb.target.dir);
+    assert_eq!(entry.context.agent_version.as_deref(), Some("9.9.9"));
+    let history = journal::history(&sb.journal).unwrap();
+    assert_eq!(history[0].context.agent_version.as_deref(), Some("9.9.9"));
+    let out = harn::render::history(&history);
+    assert!(out.contains("claude-code 9.9.9"), "{out}");
     assert_eq!(read(&entry.snapshots[0].file), before);
     journal::undo(&mut sb.journal, 1).unwrap();
     assert_eq!(read(&path), before);
@@ -1037,7 +1050,7 @@ fn edit_that_breaks_json_is_journaled_with_a_warning_not_reverted() {
     let mut sb = Sandbox::new();
     let item = file_item("claude-code/x/local/settings", &sb.local(), Layer::Local);
     let editor = sb.editor("break.sh", "printf '{broken' > \"$1\"");
-    let entry = journal::edit(&item, &sb.target, &mut sb.journal, &editor).unwrap();
+    let entry = journal::edit(&item, &sb.target, &mut sb.journal, &editor, None).unwrap();
     assert_eq!(read(&sb.local()), "{broken");
     assert!(
         entry
@@ -1061,19 +1074,21 @@ fn edit_refuses_builtin_managed_and_pathless_items_and_skips_no_change() {
             &sb.target,
             &mut sb.journal,
             "true",
+            None,
         )
         .unwrap_err();
         refused(&err);
     }
     let mut pathless = file_item("x", &path, Layer::User);
     pathless.origin.path = None;
-    refused(&journal::edit(&pathless, &sb.target, &mut sb.journal, "true").unwrap_err());
+    refused(&journal::edit(&pathless, &sb.target, &mut sb.journal, "true", None).unwrap_err());
 
     let err = journal::edit(
         &file_item("x", &path, Layer::Project),
         &sb.target,
         &mut sb.journal,
         "true",
+        None,
     )
     .unwrap_err();
     assert!(format!("{err:#}").contains("unchanged"), "{err:#}");
