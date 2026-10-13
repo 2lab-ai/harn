@@ -77,10 +77,15 @@ Rules that produce it:
 
 ## Rules fixed after reading the first rebuild's frames (2026-10-13 19:1x)
 
-- **Shares partition.** A row's number is its OWN bytes; skill- and agent-listing entries are
-  counted once, under the listing groups. Group bytes = sum of rows; group shares sum to ≤ 100%.
-  What turning a row off frees is a sentence in the detail panel and the `d` card: "frees 32 KB:
-  4 KB of its own plus 28 KB of its entries in the skill and agent listings" (nix-tree's two sizes).
+- **Shares partition at the top level; plugin rows show what leaving frees.** The sized groups
+  (Skill listing, Project files, Memory, Agent listing, measured Hooks/MCP) carry own bytes, bars
+  and shares that sum to ≤ 100%. The Plugins group line carries no bar and no share — it names the
+  overlap: `48 KB would leave with them · counted in the listings above`. Each plugin row shows
+  what turning it off frees (its own bytes plus its listing entries) with a bar and the share of
+  the total it would free, because that is the number a person acts on; its detail sentence gives
+  both parts: "frees 3.7 KB: 3.7 KB of its entries in the skill listing, plus its own unmeasured
+  part" (nix-tree's two sizes). Round 2 had hidden every plugin number behind `in listing`; that
+  was worse than the double count it removed.
 - **Groups are ordered by bytes, descending**; groups without a size follow; Built-in is last.
 - **An unknown size reads `unmeasured`**, never a bare `?`; the notes card says how to measure.
 - **Counting.** "N items load before your first message" counts items that are always loaded or
