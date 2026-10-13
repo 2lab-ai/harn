@@ -377,8 +377,11 @@ hierarchy, `s` sort cycle (again = reverse), `w` why pane, `d`/`space` stage off
 (diff · freed · side effects · warnings), `a` apply after `y/N`, `o` on, `u` undo, `e` edit in
 `$EDITOR` (TUI suspended), `r` refresh, `t` = hint to `harn trim`, `?` help, `q`/Esc. `--readonly`
 greys every write key. Narrow terminals drop the share bar, then mode; the item column is never
-truncated below the width left to it. Stack: ratatui + crossterm (llmux pins). Tests render through
-ratatui's TestBackend; the event loop is separable from the terminal.
+truncated below the width left to it; when a label still does not fit it is cut from the left (tail
+kept) and the `w` pane shows it whole. The TUI opens only when both stdin and stdout are terminals;
+SIGINT/SIGTERM/SIGHUP exit through the same terminal-restoring guard as `q`. Stack: ratatui +
+crossterm (llmux pins). Tests render through ratatui's TestBackend; the event loop is separable from
+the terminal.
 
 ## Claude Code coverage (condensed from `research/01`; every row has a doc URL there)
 
@@ -444,7 +447,7 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target (exit 1, the verify family, with the mismatch named) |
 | A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
 | A13 | `harn report --dir ~/2lab.ai/zbrain --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
-| A14 | `harn ~/2lab.ai/zbrain` in an 80×24 and a 120×40 terminal (tmux capture) | the TUI opens with the header, the tree in table order with children folded, a key bar; `j/k` move, `l`/Enter unfold the skill listing (216 children) and `h` folds it, `/` filters keeping the hierarchy, `w` shows the why pane for the cursor row, `d` on the slack plugin row stages a plan whose side-effects pane lists its 8 skills, `a` + `y` applies and the journal has one entry, `u` restores the file byte-for-byte; `q` leaves the terminal as it was; `harn --table` and a piped `harn` print the full table; no row's item name is truncated at 80 columns |
+| A14 | `harn ~/2lab.ai/zbrain` in an 80×24 and a 120×40 terminal (tmux capture) | the TUI opens with the header, the tree in table order with children folded, a key bar; `j/k` move, `l`/Enter unfold the skill listing (216 children) and `h` folds it, `/` filters keeping the hierarchy, `w` shows the why pane for the cursor row, `d` on the slack plugin row stages a plan whose side-effects pane lists its 8 skills, `a` + `y` applies and the journal has one entry, `u` restores the file byte-for-byte; `q` (and an external SIGTERM/SIGINT) leaves the terminal as it was; `harn --table` and a piped `harn` print the full table; at 80 columns the item column wins (share, mode, then origin are dropped first) and a label that still does not fit is cut from the left so its tail — the file name — stays visible, with the full name on the first line of the `w` pane |
 | A15 | `harn trim ~/2lab.ai/zbrain --dry-run` with `--agent-cmd` pointing at a script that returns a canned `harn-plan/1`, and once for real with `claude -p` | prints the validated plan with reasons, freed, side effects and diff and writes nothing; `trim --yes` applies, journals each reason and prints the `harn undo` line; a rejected plan names the offending op (exit 3); a missing agent binary reports the `/harn-trim` fallback (exit 1). The human typed no item name at any point |
 
 **P0 receipt (2026-10-13):** every P0 gate row observed on macOS (release build, zbrain) and A1/A2/A9
