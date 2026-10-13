@@ -36,6 +36,10 @@ use serde_json::Value;
 use settings::Settings;
 use std::path::{Path, PathBuf};
 
+/// `Tree.warnings` entry every resolve pushes; `verify` drops it once a capture is bound.
+pub const CAP_STATE_UNKNOWN: &str =
+    "skill listing budget is token-denominated; cap state unknown until a capture";
+
 pub(crate) struct Ctx<'a> {
     pub target: &'a Target,
     pub fs: Fs,
@@ -247,9 +251,7 @@ pub fn resolve(target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tre
 
     let agent_version = agent_version(target);
     let mut warnings = ctx.warnings;
-    warnings.push(
-        "skill listing budget is token-denominated; cap state unknown until a capture".to_string(),
-    );
+    warnings.push(CAP_STATE_UNKNOWN.to_string());
     if let Some(v) = agent_version.as_deref() {
         if version_key(v) > version_key(super::ClaudeCode::VERIFIED_AGAINST) {
             warnings.push(format!(
