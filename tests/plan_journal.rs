@@ -692,6 +692,22 @@ fn apply_records_snapshot_entry_and_log() {
 }
 
 #[test]
+fn apply_journals_the_agent_version_the_resolver_saw() {
+    let mut sb = Sandbox::new();
+    // The fake resolver reports no version; stand in for the installed one.
+    let mut tree = sb.resolve();
+    tree.agent_version = Some("9.9.9".to_string());
+    let plan = plan::build_plan(&sb.fake, &sb.target, &tree, SLACK, None).unwrap();
+    let entry = writers::apply(&plan, &mut sb.journal).unwrap();
+    assert_eq!(entry.context.agent_version.as_deref(), Some("9.9.9"));
+
+    let history = journal::history(&sb.journal).unwrap();
+    assert_eq!(history[0].context.agent_version.as_deref(), Some("9.9.9"));
+    let out = harn::render::history(&history);
+    assert!(out.contains("claude-code 9.9.9"), "{out}");
+}
+
+#[test]
 fn apply_refuses_a_file_changed_since_the_plan() {
     let mut sb = Sandbox::new();
     let plan = sb.plan(SLACK, None).unwrap();

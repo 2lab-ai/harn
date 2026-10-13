@@ -141,7 +141,7 @@ pub fn apply(plan: &ActionPlan, journal: &mut Journal) -> anyhow::Result<Journal
         context: RunContext {
             cwd: plan.target_dir.clone(),
             agent: plan.agent,
-            agent_version: None,
+            agent_version: plan.agent_version.clone(),
             model: None,
             launch_opts: Vec::new(),
             settings_fingerprint: None,
