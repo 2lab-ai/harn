@@ -11,12 +11,17 @@ off reversibly. Claude Code first, Codex CLI second. One binary for macOS and Li
 brew install 2lab-ai/tap/harn-preview
 ```
 
-1. `harn` — what Claude Code loads in this directory before your first message, biggest saving
-   first. On a terminal this is the interactive view: one tab per agent, the tree sorted by freed
-   bytes, children folded under their parent (`▸ N`). `j`/`k` move · `h`/`l` fold · `/` filter ·
-   `s` sort (freed, cost, name; again reverses) · `w` why · `d` stage off (shows the plan) · `a`
-   apply · `o` back on · `u` undo · `e` edit in `$EDITOR` · `r` refresh · `t` AI trim · `?` every
-   key · `q` quit. `--readonly` greys and refuses the keys that write.
+1. `harn` — what Claude Code loads in this directory before your first message. On a terminal
+   this is the interactive view: a two-line header (the directory, how many items load, the total,
+   the biggest groups), then the groups by kind — Skill listing, Project files, Memory, Agent
+   listing, Plugins, Hooks, Built-in — each with its size, a bar and its share of the total; `→`
+   opens a group to its rows, each with its own size. The panel under the list explains the row
+   under the cursor in plain sentences: where it comes from, what `d` would turn off and for whom,
+   what that frees. `d` opens one card that says what file it writes, what leaves (`→` lists it),
+   what it saves and how to undo; Enter applies, Esc cancels. `o` turns an item back on and `u`
+   undoes the last change (both restore the file byte for byte) · `w` where it comes from · `/`
+   search · `s` sort · `i` notes · `?` every key · `q` quit. The key bar shows only the keys valid
+   now; `--readonly` says so in the header and leaves `d`, `o`, `u` and `e` out.
 2. `harn trim` — the AI decides what to turn off and applies it; every change is journaled and
    `harn undo` puts it back (`/harn-trim` inside Claude Code does the same loop).
 3. `harn report --html harn.html` — the same picture as a shareable read-only page.
