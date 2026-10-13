@@ -1,4 +1,4 @@
-# ssot — PRD authoring drive for `loadout` (fixed 2026-10-13)
+# ssot — PRD authoring drive for `harn` (fixed 2026-10-13)
 
 Status: in-progress
 
@@ -32,13 +32,25 @@ Status: in-progress
 1. `research/00-prd-v1-from-user-statement.md` — the statement above as a PRD, nothing added beyond measured facts.
 2. `research/01..03-*.md` — research: Claude Code loading rules, Codex loading rules, prior art + UX patterns.
 3. `01-spec.md` (rewritten from scratch on the research) + `02-architecture.md` — reviewed by the three-engine panel (trinity) until unanimous.
-4. Repository `2lab-ai/loadout` exists on GitHub with this `.prd/` committed. Build/release follow the llmux pattern (`.github/workflows/{ci,preview,release}.yml`, Homebrew tap formulae) — those workflows are specified in 02, not shipped in this drive.
+4. Repository `2lab-ai/harn` exists on GitHub with this `.prd/` committed. Build/release follow the llmux pattern (`.github/workflows/{ci,preview,release}.yml`, Homebrew tap formulae) — those workflows are specified in 02, not shipped in this drive.
 
 Not in this drive: writing the program.
 
-## Name
+## Name — `harn` (decided 2026-10-13, veto-able)
 
-`loadout` is the working name (the equipment an agent is loaded with). Checked 2026-10-13: no `2lab-ai/loadout` repo, no `loadout` on PATH. `gh repo rename` is cheap; the binary name follows the repo name.
+The first working name was `loadout`. The prior-art research (`../research/03-prior-art-and-ux.md` §0)
+found migsilva89/loadout — a macOS app, 98★, "See and manage what your coding assistants load",
+covering Claude Code and Codex — the same job under the same name; crates.io `loadout` is also
+taken. Same-space collision is a reason to rename, not to append a suffix.
+
+`harn` = the user's own word for the thing (하네스, harness), clipped to four letters the way
+`llmux`/`xfx`/`herdr` are clipped. Checked 2026-10-13: crates.io free, `2lab-ai/harn` free,
+Homebrew free, nothing on PATH, no project of that name in the agent-tooling space
+(GitHub search returns unrelated "harness" repos). Rejected: `tare` (crate taken, kelviq/tare
+295★ is a Claude Code token audit — adjacent), `ballast` (brew + crate taken), `preamble`/`prelude`
+(crates taken), `xharness` (dotnet/xharness 188★), `harnix` (tienedev/harnix is a Nix module for
+AI agent tooling — adjacent). Binary `harn`, crate `harn`, repo `2lab-ai/harn`. Renaming later
+costs one `gh repo rename` plus a tap formula; the user vetoes by saying so.
 
 ## Fixed facts the PRD may cite (measured 2026-10-02, zbrain `scratchpad/harness-observe-20261002/inventory.md`)
 

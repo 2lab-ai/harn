@@ -28,8 +28,8 @@ It printed a 335-line markdown report titled "Context Usage" with **"Estimated u
 
 Then four tables: **MCP Tools** (48 rows: tool, server, tokens), **Custom Agents** (26 rows: agent, Source ∈ {User, Project, Plugin}, tokens), **Memory Files** (5 rows: Type ∈ {User, Project, AutoMem}, absolute path, tokens), **Skills** (216 rows: skill, Source, tokens as `~N` or `< 20`; sources: Built-in 14, Plugin(atlassian) 6, Plugin(cowork-plugin-management) 2, Plugin(frontend-design) 1, Plugin(slack) 13, Plugin(stv) 15, Plugin(superpowers) 15, Plugin(typesafe) 1, Plugin(zworkflow) 50, Project 58, User 19, claude.aisync 22).
 
-What it gives that `loadout` can reuse: the category taxonomy, per-item token estimates, Source
-labels, memory-file paths. What it does not give (each one is a gap `loadout` must fill):
+What it gives that `harn` can reuse: the category taxonomy, per-item token estimates, Source
+labels, memory-file paths. What it does not give (each one is a gap `harn` must fill):
 
 - no **hooks** at all (SessionStart hook stdout was 3,457 B on the wire — invisible here);
 - no **gitStatus / userEmail / attribution** blocks (4.1 KB on the wire);
@@ -39,7 +39,7 @@ labels, memory-file paths. What it does not give (each one is a gap `loadout` mu
   request measured on 2026-10-02 (different day, different MCP set) was 87,302 cache-creation
   input tokens for 230,944 bytes of JSON; today's estimate for the equivalent categories sums to
   75.2k before the 33k autocompact buffer. The two are not the same session, so this is not a
-  ratio claim — it is the reason every number in `loadout` carries a *measured* or *estimated* tag.
+  ratio claim — it is the reason every number in `harn` carries a *measured* or *estimated* tag.
 - it runs a real session: it cost one model request and loaded the harness it reports on. A
   listing tool that must spawn the agent to list the agent is a round trip, not a lookup.
 
@@ -57,7 +57,7 @@ Command (cwd `~/2lab.ai/zbrain`, 2026-10-13), exit 0, 21,962 B of JSON: a list o
 What it gives: the exact model-visible *input items* with their text — primary evidence, not an
 estimate, and no model request is made. What it does not include: the base/system instructions
 (Codex's own prompt), the **tools** array (built-in + MCP tool definitions), and anything a hook
-would inject at session start. So for Codex, `loadout` can take instructions/skills/AGENTS.md
+would inject at session start. So for Codex, `harn` can take instructions/skills/AGENTS.md
 from this dump verbatim and must still discover tools, hooks and plugins itself.
 
 ## C. The wire (Claude Code 2.1.287, 2026-10-02, logging proxy in front of llmux)
@@ -67,7 +67,7 @@ Already fixed in `../prd-rewrite/ssot.md` §Fixed facts. Two additions for the s
 - llmux keeps every proxied request at `$XDG_STATE_HOME/llmux/raw-io.jsonl` (config
   `raw_io.enabled` default true, `max_body_bytes` default 1 MiB, `retention_days` 30; source
   `llmux/src/proxy/raw_io.rs`). A user who runs Claude Code through llmux therefore already owns a
-  measured record of the first request of every session; `loadout` can read it without a proxy
+  measured record of the first request of every session; `harn` can read it without a proxy
   of its own. llmux does not rewrite prompts (it strips credential headers and injects the
   account credential — `llmux/.prd/01-spec.md:75`), so "edit the built-in prompt through llmux"
   is a future llmux feature, not a present one.

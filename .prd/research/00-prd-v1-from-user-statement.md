@@ -1,4 +1,4 @@
-# PRD v1 — `loadout`, as stated by the user (2026-10-13)
+# PRD v1 — `harn`, as stated by the user (2026-10-13)
 
 Status: superseded by `../01-spec.md` once the research-based rewrite lands. This file is the
 user's statement in PRD form and adds nothing the statement or the measured captures do not say.
@@ -33,7 +33,7 @@ user edit (remove, disable) items to optimize the harness.
 ## What "harness" means here (user's four layers, Claude Code)
 
 1. Claude Code built-in prompt and built-in skills. Editable only through the local `llmux`
-   proxy (which can rewrite requests), so `loadout` must at least show them.
+   proxy (which can rewrite requests), so `harn` must at least show them.
 2. `~/.claude` — prompts (CLAUDE.md), agents, skills, hooks.
 3. The working folder's harness (`<cwd>/CLAUDE.md`, `.claude/**`, …).
 4. The user's instruction, executed after the above.
@@ -49,7 +49,7 @@ layer list is to be established by research).
 
 ## Repository and distribution
 
-- Repository `2lab-ai/loadout` (name chosen by the implementer; user left it open).
+- Repository `2lab-ai/harn` (name chosen by the implementer; user left it open).
 - Build and release the way `2lab-ai/llmux` does: open source, GitHub Actions CI, release on
   `v*` tags with per-platform binaries, preview channel, Homebrew tap formula.
 
@@ -80,6 +80,6 @@ layer list is to be established by research).
 - Which items have an official "disable" knob and which can only be deleted or moved?
 - Where does a tool definition come from when no local config names it (the `blender` case)?
 - Does Codex expose a trustworthy "what the model sees" dump (`codex debug prompt-input`)? Does
-  Claude Code expose anything equivalent, or must `loadout` re-implement discovery?
+  Claude Code expose anything equivalent, or must `harn` re-implement discovery?
 - Estimated size (bytes/tokens from files) vs measured size (bytes on the wire through a proxy):
   which does the tool show, and how does it say which one it is?

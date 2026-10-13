@@ -12,7 +12,7 @@ Status: in-progress (2026-10-13)
 | WU-4 | `research/03-prior-art-and-ux.md` | librarian agent | running |
 | WU-5 | `01-spec.md` + `02-architecture.md` (v2, from scratch) | dispatcher | after WU-2..4 |
 | WU-6 | trinity review of WU-5 until unanimous | trinity panel | after WU-5 |
-| WU-7 | GitHub repo `2lab-ai/loadout` created, `.prd/` pushed | dispatcher | after WU-6 |
+| WU-7 | GitHub repo `2lab-ai/harn` created, `.prd/` pushed | dispatcher | after WU-6 |
 
 Build facts: none yet (no code in this drive).
 
