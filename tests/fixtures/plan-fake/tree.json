@@ -1,0 +1,213 @@
+[
+  {
+    "id": "claude-code/system-prompt/builtin/system-prompt",
+    "label": "system prompt",
+    "kind": "system-prompt",
+    "layer": "builtin",
+    "mode": "always",
+    "predicted": 5000,
+    "knobs": [{ "type": "none", "reason": "built-in" }]
+  },
+  {
+    "id": "claude-code/instruction/project/${PROJECT}/CLAUDE.md",
+    "label": "CLAUDE.md",
+    "kind": "instruction",
+    "layer": "project",
+    "mode": "always",
+    "path": "${PROJECT}/CLAUDE.md",
+    "predicted": 1200,
+    "knobs": [
+      {
+        "type": "setting",
+        "file": "${PROJECT}/.claude/settings.local.json",
+        "pointer": "/claudeMdExcludes/-",
+        "value": "${PROJECT}/CLAUDE.md",
+        "scope": "local",
+        "note": "excluding a file drops its @imports"
+      }
+    ],
+    "off_if": [
+      {
+        "file": "${PROJECT}/.claude/settings.local.json",
+        "pointer": "/claudeMdExcludes",
+        "contains": "${PROJECT}/CLAUDE.md"
+      }
+    ],
+    "children": [
+      {
+        "id": "claude-code/instruction/project/${PROJECT}/rules/a.md",
+        "label": "rules/a.md",
+        "kind": "instruction",
+        "layer": "project",
+        "mode": "always",
+        "path": "${PROJECT}/rules/a.md",
+        "predicted": 300
+      }
+    ]
+  },
+  {
+    "id": "claude-code/memory/user/${HOME}/.claude/projects/p/memory/MEMORY.md",
+    "label": "auto-memory",
+    "kind": "memory",
+    "layer": "user",
+    "mode": "always",
+    "predicted": 400,
+    "knobs": [
+      {
+        "type": "env",
+        "name": "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "value": "1",
+        "scope": "user",
+        "note": null
+      }
+    ],
+    "off_if": [
+      {
+        "file": "${HOME}/.claude/settings.json",
+        "pointer": "/env/CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "equals": "1"
+      }
+    ]
+  },
+  {
+    "id": "claude-code/hook/project/SessionStart:0",
+    "label": "SessionStart hook",
+    "kind": "hook",
+    "layer": "project",
+    "mode": "always",
+    "predicted": null,
+    "knobs": [
+      {
+        "type": "setting",
+        "file": "${PROJECT}/.claude/settings.local.json",
+        "pointer": "/disableAllHooks",
+        "value": true,
+        "scope": "local",
+        "note": null
+      }
+    ],
+    "off_if": [
+      {
+        "file": "${PROJECT}/.claude/settings.local.json",
+        "pointer": "/disableAllHooks",
+        "equals": true
+      }
+    ]
+  },
+  {
+    "id": "claude-code/mcp-server/plugin/plugin:slack:slack",
+    "label": "plugin:slack:slack",
+    "kind": "mcp-server",
+    "layer": "plugin",
+    "plugin": "slack@x",
+    "mode": "always",
+    "predicted": null,
+    "knobs": [
+      {
+        "type": "setting",
+        "file": "${PROJECT}/.claude/settings.local.json",
+        "pointer": "/enabledPlugins/slack@x",
+        "value": false,
+        "scope": "local",
+        "note": null
+      },
+      {
+        "type": "setting",
+        "file": "${HOME}/.claude/settings.json",
+        "pointer": "/enabledPlugins/slack@x",
+        "value": false,
+        "scope": "user",
+        "note": null
+      }
+    ],
+    "off_if": [
+      { "file": "${PROJECT}/.claude/settings.local.json", "pointer": "/enabledPlugins/slack@x", "equals": false },
+      { "file": "${HOME}/.claude/settings.json", "pointer": "/enabledPlugins/slack@x", "equals": false }
+    ],
+    "children": [
+      {
+        "id": "claude-code/mcp-tool/plugin/plugin:slack:slack/send_message",
+        "label": "send_message",
+        "kind": "mcp-tool",
+        "layer": "plugin",
+        "plugin": "slack@x",
+        "mode": "always",
+        "predicted": null
+      }
+    ]
+  },
+  {
+    "id": "claude-code/skill-listing/builtin/skills",
+    "label": "skill listing",
+    "kind": "skill-listing",
+    "layer": "builtin",
+    "mode": "advertised",
+    "sum_children": true,
+    "knobs": [{ "type": "none", "reason": "a listing; each entry has its own knob" }],
+    "children": [
+      {
+        "id": "claude-code/skill/project/foo",
+        "label": "foo",
+        "kind": "skill",
+        "layer": "project",
+        "mode": "advertised",
+        "path": "${PROJECT}/.claude/skills/foo",
+        "predicted": 80,
+        "knobs": [
+          {
+            "type": "quarantine",
+            "from": "${PROJECT}/.claude/skills/foo",
+            "to": "${PROJECT}/.claude/harn-off/skills/foo",
+            "scope": "local"
+          }
+        ]
+      },
+      {
+        "id": "claude-code/skill/plugin/slack:slack-search",
+        "label": "slack-search",
+        "kind": "skill",
+        "layer": "plugin",
+        "plugin": "slack@x",
+        "mode": "advertised",
+        "predicted": 100,
+        "knobs": [
+          {
+            "type": "setting",
+            "file": "${PROJECT}/.claude/settings.local.json",
+            "pointer": "/enabledPlugins/slack@x",
+            "value": false,
+            "scope": "local",
+            "note": "a plugin skill leaves only with its plugin"
+          }
+        ],
+        "off_if": [
+          { "file": "${PROJECT}/.claude/settings.local.json", "pointer": "/enabledPlugins/slack@x", "equals": false },
+          { "file": "${HOME}/.claude/settings.json", "pointer": "/enabledPlugins/slack@x", "equals": false }
+        ]
+      },
+      {
+        "id": "claude-code/skill/plugin/slack:slack-post",
+        "label": "slack-post",
+        "kind": "skill",
+        "layer": "plugin",
+        "plugin": "slack@x",
+        "mode": "advertised",
+        "predicted": 150,
+        "knobs": [
+          {
+            "type": "setting",
+            "file": "${PROJECT}/.claude/settings.local.json",
+            "pointer": "/enabledPlugins/slack@x",
+            "value": false,
+            "scope": "local",
+            "note": "a plugin skill leaves only with its plugin"
+          }
+        ],
+        "off_if": [
+          { "file": "${PROJECT}/.claude/settings.local.json", "pointer": "/enabledPlugins/slack@x", "equals": false },
+          { "file": "${HOME}/.claude/settings.json", "pointer": "/enabledPlugins/slack@x", "equals": false }
+        ]
+      }
+    ]
+  }
+]
