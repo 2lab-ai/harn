@@ -1,6 +1,6 @@
 # 04 — The interactive view: information design
 
-Status: in-progress — 2026-10-13 (first rebuild captured and read; six fixes in round 2). Written after the user read the first TUI (frames in zbrain
+Status: shipped — 2026-10-13 (A16 read green by the dispatcher on the installed binary, preview-2026-10-13-1426-e05077fd3773; rounds and receipts in `p0-claude-code/loop.done.md` R6). Written after the user read the first TUI (frames in zbrain
 `workflow/2lab-ai/harn/receipts-2026-10-13/tui-80x24/`) and called it unreadable. He was right:
 that screen was the CLI table, the `why` text and the `apply` dump placed inside ratatui boxes.
 This document is the screen, not the data model (the model stays `01-spec.md` §The model).

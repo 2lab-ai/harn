@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; a CLI whose bare command is an interactive terminal view (TUI) for the human, `harn trim` for the AI; a GUI only as a read-only view.
 
-Status: **in-progress** — v3.8, 2026-10-13 (A1–A6, A9–A13, A15 observed; the TUI's A14 is VOID after the user read the frames — the screen is redesigned in [`04-tui-design.md`](04-tui-design.md), acceptance A16 there; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **shipped** — v3.9, 2026-10-13 (A16 observed from the installed binary; A1–A6, A9–A13, A15 observed; the TUI's A14 is VOID after the user read the frames — the screen is redesigned in [`04-tui-design.md`](04-tui-design.md), acceptance A16 there; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -497,6 +497,12 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.9 (2026-10-13, A16 observed — the TUI as a screen)** — WU-Q rebuilt the interactive view
+  per `04-tui-design.md`; the dispatcher read every captured frame at every round (r4–r10, 26 → 54
+  frames at 80×24 and 120×40) and an independent ui-ux reading passed on the third pass; external
+  per-unit review approved the final commit bf8cf30 (+ 43c24b1 test fix). Shipped as preview `preview-2026-10-13-1426-e05077fd3773` (brew
+  harn-preview 2026.10.13.1426), re-read from the installed binary. Status shipped. Receipts in zbrain
+  `workflow/2lab-ai/harn/receipts-2026-10-13/` (frames, readings, verdicts, gate logs).
 - **v3.8 (2026-10-13, user verdict on the TUI frames)** — A14's readability clause was never
   checked by a human; the shipped TUI was the CLI table, `why` text and `apply` dump inside boxes.
   The screen is respecified in `04-tui-design.md` (groups by kind, human names, one row per thing,
