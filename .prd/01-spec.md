@@ -7,7 +7,7 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
 second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
 
-Status: **planned** — v2.3, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v2.4, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity round 1 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -233,7 +233,7 @@ selects one agent (default: all, one table each).
 | `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + side effects + warnings, then apply the official knob in the given scope (default `local`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
 | `harn on <item>` / `harn undo [N]` / `harn history [--prune <age>]` | reverse journal ops; stale targets reported, not forced; `--prune` is the only way journal entries are ever deleted | text |
 | `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; a JSON/TOML/frontmatter file that no longer parses is journaled and warned about, not reverted; refused for `builtin`/`managed` items | diff + journal id |
-| `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted`; exit 1 on any presence diff |
+| `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted` / `content-mismatch`; exit 1 on any presence diff or content-conformance mismatch within the projection |
 | `harn verify --run` | runs the agent once under its official capture after printing what it will execute; refused under `--readonly` | same |
 | `harn completions <shell>` | clap completions | — |
 
@@ -253,14 +253,17 @@ lazygit, k9s) and are fixed in the P1 drive, not here.
 ### First screen — zbrain on the author's machine
 
 A mockup: every number is an `observed` byte count from the 2026-10-13 capture (`research/04`),
-drawn into the table layout; the header and the `share` denominator therefore say `observed`. A
+drawn into the table layout; the header says `observed`, and `share` = the row's observed bytes
+over the observed body (332,548 B). Rows that bundle side effects (CLAUDE.md with its `@imports`,
+atlassian with its instructions) repeat bytes that other rows also carry, so the `freed` column
+does not sum to the body — only the attributed partition in §Problem does. A
 real static first run has no capture: its header reads `predicted <sum of known rows> + ? (N rows
 unknown)`, the MCP schema rows and the hook row show `?`, and `share` is computed over the known
 sum only.
 
 ```
 harn ~/2lab.ai/zbrain                                     claude-code 2.1.296 (rules verified 2.1.296)
-first request: observed 332.5 KB (capture 2026-10-13) · attributed 326.3 KB · framing 6.3 KB   sort: freed ▼
+first request: observed 332.5 KB (capture 2026-10-13) = attributed 322.6 + parameters 7.8 + framing 2.1   sort: freed ▼
 tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eager, 142.3 KB
     knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]       freed: ?
 
@@ -422,6 +425,9 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v2.4 (2026-10-13, trinity round 3)** — mockup header partition aligned with the measured
+  table (322.6 + 7.8 + 2.1); caption states the `share` denominator and why `freed` rows do not
+  sum; `verify --capture` output lists `content-mismatch` and exits 1 on it.
 - **v2.3 (2026-10-13, trinity round 2, all three verdicts)** — request partition re-measured with
   the wire's compact serialization (tools 210,679 B; instruction 2 B; remainder = measured request
   parameters 7,829 B + framing 2,092 B); `harn [DIR]` positional restored beside `--dir` and used
