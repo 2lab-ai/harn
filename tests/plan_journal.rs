@@ -741,10 +741,9 @@ fn plan_json_round_trips_agent_version_and_loads_without_it() {
     );
 
     // Nor an `items_after` key: it loads as 0.
-    assert!(
-        plan.items_after > 0,
-        "the after tree's first-request items are counted"
-    );
+    // By hand from tree.json: 11 items, every one always or advertised; turning slack's plugin
+    // off takes its server with that server's tool and its 2 skills' listing entries.
+    assert_eq!(plan.items_after, 11 - 4);
     assert!(doc.as_object_mut().unwrap().remove("items_after").is_some());
     let older: plan::ActionPlan = serde_json::from_str(&doc.to_string()).unwrap();
     assert_eq!(older.items_after, 0);

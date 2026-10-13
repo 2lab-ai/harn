@@ -7,7 +7,8 @@
 //! `disableAllHooks` turns off every non-managed hook (managed ones too when set in managed
 //! settings); `allowManagedHooksOnly` (managed) keeps only managed hooks. A hook
 //! `disableAllHooks` turned off stays a row: mode none, its `signal` naming the setting
-//! (`off: disableAllHooks`), its knobs as when on — a reader sees what went off, and `o`/undo
+//! (`off: disableAllHooks`), a `why` step saying where it is set (`<file>#/disableAllHooks =
+//! true`), its knobs as when on — a reader sees what went off and why, and `o`/undo
 //! still find it. A hook only `allowManagedHooksOnly` drops is left out, as before.
 
 use super::fs::esc;
@@ -51,7 +52,8 @@ fn push_groups(
     layer: Layer,
     plugin: Option<&Plugin>,
     knobs: &[Knob],
-    off: Option<&str>,
+    // The signal and the `why` step naming where the switch is set.
+    off: Option<(&str, &str)>,
 ) {
     for (event, groups) in events {
         let Value::Array(groups) = groups else {
@@ -98,8 +100,8 @@ fn push_groups(
                     "{event} stdout is injected; size unknown until a capture"
                 ));
             }
-            if let Some(signal) = off {
-                item.origin.why.push(signal.to_string());
+            if let Some((signal, set_at)) = off {
+                item.origin.why.push(set_at.to_string());
                 item.signal = Some(signal.to_string());
             }
             item.origin.plugin = plugin.map(|p| p.id.clone());
@@ -119,7 +121,11 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
     let non_managed_off = all_off || matches!(disable_all, Some((true, _))) || managed_only;
     // Off by the switch: still listed. Off only by `allowManagedHooksOnly`: dropped, as before
     // — no view has words for "your organisation allows only its own hooks" yet.
-    let switch_off = matches!(disable_all, Some((true, _))).then_some(OFF_ALL_HOOKS);
+    let set_at = disable_all.map(|(_, f)| format!("{} = true", f.at("/disableAllHooks")));
+    let switch_off = match (disable_all, &set_at) {
+        (Some((true, _)), Some(at)) => Some((OFF_ALL_HOOKS, at.as_str())),
+        _ => None,
+    };
     let disable_knob = setting_knob(
         ctx,
         Scope::Local,

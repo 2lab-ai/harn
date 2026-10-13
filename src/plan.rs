@@ -867,14 +867,13 @@ impl<'a> Delta<'a> {
 }
 
 /// `item` (as before the overlay) leaves the request: it is gone from the after tree (`now`
-/// None), or still there but switched off — mode none with an `off:` signal it did not have
-/// before. A resolver keeps such an item to say what turned it off (every hook and the status
-/// line under `disableAllHooks`); it leaves all the same.
+/// None), or still there but switched off — mode none with an `off:` signal. A resolver keeps
+/// such an item to say what turned it off (every hook and the status line under
+/// `disableAllHooks`); it leaves all the same. An item already switched off before the overlay
+/// never leaves, whether it stays or goes (a hook of a plugin turned off while every hook is
+/// off was not running).
 fn left(item: &Item, now: Option<&Item>) -> bool {
-    match now {
-        None => true,
-        Some(now) => switched_off(now) && !switched_off(item),
-    }
+    !switched_off(item) && now.is_none_or(switched_off)
 }
 
 /// Mode none with an `off:` signal: listed, but something turned it off.

@@ -35,7 +35,8 @@ pub struct Opts {
     pub unicode: bool,
     /// Colors (yellow warnings, red errors); modifiers only without.
     pub color: bool,
-    /// `--readonly`: d/o/u/e are greyed and refused; the journal dir is not created.
+    /// `--readonly`: d/o/u/e are left out of the key bar and refused; the journal dir is not
+    /// created.
     pub readonly: bool,
 }
 

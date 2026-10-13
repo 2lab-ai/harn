@@ -478,7 +478,8 @@ fn a_plugin_hook_leaving_by_both_rules_is_one_side_effect() {
         );
     }
 
-    // Every hook already off (mode none): the plugin's hook still leaves with the plugin, once.
+    // Every hook already off (mode none): the plugin's hook goes from the tree with its plugin,
+    // but it was not running, so nothing about it leaves.
     std::fs::write(
         local_settings(&f),
         serde_json::to_string_pretty(&{
@@ -494,14 +495,60 @@ fn a_plugin_hook_leaving_by_both_rules_is_one_side_effect() {
     let tree = resolve(&f, None);
     let off = find(&tree, Kind::Plugin, "alpha@market-one").id.clone();
     let plan = plan::build_plan(&ClaudeCode, &t, &tree, &off, None).unwrap();
-    assert_eq!(
-        effects_naming(&plan, "UserPromptSubmit hook").len(),
-        1,
-        "{:#?}",
-        plan.side_effects
-    );
-    assert!(effects_naming(&plan, "SessionStart hook").is_empty());
-    assert!(effects_naming(&plan, "statusLine").is_empty());
+    for label in ["UserPromptSubmit hook", "SessionStart hook", "statusLine"] {
+        assert!(
+            effects_naming(&plan, label).is_empty(),
+            "{label}: {:#?}",
+            plan.side_effects
+        );
+    }
+    // Its skills and server still leave.
+    assert!(!plan.side_effects.is_empty());
+}
+
+/// Items in the first request: mode always or advertised.
+fn at_start(tree: &Tree) -> usize {
+    model::walk(tree)
+        .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
+        .count()
+}
+
+#[test]
+fn items_after_is_the_count_at_start_once_the_plan_is_applied() {
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+    let alpha = find(&tree, Kind::Plugin, "alpha@market-one").id.clone();
+    // By hand: 83 at start, and alpha takes 6 with it — its plugin row, its 2 skills' listing
+    // entries, its server and that server's instructions, its UserPromptSubmit hook.
+    assert_eq!(at_start(&tree), 83);
+    let alpha_rows: Vec<(Kind, Mode)> = model::walk(&tree)
+        .filter(|i| i.id == alpha || i.origin.plugin.as_deref() == Some("alpha@market-one"))
+        .map(|i| (i.kind, i.mode))
+        .collect();
+    assert_eq!(alpha_rows.len(), 6, "{alpha_rows:?}");
+    assert!(alpha_rows
+        .iter()
+        .all(|(_, m)| matches!(m, Mode::Always | Mode::Advertised)));
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &alpha, None).unwrap();
+    assert_eq!(plan.items_after, 77);
+
+    // Every hook already off: the two that printed into the request are mode none, so 81 at
+    // start; alpha then takes 5 (its hook was not counted). The hooks the switch keeps, with
+    // mode none, never count.
+    let mut local: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+    local["disableAllHooks"] = serde_json::json!(true);
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    let tree = resolve(&f, None);
+    assert_eq!(at_start(&tree), 81);
+    assert_eq!(of_kind(&tree, Kind::Hook).len(), 3, "kept, mode none");
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &alpha, None).unwrap();
+    assert_eq!(plan.items_after, 76);
 }
 
 #[test]

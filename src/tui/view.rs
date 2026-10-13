@@ -613,7 +613,7 @@ impl App {
     }
 
     /// The keys valid now, in words; the least used go first when the frame is narrow. Under
-    /// `--readonly` the write keys stay listed, greyed.
+    /// `--readonly` the write keys (d, o, u, e) are left out: the `?` card says they are off.
     /// `scrolls` = the open card's body is taller than the card: ↑↓ move it.
     fn key_bar(&self, width: usize, scrolls: bool) -> Line<'static> {
         let ro = self.opts.readonly;
@@ -699,10 +699,13 @@ impl App {
                                 })
                             })
                     }
-                    None => group.is_some_and(|g| g.can_turn_off),
+                    // The Built-in group has no switch of its own.
+                    None => group.is_some_and(|g| {
+                        g.can_turn_off && g.kind != super::model::GroupKind::Builtin
+                    }),
                 };
-                if can_off {
-                    push("d", "turn off", !ro, 7);
+                if can_off && !ro {
+                    push("d", "turn off", true, 7);
                 }
                 // Only what harn turned off here: a hook your own settings turned off has
                 // nothing for `o` to reverse.
@@ -710,17 +713,17 @@ impl App {
                     r.id.as_ref()
                         .is_some_and(|id| self.tab().journaled.contains_key(id))
                 });
-                if can_on {
-                    push("o", "turn back on", !ro, 7);
+                if can_on && !ro {
+                    push("o", "turn back on", true, 7);
                 }
-                if self.last_live.is_some() {
-                    push("u", "undo", !ro, 6);
+                if self.last_live.is_some() && !ro {
+                    push("u", "undo", true, 6);
                 }
                 if row.is_some_and(|r| r.id.is_some()) {
                     push("w", "where from", true, 5);
                 }
-                if self.cursor_item().is_some_and(editable) {
-                    push("e", "edit", !ro, 2);
+                if self.cursor_item().is_some_and(editable) && !ro {
+                    push("e", "edit", true, 2);
                 }
                 if !self.tab().screen.notes.is_empty() {
                     push("i", "notes", true, 1);
@@ -781,9 +784,13 @@ impl App {
                 list: true,
             } => (
                 format!("What leaves with {}", staged.name),
+                // Headings (`at start (6)`) flush, their entries indented under them.
                 card.leave_list
                     .iter()
-                    .flat_map(|l| indent_wrap("", &self.t(l), inner))
+                    .flat_map(|l| match l.strip_prefix("  ") {
+                        Some(entry) => indent_wrap("  ", &self.t(entry), inner),
+                        None => indent_wrap("", &self.t(l), inner),
+                    })
                     .collect(),
                 "Esc back".to_string(),
             ),
@@ -961,18 +968,6 @@ impl App {
         let hint = (!card.leave_list.is_empty()).then_some(list.as_str());
         body.extend(labelled("Leaves", &self.t(&card.leaves), inner, hint));
         body.extend(labelled("Saves", &self.t(&card.saves), inner, None));
-        // `· 2 fewer items at start` is one phrase: after the saving when it fits there, else
-        // on the next line.
-        if !card.at_start.is_empty() {
-            let tail = self.t(&format!("{} {}", self.g().dot, card.at_start));
-            let last = body.last_mut().expect("labelled gives a line");
-            if cols(last) + 1 + cols(&tail) < inner {
-                last.push(' ');
-                last.push_str(&tail);
-            } else {
-                body.extend(labelled("", &tail, inner, None));
-            }
-        }
         body.extend(labelled("Undo", &self.t(&card.undo), inner, None));
         for note in &card.notes {
             body.extend(labelled("Note", &self.t(note), inner, None));
@@ -1025,6 +1020,12 @@ impl App {
         let gaps = [2, 2, 3];
         // A space before the border, as on every card line.
         let need = 1 + (0..3).map(|c| k[c] + gaps[c] + d[c]).sum::<usize>() + 3 * 2 + 1;
+        // The write keys are left out of the key bar under `--readonly`: here they stay, and
+        // the card says they are off.
+        let note = self
+            .opts
+            .readonly
+            .then(|| indent_wrap("", "read-only: d o u e are off", inner));
         if need <= inner {
             return rows
                 .iter()
@@ -1043,33 +1044,43 @@ impl App {
                     }
                     line
                 })
+                .chain(note.into_iter().flatten())
                 .collect();
         }
         let kw = k.iter().copied().max().unwrap_or(0);
         rows.iter()
             .flat_map(|r| r.iter())
             .flat_map(|(key, words)| indent_wrap(&pad_right(key, kw + 2), words, inner))
+            .chain(note.into_iter().flatten())
             .collect()
     }
 }
 
 /// `label` in the card's label column, `text` wrapped after it; `hint` right-aligned on the
-/// first line when it fits.
+/// first line when it fits there, else on the last, else on a line of its own: never dropped.
 fn labelled(label: &str, text: &str, inner: usize, hint: Option<&str>) -> Vec<String> {
     let room = inner.saturating_sub(2 + LABEL_W).max(1);
     let mut lines = wrap_words(text, room);
     let mut out = Vec::new();
     let first = lines.remove(0);
-    let mut head = format!(" {}{first}", pad_right(label, LABEL_W));
-    if let Some(hint) = hint {
-        let used = cols(&head);
-        if used + 3 + cols(hint) < inner {
-            head = format!("{head}{}{hint}", " ".repeat(inner - 1 - used - cols(hint)));
-        }
-    }
-    out.push(head);
+    out.push(format!(" {}{first}", pad_right(label, LABEL_W)));
     for line in lines {
         out.push(format!(" {}{line}", " ".repeat(LABEL_W)));
+    }
+    if let Some(hint) = hint {
+        let fits = |line: &String| cols(line) + 3 + cols(hint) < inner;
+        let at = if fits(&out[0]) {
+            Some(0)
+        } else {
+            out.len().checked_sub(1).filter(|last| fits(&out[*last]))
+        };
+        let at = at.unwrap_or_else(|| {
+            out.push(" ".to_string());
+            out.len() - 1
+        });
+        let used = cols(&out[at]);
+        let gap = inner.saturating_sub(1 + used + cols(hint));
+        out[at] = format!("{}{}{hint}", out[at], " ".repeat(gap));
     }
     out
 }
@@ -1324,7 +1335,8 @@ fn breaks_after(grapheme: &str) -> bool {
 
 /// Where the word `text` starts with ends: at the first space outside a backtick span, so an
 /// inline command (`harn verify --run`) is one word (a tick with no closing one spans nothing),
-/// and not between a number and its unit (`32 KB:`, `0.8 KB;`, `5 %`).
+/// not between a number and its unit (`32 KB:`, `0.8 KB;`, `5 %`), and not between a count
+/// and the word it counts (`1 hook)`, `(2 hooks),`, `32 items`).
 fn word_end(text: &str) -> usize {
     let mut at = 0;
     loop {
@@ -1337,7 +1349,8 @@ fn word_end(text: &str) -> usize {
         let word = &text[text[..space].rfind(' ').map_or(0, |i| i + 1)..space];
         let next = text.get(space + 1..).unwrap_or("");
         let next = &next[..next.find(' ').unwrap_or(next.len())];
-        if text[space..].starts_with(' ') && is_number(word) && is_unit(next) {
+        let counts = is_count(word) && next.starts_with(|c: char| c.is_alphabetic());
+        if text[space..].starts_with(' ') && (is_number(word) && is_unit(next) || counts) {
             at = space + 1 + next.len();
             continue;
         }
@@ -1352,6 +1365,12 @@ fn is_number(word: &str) -> bool {
         && digits
             .chars()
             .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+}
+
+/// `1`, `32`, `(2`: a count from 1 to 999 (a year or an id is no count).
+fn is_count(word: &str) -> bool {
+    let digits = word.trim_start_matches('(');
+    (1..=3).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) && digits != "0"
 }
 
 /// `KB`, `KB:`, `B;`, `%)`: a size or percent unit, with what punctuation follows it.
@@ -1496,8 +1515,15 @@ mod tests {
         );
         assert_eq!(wrap_words("frees 4.0 KB.", 8), ["frees", "4.0 KB."]);
         assert_eq!(wrap_words("is ~15 MB now", 6), ["is", "~15 MB", "now"]);
-        // A number before any other word breaks as before.
-        assert_eq!(wrap_words("frees 32 items", 8), ["frees 32", "items"]);
+        // A count keeps the word it counts, wherever it wraps.
+        assert_eq!(wrap_words("frees 32 items", 8), ["frees", "32 items"]);
+        assert_eq!(
+            wrap_words("2 at start (2 hooks), 2 later", 12),
+            ["2 at start", "(2 hooks),", "2 later"]
+        );
+        // Not a count: a year, an arrow after a number.
+        assert_eq!(wrap_words("in 2026 now", 7), ["in 2026", "now"]);
+        assert_eq!(wrap_words("(83 → 77)", 4), ["(83", "→", "77)"]);
     }
 
     #[test]

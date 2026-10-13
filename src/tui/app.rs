@@ -643,7 +643,7 @@ impl App {
     fn writable(&mut self, key: &str) -> bool {
         if self.opts.readonly {
             self.error(format!(
-                "readonly: {key} would change files; harn was started with --readonly"
+                "read-only: {key} would change files; harn was started with --readonly"
             ));
         }
         !self.opts.readonly
@@ -821,7 +821,13 @@ impl App {
             );
             return;
         };
-        if row.state == State::Off {
+        // harn's own change: what it did and how to reverse it. An item off by the user's own
+        // settings (every hook under their disableAllHooks) gets its real origin below.
+        let by_harn = row
+            .id
+            .as_ref()
+            .is_some_and(|id| self.tab().journaled.contains_key(id));
+        if row.state == State::Off && (by_harn || self.cursor_item().is_none()) {
             let lines = vec![
                 "1  harn turned it off in this directory".to_string(),
                 "2  `harn history` lists the change; o turns it back on".to_string(),
@@ -973,7 +979,7 @@ impl App {
                                 item,
                                 t(format!(
                                     " · {} · u undoes · takes effect next session",
-                                    start_count(before, after)
+                                    model::start_count(before, after)
                                 )),
                             ],
                         )
@@ -1020,7 +1026,9 @@ impl App {
             return;
         };
         if entry.snapshots.is_empty() {
-            self.error(format!("journal entry {} has no file to restore", entry.id));
+            // Named as its row is: the entry's id is the journal's, not the reader's.
+            let parts = vec![self.item(&id), t(": that change has no file to restore")];
+            self.say(Tone::Error, parts);
             return;
         }
         let name = if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
@@ -1063,16 +1071,24 @@ impl App {
             self.error("that change was already undone; r refreshes");
             return;
         }
+        let before = self.tab().screen.title.items;
         match journal::undo_entry(&mut self.journal, entry_id) {
             Ok(entry) => {
-                let back = if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
-                    vec![t("all hooks are back on · takes effect next session")]
+                let mut parts = if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+                    vec![t("all hooks are back on")]
                 } else {
-                    vec![item, t(" is back on · takes effect next session")]
+                    vec![item, t(" is back on")]
                 };
-                let mut parts = back;
-                if let Some(err) = self.refresh() {
-                    parts.push(self.said(format!(" · refresh failed: {err}")));
+                // How the header's count moved, as apply says it.
+                match self.refresh() {
+                    Some(err) => parts.push(self.said(format!(" · refresh failed: {err}"))),
+                    None => {
+                        let after = self.tab().screen.title.items;
+                        parts.push(t(format!(
+                            " · {} · takes effect next session",
+                            model::start_count(before, after)
+                        )));
+                    }
                 }
                 self.select(item_id);
                 self.say(Tone::Info, parts);
@@ -1183,12 +1199,20 @@ impl App {
             }
             parts.push(t(" back"));
         }
+        let before = self.tab().screen.title.items;
         match journal::undo_entry(&mut self.journal, &expected.id) {
             Ok(entry) => {
+                let refresh = self.refresh();
+                // How the header's count moved, as apply says it; the files last, the first
+                // clause to drop when the row is narrow.
+                if refresh.is_none() {
+                    let after = self.tab().screen.title.items;
+                    parts.push(t(format!(" · {}", model::start_count(before, after))));
+                }
                 parts.push(t(" · "));
                 parts.extend(self.paths(entry.snapshots.iter().map(|s| s.path.as_path())));
                 parts.push(t(" restored byte for byte"));
-                if let Some(err) = self.refresh() {
+                if let Some(err) = refresh {
                     parts.push(self.said(format!(" · refresh failed: {err}")));
                 }
                 self.say(Tone::Info, parts);
@@ -1348,17 +1372,6 @@ impl App {
 /// The switch that turns every hook off at once.
 fn is_all_hooks(knob: &data::Knob) -> bool {
     matches!(knob, data::Knob::Setting { pointer, .. } if pointer == model::ALL_HOOKS)
-}
-
-/// `6 fewer items load at start (83 → 77)`: how the header's count moved.
-fn start_count(before: usize, after: usize) -> String {
-    let n = before.abs_diff(after);
-    let items = if n == 1 { "item loads" } else { "items load" };
-    match after.cmp(&before) {
-        std::cmp::Ordering::Less => format!("{n} fewer {items} at start ({before} → {after})"),
-        std::cmp::Ordering::Greater => format!("{n} more {items} at start ({before} → {after})"),
-        std::cmp::Ordering::Equal => format!("still {before} items load at start"),
-    }
 }
 
 /// The name of the first row acting on `id`.

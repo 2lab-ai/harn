@@ -72,6 +72,8 @@ Rules that produce it:
   listing would also shrink ("…and the skill listing shrinks; how much needs `harn verify --run`").
   Built-in rows say why they cannot be turned off. Group rows describe the group.
 - **Key bar in words**, only the keys valid now. `d turn off` (not `off`), `u undo`, `→← open/close`.
+  Under `--readonly` d, o, u and e are absent (the `?` card still lists them, with the line
+  `read-only: d o u e are off`; the header says `read-only`); the Built-in group row has no `d`.
 - **Footer honesty**: `345 items · 5 shown · filter: none` only when a filter or fold hides rows
   that would otherwise be visible; otherwise no footer (the panel is the footer).
 
@@ -110,7 +112,7 @@ Rules that produce it:
 ```
 ┌ Turn off slack for this project ─────────────────────────────────────────────┐
 │ Writes   .claude/settings.local.json → enabledPlugins.slack = false          │
-│ Leaves   8 skills, 5 commands, 1 MCP server (next session)      → list       │
+│ Leaves   15 at start (slack, 8 skills, 5 commands, 1 MCP server)      → list │
 │ Saves    3.7 KB now; the skill listing shrinks too (unmeasured)              │
 │ Undo     u here, or `harn undo` later — the file is restored byte for byte   │
 │                                                        Enter apply · Esc    │
@@ -124,6 +126,24 @@ start (83 → 77)`), the detail panel shows `turned off · u undoes · takes eff
 the row shows `off` in the state column (greyed name). `o` on an off row = the same card titled
 "Turn … back on"; `u` = the same card titled "Undo the last change" (Enter undo · Esc keep; `y` and
 `n` work too).
+
+`→` list: every item that stops loading, under `at start (N)` — N is exactly what the header's
+count drops by after Enter — then `when used / later (M)` (hooks that run later, rules read on
+demand, the status line); what a change makes appear comes last under `appears (K)`. The Leaves
+line summarises the two groups (`6 at start (alpha, 2 skills, 1 MCP server, …), 1 later (hook)`);
+its `→ list` hint takes a line of its own when the summary fills the first one. The Saves line
+carries no count.
+
+```
+┌ What leaves with slack ──────────────────────────────────────────────────────┐
+│ at start (15)                                                                │
+│   slack (plugin)                                                             │
+│   slack-search (skill)                                                       │
+│   …                                                                          │
+│   slack (MCP server)                                                         │
+│                                                                     Esc back │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
 Action cards (`d`, `o`, `u`) show their whole body before Enter (or `y`) can do anything, because
 Enter commits a write; in a smaller frame the card is not drawn, the message row

@@ -2320,20 +2320,21 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
 }
 
 /// The JSON pointer of an origin link's `#…` part and what follows it. A pointer keeps the
-/// spaces and parentheses of the directory names in it (only `/` and `~` are escaped), so the
-/// tail is read from the right; harn writes two tail forms: `<pointer> = <value>` (the last
-/// ` = `) and `<pointer> (<note>)` (the last ` (`, a note with no `/` in it). Anything else is
-/// all pointer.
+/// spaces, parentheses and ` = ` of the directory names in it (only `/` and `~` are escaped), so
+/// the tail is read from the right, its form decided first. harn writes two: `<pointer>
+/// (<note>)` — the text ends in `)` and what follows its last ` (` has no `=` and no `/` (a
+/// JSON value never ends in an unquoted `)`) — and `<pointer> = <value>`, split at the last
+/// ` = `. Anything else is all pointer.
 pub fn split_link(rest: &str) -> (&str, &str) {
-    if let Some(at) = rest.rfind(" = ") {
-        return (&rest[..at], rest[at + 1..].trim_start());
-    }
     if rest.ends_with(')') {
         if let Some(at) = rest.rfind(" (") {
-            if !rest[at..].contains('/') {
+            if !rest[at..].contains(['=', '/']) {
                 return (&rest[..at], rest[at + 1..].trim_start());
             }
         }
+    }
+    if let Some(at) = rest.rfind(" = ") {
+        return (&rest[..at], rest[at + 1..].trim_start());
     }
     (rest, "")
 }
@@ -2454,14 +2455,13 @@ pub struct OffCard {
     /// A sentence before Writes when the switch does more than the row (every hook at once).
     pub lead: Option<String>,
     pub writes: Vec<String>,
-    /// `8 skills, 5 commands, 1 MCP server (next session)`.
+    /// `6 at start (alpha, 2 skills, 1 MCP server, …), 1 later (PreToolUse hook)`: what stops
+    /// loading, in the first request and later; `N at start` is the header's drop.
     pub leaves: String,
-    /// Each thing that leaves: `block-kit (skill)`.
+    /// Each thing that stops loading, under `at start (N)` and `when used / later (M)`
+    /// (`block-kit (skill)`); empty when the Leaves line names the one thing.
     pub leave_list: Vec<String>,
     pub saves: String,
-    /// How the count of items at start moves (`2 fewer items at start`), shown after `saves`
-    /// as one phrase; empty when the plan does not say.
-    pub at_start: String,
     pub undo: String,
     pub notes: Vec<String>,
 }
@@ -2491,64 +2491,77 @@ pub fn off_card(
         .ops
         .iter()
         .any(|op| matches!(&op.knob, Knob::Setting { pointer, .. } if pointer == ALL_HOOKS));
-    let mut gone: Vec<(String, Kind)> = Vec::new();
-    let mut added: Vec<String> = Vec::new();
-    for effect in &plan.side_effects {
-        let Some((label, kind, leaves)) = parse_effect(effect) else {
-            continue;
-        };
-        let shown = human_label(tree, &label, kind, &places);
-        if leaves {
-            gone.push((shown, kind));
+    let (gone, added) = leaving(plan, tree);
+    let shown = |i: &Item| {
+        if i.id == item.id {
+            name.to_string()
         } else {
-            added.push(format!("{shown} ({}, appears)", kind_word(kind)));
+            human_label(tree, &i.label, i.kind, &places)
         }
-    }
-    // Skills, commands, agents, MCP servers, hooks, then the rest: the summary and the list
-    // in the same order.
-    let order = |k: &Kind| match k {
-        Kind::Skill => 0,
-        Kind::Command => 1,
-        Kind::SubAgent => 2,
-        Kind::McpServer => 3,
-        Kind::Hook => 4,
-        _ => 5,
     };
-    gone.sort_by_key(|(_, k)| order(k));
-    let leaves = if gone.is_empty() {
-        format!("just this {} (next session)", kind_word(item.kind))
-    } else {
+    let (start, later): (Vec<&Item>, Vec<&Item>) = gone.iter().partition(|i| at_start(i));
+    // `alpha, 2 skills, 1 MCP server`: the picked item by name, the rest counted by kind.
+    let summary = |items: &[&Item]| -> String {
+        let mut parts: Vec<String> = items
+            .iter()
+            .filter(|i| i.id == item.id)
+            .map(|i| shown(i))
+            .collect();
         let mut counts: Vec<(Kind, usize)> = Vec::new();
-        for (_, kind) in &gone {
-            match counts.iter_mut().find(|(k, _)| k == kind) {
+        for i in items.iter().filter(|i| i.id != item.id) {
+            match counts.iter_mut().find(|(k, _)| *k == i.kind) {
                 Some((_, n)) => *n += 1,
-                None => counts.push((*kind, 1)),
+                None => counts.push((i.kind, 1)),
             }
         }
-        let parts: Vec<String> = counts
-            .iter()
-            .map(|(k, n)| count(*n, kind_word(*k)))
-            .collect();
-        format!("{} (next session)", parts.join(", "))
+        parts.extend(counts.iter().map(|(k, n)| count(*n, kind_word(*k))));
+        parts.join(", ")
+    };
+    let mut groups = Vec::new();
+    if !start.is_empty() {
+        groups.push(format!("{} at start ({})", start.len(), summary(&start)));
+    }
+    if !later.is_empty() {
+        groups.push(format!("{} later ({})", later.len(), summary(&later)));
+    }
+    let leaves = if groups.is_empty() {
+        "nothing that loads".to_string()
+    } else {
+        groups.join(", ")
     };
     // `UserPromptSubmit (hook)`: the kind word once. The status line has no row to point at.
-    let mut leave_list: Vec<String> = gone
-        .iter()
-        .map(|(n, k)| {
-            let word = kind_word(*k);
-            let n = n.strip_suffix(&format!(" {word}")).unwrap_or(n);
-            match k {
-                Kind::StatusLine => {
-                    format!("{n} ({word} — not a row above; it stops with the hooks)")
-                }
-                _ => format!("{n} ({word})"),
+    let line = |i: &Item| {
+        let word = kind_word(i.kind);
+        let n = shown(i);
+        let n = n
+            .strip_suffix(&format!(" {word}"))
+            .unwrap_or(&n)
+            .to_string();
+        match i.kind {
+            Kind::StatusLine => {
+                format!("  {n} ({word} — not a row above; it stops with the hooks)")
             }
-        })
-        .collect();
-    leave_list.extend(added);
+            _ => format!("  {n} ({word})"),
+        }
+    };
+    let mut leave_list: Vec<String> = Vec::new();
+    if gone.len() > 1 || !added.is_empty() {
+        if !start.is_empty() {
+            leave_list.push(format!("at start ({})", start.len()));
+            leave_list.extend(start.iter().map(|i| line(i)));
+        }
+        if !later.is_empty() {
+            leave_list.push(format!("when used / later ({})", later.len()));
+            leave_list.extend(later.iter().map(|i| line(i)));
+        }
+        if !added.is_empty() {
+            leave_list.push(format!("appears ({})", added.len()));
+            leave_list.extend(added.iter().map(|a| format!("  {a}")));
+        }
+    }
     let listing = gone
         .iter()
-        .any(|(_, k)| matches!(k, Kind::Skill | Kind::Command | Kind::SubAgent))
+        .any(|i| matches!(i.kind, Kind::Skill | Kind::Command | Kind::SubAgent))
         || listing_entry(item);
     let freed = &plan.freed;
     let saves = match (freed.known, freed.delta_unknown) {
@@ -2567,12 +2580,6 @@ pub fn off_card(
         (0, false) => "nothing in the first request".to_string(),
         (known, false) => format!("{} of the first request", size(known)),
     };
-    // How the header's count moves, from the plan's own re-resolve: the applied message says
-    // the same numbers.
-    let at_start = model::walk(tree)
-        .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
-        .count();
-    let at_start = fewer_at_start(at_start, plan.items_after);
     OffCard {
         title: if all_hooks {
             format!("Turn off all hooks for {}", scope_short(scope))
@@ -2586,7 +2593,6 @@ pub fn off_card(
         leaves,
         leave_list,
         saves,
-        at_start,
         undo: "u here, or `harn undo` later — the file is restored byte for byte".to_string(),
         notes: plan
             .warnings
@@ -2596,15 +2602,101 @@ pub fn off_card(
     }
 }
 
-/// `6 fewer items at start`, `1 fewer item at start`, `no change in what loads at start`.
-fn fewer_at_start(before: usize, after: usize) -> String {
+/// `6 fewer items load at start (83 → 77)`, `still 1 item loads at start`: how the header's
+/// count moved, for the applied message.
+pub(crate) fn start_count(before: usize, after: usize) -> String {
+    let items = |n: usize| if n == 1 { "item loads" } else { "items load" };
     let n = before.abs_diff(after);
-    let items = if n == 1 { "item" } else { "items" };
     match after.cmp(&before) {
-        std::cmp::Ordering::Less => format!("{n} fewer {items} at start"),
-        std::cmp::Ordering::Greater => format!("{n} more {items} at start"),
-        std::cmp::Ordering::Equal => "no change in what loads at start".to_string(),
+        std::cmp::Ordering::Less => {
+            format!("{n} fewer {} at start ({before} → {after})", items(n))
+        }
+        std::cmp::Ordering::Greater => {
+            format!("{n} more {} at start ({before} → {after})", items(n))
+        }
+        std::cmp::Ordering::Equal => format!("still {before} {} at start", items(before)),
     }
+}
+
+/// At start: mode always or advertised, as the header counts items.
+fn at_start(item: &Item) -> bool {
+    matches!(item.mode, Mode::Always | Mode::Advertised)
+}
+
+/// `item` and everything under it.
+fn subtree(item: &Item) -> Vec<&Item> {
+    let mut out = vec![item];
+    for child in &item.children {
+        out.extend(subtree(child));
+    }
+    out
+}
+
+/// What `plan` stops loading, in the tree as it is now: the picked items with
+/// what is under them first, then each side effect's item with what is under it, by kind
+/// (skills, commands, agents, MCP servers, hooks, the rest); and what appears, worded. The
+/// plan's side effects name every other item that leaves; whether a picked item leaves too is
+/// read from the plan's count after it — a denied agent stays in the roster, and then neither
+/// it nor what is under it is listed.
+fn leaving<'t>(plan: &ActionPlan, tree: &'t Tree) -> (Vec<&'t Item>, Vec<String>) {
+    let places = Places::of(tree);
+    let mut side: Vec<&'t Item> = Vec::new();
+    let mut added: Vec<String> = Vec::new();
+    let mut used: HashSet<&str> = HashSet::new();
+    for effect in &plan.side_effects {
+        let Some((label, kind, leaves)) = parse_effect(effect) else {
+            continue;
+        };
+        if !leaves {
+            let shown = human_label(tree, &label, kind, &places);
+            added.push(format!("{shown} ({})", kind_word(kind)));
+            continue;
+        }
+        let found = model::walk(tree)
+            .find(|i| i.label == label && i.kind == kind && !used.contains(i.id.as_str()));
+        if let Some(found) = found {
+            for i in subtree(found) {
+                if used.insert(i.id.as_str()) {
+                    side.push(i);
+                }
+            }
+        }
+    }
+    let order = |k: Kind| match k {
+        Kind::Skill => 0,
+        Kind::Command => 1,
+        Kind::SubAgent => 2,
+        Kind::McpServer | Kind::McpInstructions | Kind::McpTool => 3,
+        Kind::Hook => 4,
+        _ => 5,
+    };
+    side.sort_by_key(|i| order(i.kind));
+    let mut own: Vec<&'t Item> = Vec::new();
+    for op in &plan.ops {
+        if let Some(picked) = model::walk(tree).find(|i| i.id == op.item_id) {
+            for i in subtree(picked) {
+                if used.insert(i.id.as_str()) {
+                    own.push(i);
+                }
+            }
+        }
+    }
+    // The header's drop is only what the side effects take from the first request: the picked
+    // items stay where they are. (What appears is not in this tree, so its mode is unknown; a
+    // new permission list, the usual one, loads nothing.) An inference from `items_after`: a
+    // structured list of what leaves (ids and modes, picked items included) on `ActionPlan`
+    // would make it exact — a follow-up.
+    let before = model::walk(tree).filter(|i| at_start(i)).count();
+    let side_start = side.iter().filter(|i| at_start(i)).count();
+    let own_start = own.iter().filter(|i| at_start(i)).count();
+    let stays = plan.items_after > 0
+        && own_start > 0
+        && before.saturating_sub(plan.items_after) == side_start;
+    if stays {
+        own.clear();
+    }
+    own.extend(side);
+    (own, added)
 }
 
 /// `label (kind) leaves[ with N children]` / `label (kind) appears` → (label, kind, leaves).
@@ -2832,10 +2924,12 @@ mod tests {
 
     #[test]
     fn the_count_at_start_is_worded_by_how_it_moves() {
-        assert_eq!(fewer_at_start(83, 77), "6 fewer items at start");
-        assert_eq!(fewer_at_start(83, 82), "1 fewer item at start");
-        assert_eq!(fewer_at_start(83, 83), "no change in what loads at start");
-        assert_eq!(fewer_at_start(83, 85), "2 more items at start");
+        // The applied, `o` and `u` messages: how the header's number moved.
+        assert_eq!(start_count(83, 77), "6 fewer items load at start (83 → 77)");
+        assert_eq!(start_count(83, 82), "1 fewer item loads at start (83 → 82)");
+        assert_eq!(start_count(2, 3), "1 more item loads at start (2 → 3)");
+        assert_eq!(start_count(83, 83), "still 83 items load at start");
+        assert_eq!(start_count(1, 1), "still 1 item loads at start");
     }
 
     #[test]
@@ -2858,6 +2952,24 @@ mod tests {
             ("/projects/~1home~1me~1foo (x)/disabledMcpServers", "")
         );
         assert_eq!(split_link("/hooks/Stop/0"), ("/hooks/Stop/0", ""));
+        // A ` = ` inside a directory name: the note at the end decides the tail first.
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo = bar/mcpServers/srv (http)"),
+            ("/projects/~1home~1me~1foo = bar/mcpServers/srv", "(http)")
+        );
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo = bar/enabledPlugins/x = true"),
+            ("/projects/~1home~1me~1foo = bar/enabledPlugins/x", "= true")
+        );
+        // A value that ends in parentheses (inside its quotes) is still a value.
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo (x)/env/NOTE = \"a (b)\""),
+            ("/projects/~1home~1me~1foo (x)/env/NOTE", "= \"a (b)\"")
+        );
+        assert_eq!(
+            split_link("/env/NOTE = \"a (b)\""),
+            ("/env/NOTE", "= \"a (b)\"")
+        );
     }
 
     /// A plugin whose admission chain starts with `link`.
@@ -2869,8 +2981,8 @@ mod tests {
 
     #[test]
     fn a_project_key_with_spaces_or_parentheses_keeps_its_project() {
-        // (a) the target dir has a space; (b) it has ` (x)`.
-        for dir in ["/home/me/my app", "/home/me/foo (x)"] {
+        // (a) the target dir has a space; (b) it has ` (x)`; (e) it has ` = `.
+        for dir in ["/home/me/my app", "/home/me/foo (x)", "/home/me/foo = bar"] {
             let p = places_in(dir);
             let escaped = dir.replace('/', "~1");
             let link = format!("/home/me/.claude.json#/projects/{escaped}/enabledPlugins/x = true");
@@ -2916,6 +3028,16 @@ mod tests {
         assert_eq!(
             where_link(server, &p),
             "~/.claude.json › projects › ~/other app › mcpServers › srv (http)   (~/other app)"
+        );
+        // (e) another project's dir with ` = `, behind a note tail.
+        let server = "/home/me/.claude.json#/projects/~1home~1me~1foo = bar/mcpServers/srv (http)";
+        assert_eq!(
+            where_link(server, &p),
+            "~/.claude.json › projects › ~/foo = bar › mcpServers › srv (http)   (~/foo = bar)"
+        );
+        assert_eq!(
+            enabled_scope(&enabled_by(server), &p).as_deref(),
+            Some("for ~/foo = bar only")
         );
     }
 

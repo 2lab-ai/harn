@@ -290,7 +290,8 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
     let hooks_off = ctx
         .settings
         .get_bool("/disableAllHooks")
-        .is_some_and(|(b, _)| b);
+        .filter(|(b, _)| *b)
+        .map(|(_, f)| format!("{} = true", f.at("/disableAllHooks")));
     if let Some((_, file)) = ctx.settings.get("/statusLine") {
         let setting = file.at("/statusLine");
         let mut item = new_item(
@@ -304,8 +305,8 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
         item.origin.path = Some(file.path.clone());
         item.origin.setting = Some(setting.clone());
         item.origin.why = vec![setting, "runs locally; never reaches the model".to_string()];
-        if hooks_off {
-            item.origin.why.push(OFF_ALL_HOOKS.to_string());
+        if let Some(set_at) = hooks_off {
+            item.origin.why.push(set_at);
             item.signal = Some(OFF_ALL_HOOKS.to_string());
         }
         item.knobs = vec![Knob::None {
