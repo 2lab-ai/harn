@@ -12,7 +12,7 @@ use harn::journal::{self, Journal, KIND_EDIT};
 use harn::model::{self, Kind, Tree};
 use harn::plan::{self, PlanOp, PlanRequest, PLAN_SCHEMA};
 use harn::resolve::{ClaudeCode, Resolver};
-use harn::tui::model::{GroupKind, Row, State};
+use harn::tui::model::{self as vm, GroupKind, Row, State};
 use harn::tui::{App, Opts, Part, Pending, Sort, Tone, TRIM_HINT};
 use harn::writers;
 use ratatui::backend::TestBackend;
@@ -487,6 +487,93 @@ fn names_are_for_people_not_ids_or_paths() {
 
 // ---- the mockups -----------------------------------------------------------------------------
 
+// ---- numbers from the tree ----------------------------------------------------------------
+//
+// The fixture lives under the temp dir, and a project file's cost includes its `Contents of
+// <path> (…):` wrapper: the project's bytes, the total and every share move with the length of
+// that path (macOS /var/folders/… vs Linux /tmp). Lines carrying them are built from the
+// screen's own numbers with the view's layout, so a rendering change still fails the test.
+
+/// The bytes of the group of `kind` on the first screen.
+fn group_bytes(app: &App, kind: GroupKind) -> u64 {
+    app.screen()
+        .groups
+        .iter()
+        .find(|g| g.kind == kind)
+        .and_then(|g| g.bytes)
+        .unwrap_or_else(|| panic!("{kind:?} has no size"))
+}
+
+/// The largest line's bytes: the bars are relative to it.
+fn largest(app: &App) -> u64 {
+    app.screen()
+        .groups
+        .iter()
+        .filter_map(|g| g.bytes)
+        .max()
+        .unwrap()
+}
+
+/// The share cell for `bytes` of the screen's total: `85%`, `<1%` for a size under a percent.
+fn share_of(app: &App, bytes: u64) -> String {
+    match vm::percent(Some(bytes), app.screen().title.total).unwrap() {
+        0 if bytes > 0 => "<1%".to_string(),
+        p => format!("{p}%"),
+    }
+}
+
+/// A bar of `width` cells for `bytes` of `max`, in eighths (`#` per cell in ASCII): the view's
+/// rule, restated.
+fn bar_of(bytes: u64, max: u64, width: usize, unicode: bool) -> String {
+    let scale = |unit: u64| ((bytes * unit * width as u64 + max / 2) / max) as usize;
+    if !unicode {
+        return "#".repeat(scale(1).min(width));
+    }
+    const PARTS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let eighths = scale(8).min(width * 8);
+    format!("{}{}", "█".repeat(eighths / 8), PARTS[eighths % 8])
+}
+
+/// A sized list line at 80 columns, as the view lays it out: `left` in 50 columns, the size
+/// right-aligned in 7, the bar in 14 cells, the share right-aligned in 4.
+fn sized_line_80(app: &App, left: &str, bytes: u64) -> String {
+    let line = format!(
+        " {left:<50} {:>7} {:<14} {:>4}",
+        vm::size(bytes),
+        bar_of(bytes, largest(app), 14, true),
+        share_of(app, bytes)
+    );
+    line.trim_end().to_string()
+}
+
+/// Header line 1 at `width`: the dir, agent and count, the total on the right.
+fn header_first(app: &App, left: &str, width: usize) -> String {
+    let total = format!("~{}", vm::size(app.screen().title.total));
+    format!("{left:<w$}{total}", w = width - total.chars().count() - 1)
+}
+
+/// Header line 2 at `width`: the biggest groups (memory with its share), the notes on the
+/// right.
+fn header_biggest(app: &App, groups: &[(&str, GroupKind)], width: usize) -> String {
+    let parts: Vec<String> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, (name, kind))| {
+            let bytes = group_bytes(app, *kind);
+            match i {
+                0 => format!("{name} {} ({})", vm::size(bytes), share_of(app, bytes)),
+                _ => format!("{name} {}", vm::size(bytes)),
+            }
+        })
+        .collect();
+    let notes = "! 3 notes";
+    format!(
+        "{:<w$}{notes}",
+        format!(" biggest: {}", parts.join(" · ")),
+        w = width - notes.len() - 1
+    )
+}
+
 #[test]
 fn first_screen_at_80x24_is_the_groups_the_panel_and_the_keys() {
     let f = fixture();
@@ -497,24 +584,36 @@ fn first_screen_at_80x24_is_the_groups_the_panel_and_the_keys() {
     assert!(frame.iter().all(|l| l.chars().count() == 80), "{all}");
     assert_eq!(
         frame[0].trim_end(),
-        " project · Claude Code · 83 items load before your first message         ~15 KB"
+        header_first(
+            &app,
+            " project · Claude Code · 83 items load before your first message",
+            80
+        )
     );
     assert_eq!(
         frame[1].trim_end(),
-        " biggest: memory 13 KB (85%) · project 1.2 KB                         ! 3 notes"
+        header_biggest(
+            &app,
+            &[
+                ("memory", GroupKind::Memory),
+                ("project", GroupKind::ProjectFiles)
+            ],
+            80
+        )
     );
     assert!(frame[2].chars().all(|c| c == '─'), "{all}");
     let groups: Vec<String> = frame[3..11]
         .iter()
         .map(|l| l.trim_end().to_string())
         .collect();
+    let sized = |left: &str, kind: GroupKind| sized_line_80(&app, left, group_bytes(&app, kind));
     assert_eq!(
         groups,
         [
-            " ▸ Memory (1)                                         13 KB ██████████████  85%",
-            " ▸ Project files (4)                                 1.2 KB █▍               8%",
-            " ▸ Skill listing  20 entries                         0.5 KB ▌                3%",
-            " ▸ Agent listing  10 entries                         0.4 KB ▌                2%",
+            sized("▸ Memory (1)", GroupKind::Memory).as_str(),
+            &sized("▸ Project files (4)", GroupKind::ProjectFiles),
+            &sized("▸ Skill listing  20 entries", GroupKind::SkillListing),
+            &sized("▸ Agent listing  10 entries", GroupKind::AgentListing),
             " ▸ Plugins (2)  0.3 KB would leave with them · counted in the listings above",
             " ▸ Hooks (2)                                     unmeasured",
             " ▸ MCP servers (2)                               unmeasured",
@@ -551,11 +650,21 @@ fn first_screen_at_120x40_has_the_version_a_wider_bar_and_a_taller_panel() {
     assert!(
         frame[0].starts_with(" project · Claude Code · 83 items load before your first message ")
     );
-    assert!(frame[0].trim_end().ends_with("~15 KB"));
+    assert!(frame[0]
+        .trim_end()
+        .ends_with(&format!("~{}", vm::size(app.screen().title.total))));
     assert_eq!(
         frame[1].trim_end(),
-        " biggest: memory 13 KB (85%) · project 1.2 KB · skill listing 0.5 KB · agent listing \
-         0.4 KB                   ! 3 notes"
+        header_biggest(
+            &app,
+            &[
+                ("memory", GroupKind::Memory),
+                ("project", GroupKind::ProjectFiles),
+                ("skill listing", GroupKind::SkillListing),
+                ("agent listing", GroupKind::AgentListing),
+            ],
+            120
+        )
     );
     let memory = frame.iter().find(|l| l.contains("Memory (1)")).unwrap();
     assert!(
@@ -626,14 +735,25 @@ fn plugins_opened_show_one_row_per_plugin_and_its_detail() {
         frame[7].trim_end(),
         " ▾ Plugins (2)  0.3 KB would leave with them · counted in the listings above"
     );
+    // Each plugin's bytes as the row carries them; the share of a total that moves with the
+    // fixture's path.
+    let plugin = |name: &str| {
+        group_rows(&app, GroupKind::Plugins)
+            .into_iter()
+            .find(|r| r.name == name)
+            .and_then(|r| r.bytes)
+            .unwrap()
+    };
     assert_eq!(
         frame[8].trim_end(),
-        "   ▸ beta   market-two                               0.2 KB ▎                1%"
+        sized_line_80(&app, "  ▸ beta   market-two", plugin("beta"))
     );
     assert_eq!(
         frame[9].trim_end(),
-        "   ▸ alpha  market-one                               0.1 KB ▏               <1%"
+        sized_line_80(&app, "  ▸ alpha  market-one", plugin("alpha"))
     );
+    assert_eq!(vm::size(plugin("beta")), "0.2 KB");
+    assert_eq!(vm::size(plugin("alpha")), "0.1 KB");
     // The full saving is a sentence with both parts; every sentence whole.
     assert_eq!(
         panel(&frame),
@@ -978,7 +1098,17 @@ fn ascii_mode_draws_markers_bars_and_borders_in_ascii() {
     let mut app = app_on(&f, tree(&f), false, false);
     let first = screen(&app, 80, 24);
     assert!(first[3].starts_with(" > Memory (1)"), "{}", first[3]);
-    assert!(first[3].contains("##############  85%"), "{}", first[3]);
+    let memory = group_bytes(&app, GroupKind::Memory);
+    assert!(
+        first[3].contains(&format!(
+            "{} {:>4}",
+            bar_of(memory, largest(&app), 14, false),
+            share_of(&app, memory)
+        )),
+        "{}",
+        first[3]
+    );
+    assert_eq!(bar_of(memory, largest(&app), 14, false), "#".repeat(14));
     assert_eq!(
         first[7].trim_end(),
         " > Plugins (2)  0.3 KB would leave with them | counted in the listings above"
