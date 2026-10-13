@@ -1,15 +1,7 @@
 # loop — P0 drive
 
-Status: in-progress (2026-10-13; R1–R4 closed in `loop.done.md`; one hardening unit open)
+Status: done (2026-10-13; R1–R5 in `loop.done.md`; `main` 54bc8d7, 275 tests; installed = `brew install 2lab-ai/tap/harn-preview` → 2026.10.13.0905)
 
-## R5 — startup must not wait on a terminal reply (open)
+Next start point: P0.5 — the Codex resolver (`01-spec.md` §P0.5, A7–A8) as its own workstream; P1 carry-overs in `01-spec.md` §P1 (usage evidence in the brief, `harn trim --agent codex`, report before/after, pointer-level undo, hook stdout join).
 
-| WU | files owned | agent | state |
-|---|---|---|---|
-| WU-P | `src/tui/mod.rs` (no cursor-position query at startup; Fullscreen/Fixed viewport sized by ioctl, resize kept) | opus-coder (bg) | in `.worktrees/wu-p-no-dsr` (branch `wu/p-no-dsr`); oracle = the pty probe script (expect `header=True … exit=0`) |
-
-Found by the cachy-z13 pty probe (and reproduced on macOS): under a pty whose other side does not answer `ESC[6n`, harn enters the alternate screen, waits for the cursor position, then exits 1 with the terminal restored. Real terminals answer, so the brew-installed TUI works, but startup must not depend on the reply.
-
-Next: WU-P → review → merge → gate → push → preview → tap → `brew upgrade` → re-run the pty probe on cachy-z13 and macOS → close R5 → Status done.
-
-User gates left: first `v*` tag; `TAP_DISPATCH_TOKEN` (optional).
+User gates left: first `v*` release tag (stable formula renders from it); `TAP_DISPATCH_TOKEN` on 2lab-ai/harn if the tap should follow each preview immediately (today the first formula of each preview is rendered by hand or by the 6-hourly schedule).
