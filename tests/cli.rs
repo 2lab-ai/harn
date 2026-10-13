@@ -66,6 +66,36 @@ fn edit_prints_the_diff_then_the_journal_line_and_records_the_target() {
     );
 }
 
+#[test]
+fn edit_journals_the_agent_version_of_the_picked_tree() {
+    let f = fixture();
+    // An installed version in the copy's HOME only: the resolver reports the newest
+    // `~/.local/share/claude/versions/*` entry, and `edit` journals it.
+    std::fs::create_dir_all(f.home.join(".local/share/claude/versions/9.9.9")).unwrap();
+    let editor = f.root.join("append.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'added by the editor\\n' >> \"$1\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = harn(&f, &[("EDITOR", &editor)], &["edit", "rules/a.md"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    let journal_line = text.lines().last().unwrap();
+    assert!(journal_line.contains("claude-code 9.9.9"), "{text}");
+
+    let history = harn(&f, &[], &["--json", "history"]);
+    let entries: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(
+        entries[0]["context"]["agent_version"],
+        serde_json::json!("9.9.9")
+    );
+    let history = stdout(&harn(&f, &[], &["history"]));
+    assert!(history.contains("claude-code 9.9.9"), "{history}");
+}
+
 /// `tests/fixtures/capture-synthetic` rebound to the fixture copy: its `/synthetic/project` and
 /// `/synthetic/home` paths rewritten to the copy's, so `verify --capture` accepts it there.
 fn capture_for(f: &Fixture) -> std::path::PathBuf {
