@@ -386,13 +386,19 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Some(Cmd::Edit { selector }) => {
             let target = target(cli, None)?;
             let trees = resolve_trees(cli, &target)?;
-            let (_, item) = pick(&trees, selector)?;
+            let (resolved, item) = pick(&trees, selector)?;
             if matches!(item.origin.layer, Layer::Builtin | Layer::Managed) {
                 return Err(Refused(format!("{} is a {} item", item.id, item.origin.layer)).into());
             }
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
             let mut journal = open_journal()?;
-            let entry = journal::edit(item, &target, &mut journal, &editor)?;
+            let entry = journal::edit(
+                item,
+                &target,
+                &mut journal,
+                &editor,
+                resolved.tree.agent_version.clone(),
+            )?;
             // Text: the diff, then the journal line (`--json` carries the diff in the entry).
             if let (false, Some(diff)) = (cli.json, entry.diff.as_deref()) {
                 print!("{diff}");
