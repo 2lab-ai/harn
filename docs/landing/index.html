@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>harn — see what your coding agent loads</title>
+<meta name="description" content="harn lists every skill, plugin, hook, memory file, MCP server and CLAUDE.md that Claude Code loads before your first message, with its size, its source and the official switch that turns it off. Every change is reversible, byte for byte.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0A0A0A" media="(prefers-color-scheme: dark)">
+<!-- Domain (working name harn.dev) comes later. When it is attached, add here:
+     <link rel="canonical" href="https://harn.dev/">
+     <meta property="og:url" content="https://harn.dev/">
+     and make og:image below absolute on that host (crawlers want a full URL). -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="harn">
+<meta property="og:title" content="harn — see what your coding agent loads">
+<meta property="og:description" content="Every skill, plugin, hook, memory file, MCP server and CLAUDE.md in Claude Code's first request: its size, its source, the official switch that turns it off. Reversible, byte for byte.">
+<meta property="og:image" content="/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="harn: see what your coding agent loads before your first message, over the first rows of harn's screen.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/fonts/InterVariable-4.1.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/JetBrainsMono-Regular-2.304.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css">
+<script src="/site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="sheet">
+
+<header class="nav">
+  <a class="brand" href="/">harn</a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href="#how">How it works</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/2lab-ai/harn">GitHub</a>
+  </nav>
+  <button class="theme" type="button" aria-pressed="false" hidden>Dark</button>
+</header>
+
+<main id="main">
+
+<section class="hero" aria-labelledby="hero-h">
+  <p class="label">Claude Code · macOS · Linux · preview</p>
+  <h1 id="hero-h">See what your coding agent loads before your first message.</h1>
+  <p class="lede">harn lists every skill, plugin, hook, memory file, MCP server and <code>CLAUDE.md</code> that Claude Code puts into its first request, with its size, where it came from, and the official switch that turns it off. Every change is reversible, byte for byte.</p>
+  <div class="cmd">
+    <code><span class="prompt" aria-hidden="true">$</span> <span class="cmd-text">brew install 2lab-ai/tap/harn-preview</span></code>
+    <button class="copy" type="button" data-copy="brew install 2lab-ai/tap/harn-preview" aria-label="Copy the install command" hidden>copy</button>
+    <span class="sr-only" role="status" aria-live="polite"></span>
+  </div>
+  <p class="after">then run <code>harn</code> in any project <span class="sep" aria-hidden="true">·</span> <a href="https://github.com/2lab-ai/harn/releases">Releases</a></p>
+  <ul class="trust" aria-label="Facts">
+    <li>MIT</li>
+    <li>macOS + Linux</li>
+    <li>No account, no telemetry</li>
+    <li>Reversible byte for byte</li>
+  </ul>
+</section>
+
+<section class="stats" aria-labelledby="stats-h">
+  <h2 id="stats-h" class="label">One real project, measured by harn</h2>
+  <dl class="stat-grid">
+    <div class="stat"><dt>items load before the first message</dt><dd>312</dd></div>
+    <div class="stat"><dt>of the first request, sized from files</dt><dd>~145 KB</dd></div>
+    <div class="stat"><dt>skill-listing entries</dt><dd>218</dd></div>
+    <div class="stat"><dt>network requests from harn itself</dt><dd>0</dd></div>
+  </dl>
+</section>
+
+<section class="fig" aria-labelledby="fig-h">
+  <div class="fig-head">
+    <h2 id="fig-h" class="label">The screen, as it ships</h2>
+  </div>
+  <div class="plate">
+    <div class="tabs" role="tablist" aria-label="harn screens" hidden>
+      <button type="button" role="tab" id="t-first" aria-controls="p-first" aria-selected="true">First screen</button>
+      <button type="button" role="tab" id="t-plugins" aria-controls="p-plugins" aria-selected="false" tabindex="-1">Plugins</button>
+      <button type="button" role="tab" id="t-where" aria-controls="p-where" aria-selected="false" tabindex="-1">Where from</button>
+      <button type="button" role="tab" id="t-off" aria-controls="p-off" aria-selected="false" tabindex="-1">Turn off</button>
+      <button type="button" role="tab" id="t-leaves" aria-controls="p-leaves" aria-selected="false" tabindex="-1">What leaves</button>
+      <button type="button" role="tab" id="t-applied" aria-controls="p-applied" aria-selected="false" tabindex="-1">Applied</button>
+      <button type="button" role="tab" id="t-undo" aria-controls="p-undo" aria-selected="false" tabindex="-1">Undo</button>
+    </div>
+
+    <div class="panel is-on" id="p-first">
+      <div class="term">
+      <h3 class="pname">First screen</h3>
+      <p class="pnote">A real project, opened read-only: everything that loads, grouped by kind, each with its size and share.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn first screen, 80 by 24"><pre> zbrain · read-only · 312 items load before your first message          ~145 KB
+ biggest: skill listing 87 KB (60%) · project 22 KB · memory 20 KB    ! 2 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Skill listing  218 entries                         87 KB ██████████████  60%
+ ▸ Project files (2)                                  22 KB ███▌            15%
+ ▸ Memory (1)                                         20 KB ███▎            14%
+ ▸ Agent listing  31 entries                          15 KB ██▌             10%
+ ▸ Plugins (10)  48 KB would leave with them · counted in the listings above
+ ▸ Hooks (14)                                    unmeasured
+ ▸ Built-in (8)  mostly cannot be turned off     unmeasured
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ Skill listing · 218 entries, one line per skill or command
+ Sent in every first request; it has a size cap, and whether it cuts
+ descriptions here needs `harn verify --run`.
+ Open it (→) to see the entries by owner; d on an entry would turn that one off.
+────────────────────────────────────────────────────────────────────────────────
+ ↑↓ move   →← open/close   / search   i notes   ? keys   q quit</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" id="p-plugins">
+      <div class="term">
+      <h3 class="pname">Plugins</h3>
+      <p class="pnote">→ on Plugins: one row per plugin with its source, size and share. The panel explains the cursor row.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn plugins open, 80 by 24"><pre> zbrain · read-only · 312 items load before your first message          ~145 KB
+ biggest: skill listing 87 KB (60%) · project 22 KB · memory 20 KB    ! 2 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Skill listing  218 entries                         87 KB ██████████████  60%
+ ▸ Project files (2)                                  22 KB ███▌            15%
+ ▸ Memory (1)                                         20 KB ███▎            14%
+ ▸ Agent listing  31 entries                          15 KB ██▌             10%
+ ▾ Plugins (10)  48 KB would leave with them · counted in the listings above
+   ▸ zworkflow                 soma-work              32 KB █████▏          22%
+   ▸ stv                       oh-my-claude          4.3 KB ▋                2%
+   ▸ slack                     official              3.7 KB ▋                2%
+   ▸ atlassian                 official              3.2 KB ▌                2%
+   ▸ superpowers               official              2.9 KB ▌                1%
+   ▸ cowork-plugin-management  claude.ai             0.7 KB ▏               &lt;1%
+   ▸ typesafe                  typesafe-ai           0.7 KB ▏               &lt;1%
+   ▸ frontend-design           official              0.2 KB                 &lt;1%
+   ▸ claude-and-me             oh-my-claude               —  runs later
+── 312 items · 14 of 17 lines shown ────────────────────────────────────────────
+ slack · plugin from the official marketplace · enabled for every project
+ Brings 8 skills, 5 commands and 1 MCP server. d would turn it off for this
+ project only (.claude/settings.local.json). Turning it off frees 3.7 KB: 3.7 KB
+ of its entries in the skill listing, plus its own unmeasured part.
+────────────────────────────────────────────────────────────────────────────────
+ ↑↓ move   →← open/close   / search   w where from   i notes   ? keys   q quit</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" id="p-where">
+      <div class="term">
+      <h3 class="pname">Where from</h3>
+      <p class="pnote">w on slack: the settings key that turns it on, where it was installed from, its files, what it brings.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn where-from card, 80 by 24"><pre> zbrain · read-only · 312 items load before your first message          ~145 KB
+ biggest: skill listing 87 KB (60%) · project 22 KB · memory 20 KB    ! 2 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Skill listing  218 entries                         87 KB ██████████████  60%
+ ▸ Project files (2)                                  22 KB ███▌            15%
+ ▸ Memory (1)                                         20 KB ███▎            14%
+ ▸ Agent listing  31 entries                          15 KB ██▌             10%
+┌ Where slack comes from ──────────────────────────────────────────────────────┐
+│ 1  ~/.claude/settings.json › enabledPlugins › slack = true   (every project) │
+│ 2  installed from claude-plugins-official, version 1.4.1                     │
+│ 3  files: ~/.claude/plugins/cache/claude-plugins-official/slack/1.4.1        │
+│ 4  contributes 8 skills · 5 commands · 1 MCP server                          │
+│ Switches  this project (.claude/settings.local.json)                         │
+│                                                                    Esc close │
+└──────────────────────────────────────────────────────────────────────────────┘
+   ▸ frontend-design           official              0.2 KB                 &lt;1%
+   ▸ claude-and-me             oh-my-claude               —  runs later
+── 312 items · 14 of 17 lines shown ────────────────────────────────────────────
+ slack · plugin from the official marketplace · enabled for every project
+ Brings 8 skills, 5 commands and 1 MCP server. d would turn it off for this
+ project only (.claude/settings.local.json). Turning it off frees 3.7 KB: 3.7 KB
+ of its entries in the skill listing, plus its own unmeasured part.
+────────────────────────────────────────────────────────────────────────────────
+ Esc close</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" id="p-off">
+      <div class="term">
+      <h3 class="pname">Turn off</h3>
+      <p class="pnote">d on a plugin, in a test project: the file it writes, what leaves, what it saves, how to undo.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn turn-off card, 80 by 24"><pre> project · Claude Code · 83 items load before your first message         ~15 KB
+ biggest: memory 13 KB (84%) · project 1.4 KB                         ! 3 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Memory (1)                                         13 KB ██████████████  84%
+ ▸ Project files (4)                                 1.4 KB █▌               9%
+ ▸ Skill listing  20 entries                         0.5 KB ▌                3%
+ ▸ Agent listing  10 entries                         0.4 KB ▌                2%
+┌ Turn off alpha for this project ─────────────────────────────────────────────┐
+│ Writes   .claude/settings.local.json → enabledPlugins.alpha = false          │
+│ Leaves   6 at start (alpha, 2 skills, 1 MCP server, 1 MCP instructions,      │
+│          1 hook)                                                      → list │
+│ Saves    0.1 KB: 0.1 KB of its entries in the skill listing, plus its own    │
+│          unmeasured part                                                     │
+│ Undo     u here, or `harn undo` later — the file is restored byte for byte   │
+│                                                            Enter apply · Esc │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+────────────────────────────────────────────────────────────────────────────────
+ alpha · plugin from the market-one marketplace · enabled for every project
+ Brings 2 skills, 1 MCP server and 1 hook. d turns it off for this project only
+ (.claude/settings.local.json). Turning it off frees 0.1 KB: 0.1 KB of its
+ entries in the skill listing, plus its own unmeasured part. Reversible with u.
+────────────────────────────────────────────────────────────────────────────────
+ Enter apply   → what leaves   Esc cancel</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" id="p-leaves">
+      <div class="term">
+      <h3 class="pname">What leaves</h3>
+      <p class="pnote">→ on the card: every item that leaves with the plugin.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn what-leaves list, 80 by 24"><pre> project · Claude Code · 83 items load before your first message         ~15 KB
+ biggest: memory 13 KB (84%) · project 1.4 KB                         ! 3 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Memory (1)                                         13 KB ██████████████  84%
+ ▸ Project files (4)                                 1.4 KB █▌               9%
+ ▸ Skill listing  20 entries                         0.5 KB ▌                3%
+┌ What leaves with alpha ──────────────────────────────────────────────────────┐
+│ at start (6)                                                                 │
+│   alpha (plugin)                                                             │
+│   alpha-other (skill)                                                        │
+│   alpha-skill (skill)                                                        │
+│   alpha-server (MCP server)                                                  │
+│   alpha-server (MCP instructions)                                            │
+│   UserPromptSubmit (hook)                                                    │
+│                                                                     Esc back │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+────────────────────────────────────────────────────────────────────────────────
+ alpha · plugin from the market-one marketplace · enabled for every project
+ Brings 2 skills, 1 MCP server and 1 hook. d turns it off for this project only
+ (.claude/settings.local.json). Turning it off frees 0.1 KB: 0.1 KB of its
+ entries in the skill listing, plus its own unmeasured part. Reversible with u.
+────────────────────────────────────────────────────────────────────────────────
+ Esc back</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" id="p-applied">
+      <div class="term">
+      <h3 class="pname">Applied</h3>
+      <p class="pnote">Enter: one settings key written and journaled. 83 → 77 items load at start.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn after applying, 80 by 24"><pre> project · Claude Code · 77 items load before your first message         ~15 KB
+ biggest: memory 13 KB (85%) · project 1.4 KB                         ! 3 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Memory (1)                                         13 KB ██████████████  85%
+ ▸ Project files (4)                                 1.4 KB █▌               9%
+ ▸ Agent listing  10 entries                         0.4 KB ▌                2%
+ ▸ Skill listing  18 entries                         0.3 KB ▍                2%
+ ▾ Plugins (2)  0.2 KB would leave with them · counted in the listings above
+   ▸ beta   market-two                               0.2 KB ▎                1%
+     alpha  market-one                                    —  off
+ ▸ Hooks (2)                                     unmeasured
+ ▸ MCP servers (2)                               unmeasured
+ ▸ Built-in (7)  mostly cannot be turned off     unmeasured
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ turned off alpha · 6 fewer items load at start (83 → 77) · u undoes
+ alpha · turned off · u undoes · takes effect next session
+ harn turned it off here; it stays off until it is turned back on.
+ o turns it back on (the change is reversed byte for byte).
+────────────────────────────────────────────────────────────────────────────────
+ ↑↓ move  →← open/close  o turn back on  u undo  w where from  ? keys  q quit</pre></div>
+      </div>
+    </div>
+
+    <div class="panel" id="p-undo">
+      <div class="term">
+      <h3 class="pname">Undo</h3>
+      <p class="pnote">u: one card says what comes back.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn undo card, 80 by 24"><pre> project · Claude Code · 77 items load before your first message         ~15 KB
+ biggest: memory 13 KB (85%) · project 1.4 KB                         ! 3 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Memory (1)                                         13 KB ██████████████  85%
+ ▸ Project files (4)                                 1.4 KB █▌               9%
+ ▸ Agent listing  10 entries                         0.4 KB ▌                2%
+ ▸ Skill listing  18 entries                         0.3 KB ▍                2%
+ ▾ Plugins (2)  0.2 KB would leave with them · counted in the listings above
+   ▸ beta   market-two                               0.2 KB ▎                1%
+┌ Undo the last change ────────────────────────────────────────────────────────┐
+│ alpha comes back on                                                          │
+│ restores .claude/settings.local.json byte for byte                           │
+│                                                        Enter undo · Esc keep │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ alpha · turned off · u undoes · takes effect next session
+ harn turned it off here; it stays off until it is turned back on.
+ o turns it back on (the change is reversed byte for byte).
+
+────────────────────────────────────────────────────────────────────────────────
+ Enter undo it   Esc keep it</pre></div>
+      <p class="pnote">Enter: the file is restored byte for byte. 77 → 83.</p>
+      <div class="scr" tabindex="0" role="region" aria-label="harn after undo, 80 by 24"><pre> project · Claude Code · 83 items load before your first message         ~15 KB
+ biggest: memory 13 KB (84%) · project 1.4 KB                         ! 3 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Memory (1)                                         13 KB ██████████████  84%
+ ▸ Project files (4)                                 1.4 KB █▌               9%
+ ▸ Skill listing  20 entries                         0.5 KB ▌                3%
+ ▸ Agent listing  10 entries                         0.4 KB ▌                2%
+ ▾ Plugins (2)  0.3 KB would leave with them · counted in the listings above
+   ▸ beta   market-two                               0.2 KB ▎                1%
+   ▸ alpha  market-one                               0.1 KB ▏               &lt;1%
+ ▸ Hooks (2)                                     unmeasured
+ ▸ MCP servers (2)                               unmeasured
+ ▸ Built-in (7)  mostly cannot be turned off     unmeasured
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+ undone: alpha back · 6 more items load at start (77 → 83)
+ alpha · plugin from the market-one marketplace · enabled for every project
+ Brings 2 skills, 1 MCP server and 1 hook.
+ d turns it off for this project only (.claude/settings.local.json).
+────────────────────────────────────────────────────────────────────────────────
+ ↑↓ move  →← open/close  / search  d turn off  w where from  ? keys  q quit</pre></div>
+      </div>
+    </div>
+  </div>
+  <p class="fig-cap">Real output: harn 0.1.0 preview on macOS, 80×24.</p>
+</section>
+
+<section class="how" id="how" aria-labelledby="how-h">
+  <div class="sec-head">
+    <p class="label">How it works</p>
+    <h2 id="how-h">Look first. Change one thing. Undo anything.</h2>
+  </div>
+  <ol class="rows">
+    <li class="row">
+      <span class="num" aria-hidden="true">01</span>
+      <div class="row-copy">
+        <h3>See everything it loads.</h3>
+        <p>harn reads Claude Code's config layers without starting a session and groups what lands in the first request by kind: the skill listing, project files, memory, agents, plugins, hooks and built-ins, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code> until <code>harn verify --run</code> measures one real session.</p>
+      </div>
+      <figure class="ev">
+        <figcaption>First screen · excerpt</figcaption>
+<pre>312 items load before your first message
+biggest: skill listing 87 KB (60%) · project 22 KB
+▸ Skill listing  218 entries
+▸ Plugins (10)  48 KB would leave with them
+▸ Built-in (8)  mostly cannot be turned off</pre>
+      </figure>
+    </li>
+    <li class="row">
+      <span class="num" aria-hidden="true">02</span>
+      <div class="row-copy">
+        <h3>Know where each item comes from.</h3>
+        <p>Press <kbd>w</kbd> on any row: the settings file and key that turn it on, where it was installed from, the files on disk, and everything it contributes.</p>
+      </div>
+      <figure class="ev">
+        <figcaption>Where from · excerpt</figcaption>
+<pre>Where slack comes from
+~/.claude/settings.json › enabledPlugins › slack = true
+installed from claude-plugins-official, version 1.4.1
+contributes 8 skills · 5 commands · 1 MCP server</pre>
+      </figure>
+    </li>
+    <li class="row">
+      <span class="num" aria-hidden="true">03</span>
+      <div class="row-copy">
+        <h3>Turn one off with one card.</h3>
+        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches: a settings key, written to <code>.claude/settings.local.json</code> for this project, never a wider scope silently.</p>
+      </div>
+      <figure class="ev">
+        <figcaption>Turn off · excerpt</figcaption>
+<pre>Turn off alpha for this project
+Writes   .claude/settings.local.json → enabledPlugins.alpha = false
+Leaves   6 at start (alpha, 2 skills, 1 MCP server, 1 MCP instructions,
+         1 hook)
+Enter apply · Esc</pre>
+      </figure>
+    </li>
+    <li class="row">
+      <span class="num" aria-hidden="true">04</span>
+      <div class="row-copy">
+        <h3>Undo, byte for byte.</h3>
+        <p>harn snapshots the file before every write and journals the change. <kbd>u</kbd> undoes the last one, <kbd>o</kbd> turns an item back on, and <code>harn undo</code> works later from the shell. The file comes back byte for byte.</p>
+      </div>
+      <figure class="ev">
+        <figcaption>Undo · excerpt</figcaption>
+<pre>Undo the last change
+alpha comes back on
+restores .claude/settings.local.json byte for byte
+undone: alpha back · 6 more items load at start (77 → 83)</pre>
+      </figure>
+    </li>
+    <li class="row">
+      <span class="num" aria-hidden="true">05</span>
+      <div class="row-copy">
+        <h3>Or let your agent trim.</h3>
+        <p><code>harn trim</code> asks your coding agent for a plan in one headless request, with no tools and one turn. It validates the plan, prints each change with the agent's reason and the bytes it frees, and applies only when you answer <span class="nw"><kbd>y</kbd>.</span> Inside Claude Code, <code>/harn-trim</code> runs the same loop.</p>
+      </div>
+      <figure class="ev">
+        <figcaption>harn trim · first line and last line</figcaption>
+<pre>$ harn trim
+asking claude -p --output-format json --tools '' --max-turns 1 - for a plan (one model request)…
+
+apply? [y/N]</pre>
+      </figure>
+    </li>
+  </ol>
+</section>
+
+<section class="principles" aria-labelledby="pr-h">
+  <h2 id="pr-h" class="label">Principles</h2>
+  <ul class="pr-list">
+    <li><strong>Official switches only</strong><span>A settings key the agent already reads, never a wider scope silently.</span></li>
+    <li><strong>Reversible byte for byte</strong><span>A snapshot before every write; <code>harn undo</code> puts it back.</span></li>
+    <li><strong><code>--readonly</code> refuses every write</strong><span>And every active verify. The screen says so in its header.</span></li>
+    <li><strong>Looks without starting a session</strong><span>It reads files. Your agent starts only on <code>harn trim</code> or <code>harn verify --run</code>.</span></li>
+    <li><strong>No network from harn itself</strong><span>The binary has no network code.</span></li>
+  </ul>
+</section>
+
+<section class="faq" aria-labelledby="faq-h">
+  <div class="sec-head">
+    <p class="label">Questions</p>
+    <h2 id="faq-h">What it touches, and what it doesn't.</h2>
+  </div>
+  <div class="faq-grid">
+    <div class="qa">
+      <h3>What does it change on disk?</h3>
+      <p>Nothing until you ask. When you turn something off, harn sets one official settings key, by default in <code>.claude/settings.local.json</code> for this project only, never a wider scope silently. It snapshots the file first and journals the change (<code>harn history</code>).</p>
+    </div>
+    <div class="qa">
+      <h3>How do I undo?</h3>
+      <p><kbd>u</kbd> on the screen undoes the last change, <kbd>o</kbd> turns an item back on, and <code>harn undo</code> works from the shell. Each one restores the file byte for byte.</p>
+    </div>
+    <div class="qa">
+      <h3>Does it start Claude Code?</h3>
+      <p>No. It reads the config layers and sizes what files can size. Two commands start your agent: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request).</p>
+    </div>
+    <div class="qa">
+      <h3>Does it send anything anywhere?</h3>
+      <p>harn itself has no network code. <code>harn trim</code> and <code>harn verify --run</code> start your own agent, which talks to its provider the way it always does.</p>
+    </div>
+    <div class="qa">
+      <h3>What about Codex?</h3>
+      <p>Claude Code today. The Codex CLI is next; harn shows one tree per agent.</p>
+    </div>
+    <div class="qa">
+      <h3>Linux?</h3>
+      <p>Yes. One binary for macOS and Linux, on Apple silicon, Intel and ARM. Homebrew works on both; Releases has the four binaries and their <code>SHA256SUMS</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="end" id="install" aria-labelledby="end-h">
+  <h2 id="end-h">Know what you're sending.</h2>
+  <p class="end-lede">One binary for macOS and Linux, through Homebrew on both. Or take a binary and its checksum from Releases.</p>
+  <div class="cmd">
+    <code><span class="prompt" aria-hidden="true">$</span> <span class="cmd-text">brew install 2lab-ai/tap/harn-preview</span></code>
+    <button class="copy" type="button" data-copy="brew install 2lab-ai/tap/harn-preview" aria-label="Copy the install command" hidden>copy</button>
+    <span class="sr-only" role="status" aria-live="polite"></span>
+  </div>
+  <p class="after">Claude Code today <span class="sep" aria-hidden="true">·</span> Codex CLI next</p>
+  <ul class="end-links">
+    <li><a href="https://github.com/2lab-ai/harn">GitHub</a></li>
+    <li><a href="https://github.com/2lab-ai/harn#readme">README</a></li>
+    <li><a href="https://github.com/2lab-ai/harn/releases">Releases</a></li>
+    <li><a href="https://github.com/2lab-ai/harn/issues">Issues</a></li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="foot">
+  <span class="brand-sm">harn</span>
+  <span>MIT</span>
+  <span>2lab.ai</span>
+  <a href="https://github.com/2lab-ai/harn">GitHub</a>
+  <span>preview builds on every main push</span>
+</footer>
+
+</div>
+</body>
+</html>

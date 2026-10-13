@@ -1,0 +1,70 @@
+name: Landing
+
+# docs/landing is published as-is (no build command) by the Cloudflare Pages Git integration,
+# project `harn`, which builds on push and watches docs/landing only. Production today:
+# https://harn-43g.pages.dev (until the domain is attached). This workflow only checks the
+# directory, so a broken page fails here instead of shipping.
+
+on:
+  pull_request:
+    paths:
+      - "docs/landing/**"
+      - ".github/workflows/landing.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/landing/**"
+      - ".github/workflows/landing.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: landing-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check docs/landing (local assets exist, nothing loaded from elsewhere, CSP-safe, < 2 MB)
+        shell: bash
+        run: |
+          python3 - docs/landing <<'PY'
+          import re, sys, pathlib
+          from html.parser import HTMLParser
+          root = pathlib.Path(sys.argv[1]).resolve(); errs = []
+          def local(ref, base, where):
+              if re.match(r'^(https?:)?//', ref): errs.append(f'{where}: loads {ref} from another host'); return
+              if ref.startswith(('data:', 'mailto:', '#')) or not ref: return
+              p = ref.split('#')[0].split('?')[0]
+              f = (root / p.lstrip('/')) if p.startswith('/') else (base / p)
+              if not f.resolve().is_file(): errs.append(f'{where}: {ref} does not exist')
+          class Page(HTMLParser):
+              def __init__(s, f): super().__init__(); s.f, s.ids, s.frags = f, set(), []
+              def handle_starttag(s, tag, attrs):
+                  a = dict(attrs); w = f'{s.f.name}:{s.getpos()[0]}'
+                  if 'id' in a: s.ids.add(a['id'])
+                  if 'style' in a or any(k.startswith('on') for k in a): errs.append(f'{w}: inline style/handler is blocked by the CSP')
+                  if tag == 'style' or (tag == 'script' and 'src' not in a): errs.append(f'{w}: inline <{tag}> is blocked by the CSP')
+                  if tag == 'a' and a.get('href', '').startswith('#') and len(a['href']) > 1: s.frags.append((w, a['href'][1:]))
+                  for k in ('src', 'poster') + (('href',) if tag == 'link' else ()):
+                      if a.get(k): local(a[k], s.f.parent, w)
+                  if tag == 'meta' and a.get('property') == 'og:image' and not re.match(r'^https?://', a.get('content', '')): local(a['content'], s.f.parent, w)
+          for f in sorted(root.rglob('*.html')):
+              p = Page(f); p.feed(f.read_text(encoding='utf-8'))
+              errs += [f'{w}: #{i} has no target' for w, i in p.frags if i not in p.ids]
+          for f in sorted(root.rglob('*.css')):
+              for ref in re.findall(r'url\(\s*["\']?([^"\')]+)', f.read_text(encoding='utf-8')): local(ref, f.parent, f.name)
+          total = sum(f.stat().st_size for f in root.rglob('*') if f.is_file())
+          print(f'{len(list(root.rglob("*.html")))} html, {sum(1 for f in root.rglob("*") if f.is_file())} files, {total} bytes (limit 2097152)')
+          if total >= 2 * 1024 * 1024: errs.append(f'docs/landing is {total} bytes, over 2 MB')
+          for e in errs: print(f'::error::{e}')
+          sys.exit(1 if errs else 0)
+          PY
