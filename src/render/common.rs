@@ -471,6 +471,44 @@ pub(crate) fn freed_computed(tree: &Tree) -> bool {
     crate::model::walk(tree).any(|item| item.freed.is_some())
 }
 
+/// The byte where the JSON string `text` ends with opens: `text` ends in an unescaped `"` and
+/// this is the unescaped `"` before it (a quote after an odd run of `\` is escaped). None when
+/// `text` ends in no such string.
+pub(crate) fn json_string_tail(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let escaped = |at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    let last = bytes.len().checked_sub(1)?;
+    if bytes[last] != b'"' || escaped(last) {
+        return None;
+    }
+    (0..last).rev().find(|&i| bytes[i] == b'"' && !escaped(i))
+}
+
+/// A link value as a person reads it: a JSON string as its text (`"~/memory (old)"` →
+/// `~/memory (old)`), anything else (`true`) as it is.
+pub(crate) fn link_value_text(value: &str) -> String {
+    serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_string())
+}
+
+/// A `why` step with its string value as text: `<link> = "<text>"` → `<link> = <text>`; any
+/// other step as it is.
+pub(crate) fn step_text(step: &str) -> String {
+    match json_string_tail(step) {
+        Some(open) if step[..open].ends_with(" = ") => {
+            format!("{}{}", &step[..open], link_value_text(&step[open..]))
+        }
+        _ => step.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

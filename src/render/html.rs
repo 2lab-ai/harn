@@ -3,7 +3,7 @@
 
 use super::common::{
     cost_column, default_action, denominator, facts, freed_cell, kb, origin_short, partition,
-    percent, request_bytes, share_tenths, sorted, Glyphs, UNICODE,
+    percent, request_bytes, share_tenths, sorted, step_text, Glyphs, UNICODE,
 };
 use crate::model::{Document, Item, Tree};
 
@@ -237,7 +237,7 @@ fn why_details(item: &Item) -> String {
         .origin
         .why
         .iter()
-        .map(|step| format!("<li>{}</li>", esc(step)))
+        .map(|step| format!("<li>{}</li>", esc(&step_text(step))))
         .collect();
     format!(
         "<details class=\"why\"><summary>why loaded</summary><ol>{}</ol></details>",

@@ -2,7 +2,7 @@
 
 use super::common::{
     cost_tagged, exact, freed_cell, freed_value, glyphs, kb, knob_full, request_bytes, sorted,
-    Glyphs,
+    step_text, Glyphs,
 };
 use crate::model::{Item, Tree};
 use crate::plan::ActionPlan;
@@ -54,7 +54,8 @@ pub fn why(tree: &Tree, item: &Item, plans: &[ActionPlan], unicode: bool) -> Str
             } else {
                 format!("{} ", g.arrow)
             };
-            out.push(format!("    {arrow}{step}"));
+            // A string setting reads as its text (`autoMemoryDirectory = ~/memory (old)`).
+            out.push(format!("    {arrow}{}", step_text(step)));
         }
     }
 

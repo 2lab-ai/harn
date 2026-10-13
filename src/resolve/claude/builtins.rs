@@ -15,7 +15,7 @@
 
 use super::fs::file_name;
 use super::hooks::OFF_ALL_HOOKS;
-use super::{cost_na, env_knob, frontmatter, new_item, setting_knob, Ctx};
+use super::{cost_na, env_knob, frontmatter, json_string, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use serde_json::{json, Value};
 
@@ -233,7 +233,7 @@ pub(crate) fn blocks(ctx: &Ctx) -> Vec<Item> {
                 Kind::BuiltinTool,
                 "advisor",
                 "advisor",
-                &format!("{} = {model}", file.at("/advisorModel")),
+                &format!("{} = {}", file.at("/advisorModel"), json_string(model)),
                 vec![env_knob(
                     "CLAUDE_CODE_DISABLE_ADVISOR_TOOL",
                     "1",
@@ -258,7 +258,7 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
                 &format!("output style: {style}"),
             );
             item.origin.setting = Some(setting.clone());
-            item.origin.why = vec![format!("{setting} = {style}")];
+            item.origin.why = vec![format!("{setting} = {}", json_string(style))];
             match find_style(ctx, style) {
                 Some((path, bytes)) => {
                     item.origin.path = Some(ctx.fs.realpath(&path));

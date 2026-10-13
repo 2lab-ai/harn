@@ -204,6 +204,12 @@ pub(crate) fn disabled_mcp_knob(ctx: &Ctx, name: &str, note: &str) -> Knob {
     }
 }
 
+/// A link's string value as JSON (`"~/memory (old)"`): every link the resolver writes ends in
+/// `true`, `false`, a JSON string or a `(note)`, so a reader can tell where the pointer ends.
+pub(crate) fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("a string serializes")
+}
+
 /// Containers whose cost is the sum of their children.
 pub(crate) fn is_container(item: &Item) -> bool {
     matches!(item.kind, Kind::SkillListing | Kind::AgentRoster)

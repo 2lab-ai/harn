@@ -551,36 +551,75 @@ fn items_after_is_the_count_at_start_once_the_plan_is_applied() {
     assert_eq!(plan.items_after, 76);
 }
 
-#[test]
-fn no_origin_link_carries_a_container_value() {
-    // The links `split_link` reads end in a scalar (`= true`, `= <model>`, `= <path>`,
-    // `= "<string>"`) or a `(note)`; a container would be cut at a ` = ` inside it.
-    let f = fixture();
+/// The fixture with a value of every link-writing setting: every hook off, a memory dir whose
+/// name has a space and parentheses (`~/memory (old)`), an output style and an advisor model
+/// with them too. Returns that memory dir.
+fn with_link_values(f: &Fixture) -> PathBuf {
+    let dir = f.home.join("memory (old)");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("MEMORY.md"), "- a note\n").unwrap();
     let mut local: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(local_settings(f)).unwrap()).unwrap();
     local["disableAllHooks"] = serde_json::json!(true);
+    local["autoMemoryDirectory"] = serde_json::json!("~/memory (old)");
+    local["outputStyle"] = serde_json::json!("My Style (x)");
+    local["advisorModel"] = serde_json::json!("opus (fast)");
     std::fs::write(
-        local_settings(&f),
+        local_settings(f),
         serde_json::to_string_pretty(&local).unwrap(),
     )
     .unwrap();
+    dir
+}
+
+/// A regression test on this fixture, not a guarantee about every producer: each link the
+/// resolver writes here that carries a value (`<file>#<pointer> = <value>`) carries `true`,
+/// `false` or a JSON string — never a bare word or path, never a container — so
+/// `tui::model::split_link` reads it without guessing.
+#[test]
+fn every_link_value_in_the_fixture_is_a_boolean_or_a_json_string() {
+    let f = fixture();
+    let memory = with_link_values(&f);
     let t = resolve(&f, None);
-    // What the scan covers: hooks off, plugins, memory, permission lists.
-    for kind in [Kind::Hook, Kind::Plugin, Kind::Memory, Kind::PermissionRule] {
+    // What the scan covers: hooks off, plugins, memory, permission lists, the output style and
+    // the advisor tool.
+    for kind in [
+        Kind::Hook,
+        Kind::Plugin,
+        Kind::Memory,
+        Kind::PermissionRule,
+        Kind::OutputStyle,
+    ] {
         assert!(!of_kind(&t, kind).is_empty(), "{kind}");
     }
-    let mut tails = 0;
+    let mut values = Vec::new();
     for item in model::walk(&t) {
         for why in &item.origin.why {
-            assert!(
-                !why.contains(" = [") && !why.contains(" = {"),
-                "{}: {why}",
-                item.id
-            );
-            tails += usize::from(why.contains(" = "));
+            // Links only: other steps are prose.
+            let Some((_, rest)) = why.split_once('#') else {
+                continue;
+            };
+            let (_, tail) = harn::tui::model::split_link(rest);
+            if let Some(value) = tail.strip_prefix("= ") {
+                assert!(
+                    value == "true"
+                        || value == "false"
+                        || serde_json::from_str::<String>(value).is_ok(),
+                    "{}: {why}",
+                    item.id
+                );
+                values.push(value.to_string());
+            }
         }
     }
-    assert!(tails > 0, "some link ends in a value");
+    for want in [
+        serde_json::to_string(&memory.display().to_string()).unwrap(),
+        "\"My Style (x)\"".to_string(),
+        "\"opus (fast)\"".to_string(),
+        "true".to_string(),
+    ] {
+        assert!(values.contains(&want), "{want}: {values:#?}");
+    }
 }
 
 #[test]

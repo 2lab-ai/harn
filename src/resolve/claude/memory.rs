@@ -8,7 +8,7 @@
 //! auto-memory, persists across conversations):` + 3 + the capped text). Off: `autoMemoryEnabled: false` (any layer), `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`
 //! (`0` forces it on), `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` → the item is absent.
 
-use super::{env_knob, main_repo_root, new_item, setting_knob, Ctx};
+use super::{env_knob, json_string, main_repo_root, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Layer, Mode, Scope};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -59,7 +59,12 @@ pub(crate) fn collect(ctx: &mut Ctx) -> Option<Item> {
                 Some(rest) => ctx.home().join(rest),
                 None => PathBuf::from(d),
             };
-            let why = format!("{} = {}", f.at("/autoMemoryDirectory"), d.display());
+            // The value as a JSON string: a path may hold ` = ` or end in `(…)`.
+            let why = format!(
+                "{} = {}",
+                f.at("/autoMemoryDirectory"),
+                json_string(&d.display().to_string())
+            );
             (d, why)
         }
         None => (

@@ -7,7 +7,7 @@
 
 use crate::model::{self, Agent, Item, Kind, Knob, Layer, Mode, Scope, Tree};
 use crate::plan::{knob_scope, ActionPlan};
-use crate::render::common::{denominator, request_bytes};
+use crate::render::common::{denominator, json_string_tail, link_value_text, request_bytes};
 use crate::resolve::claude::CAP_STATE_UNKNOWN;
 use crate::resolve::claude::OFF_ALL_HOOKS;
 use std::collections::{HashMap, HashSet};
@@ -2391,24 +2391,23 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
 /// the tail is read from the right, its form decided first.
 ///
 /// The grammar is what the resolver writes (`src/resolve`): `<pointer>`, `<pointer> (<note>)`,
-/// or `<pointer> = <scalar>` — `true`/`false`, a bare model, style or path, or a JSON string
-/// `"…"`. A container value (`= [...]`, `= {...}`) is out of contract: no producer writes one
-/// (`no_origin_link_carries_a_container_value` in `tests/resolve_claude.rs` fails if one does),
-/// and a ` = ` inside it would be taken for the separator.
+/// or `<pointer> = <value>` where the value is `true`, `false` or a JSON string `"…"` — never a
+/// bare word or path, never a container (`every_link_value_in_the_fixture_is_a_boolean_or_a_json_string`
+/// in `tests/resolve_claude.rs` checks the fixture's links).
 ///
 /// A JSON string tail (the text ends in an unescaped `"`) is read back to its opening quote,
-/// and the ` = ` right before it is the separator, whatever the string holds. Else a note — the
-/// text ends in `)` and what follows its last ` (` has no `=` and no `/` (a scalar never ends in
-/// an unquoted `)`) — and then the last ` = `. Anything else is all pointer.
+/// and the ` = ` right before it is the separator, whatever the string holds. Else, when the
+/// text ends in `)`, what follows its last ` (` is a note if it has no `=`. Else the last ` = `
+/// (a boolean). Anything else is all pointer.
 pub fn split_link(rest: &str) -> (&str, &str) {
-    if let Some(open) = string_tail(rest) {
+    if let Some(open) = json_string_tail(rest) {
         if let Some(at) = rest[..open].strip_suffix(" = ").map(str::len) {
             return (&rest[..at], &rest[at + 1..]);
         }
     }
     if rest.ends_with(')') {
         if let Some(at) = rest.rfind(" (") {
-            if !rest[at..].contains(['=', '/']) {
+            if !rest[at..].contains('=') {
                 return (&rest[..at], rest[at + 1..].trim_start());
             }
         }
@@ -2417,27 +2416,6 @@ pub fn split_link(rest: &str) -> (&str, &str) {
         return (&rest[..at], rest[at + 1..].trim_start());
     }
     (rest, "")
-}
-
-/// The byte where the JSON string `text` ends with opens: `text` ends in an unescaped `"` and
-/// this is the unescaped `"` before it (a quote after an odd run of `\` is escaped). None when
-/// `text` ends in no such string.
-fn string_tail(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let escaped = |at: usize| {
-        bytes[..at]
-            .iter()
-            .rev()
-            .take_while(|b| **b == b'\\')
-            .count()
-            % 2
-            == 1
-    };
-    let last = bytes.len().checked_sub(1)?;
-    if bytes[last] != b'"' || escaped(last) {
-        return None;
-    }
-    (0..last).rev().find(|&i| bytes[i] == b'"' && !escaped(i))
 }
 
 /// Whom a setting applies to.
@@ -2935,7 +2913,12 @@ fn where_link(link: &str, places: &Places) -> String {
         let (pointer, tail) = split_link(rest);
         let words = pointer_words(pointer, places).join(" › ");
         let scope = setting_scope(Path::new(file), pointer, places).short();
-        let tail = places.text(tail);
+        // A string value as its text, its paths home- or project-relative.
+        let tail = match tail.strip_prefix("= ") {
+            Some(value) => format!("= {}", link_value_text(value)),
+            None => tail.to_string(),
+        };
+        let tail = places.text(&tail);
         let tail = if tail.is_empty() {
             String::new()
         } else {
@@ -3250,6 +3233,34 @@ mod tests {
         );
         assert_eq!(p.text("read /srv/other/f.md"), "read /srv/other/f.md");
         assert!(!p.path(Path::new("/srv/other/f.md")).contains('~'));
+    }
+
+    #[test]
+    fn a_string_value_reads_as_its_text() {
+        let p = places();
+        assert_eq!(
+            where_link(
+                "/home/me/2lab.ai/zbrain/.claude/settings.local.json#/autoMemoryDirectory = \
+                 \"/home/me/memory (old)\"",
+                &p
+            ),
+            ".claude/settings.local.json › autoMemoryDirectory = ~/memory (old)   (this project \
+             only)"
+        );
+        assert_eq!(
+            where_link(
+                "/home/me/.claude/settings.json#/outputStyle = \"My Style (x)\"",
+                &p
+            ),
+            "~/.claude/settings.json › outputStyle = My Style (x)   (every project)"
+        );
+        assert_eq!(
+            where_link(
+                r#"/home/me/.claude/settings.json#/env/Q = "say \"hi\"""#,
+                &p
+            ),
+            r#"~/.claude/settings.json › env › Q = say "hi"   (every project)"#
+        );
     }
 
     #[test]

@@ -2624,6 +2624,56 @@ fn w_on_a_hook_your_own_settings_turned_off_names_that_setting() {
 }
 
 #[test]
+fn w_shows_a_path_setting_as_the_path_with_its_parentheses() {
+    let f = fixture();
+    let words = forbidden(&f);
+    let dir = f.home.join("memory (old)");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("MEMORY.md"), "- a note\n").unwrap();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+    json["autoMemoryDirectory"] = serde_json::json!("~/memory (old)");
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    let mut app = app(&f);
+    let id = model::walk(app.tree())
+        .find(|i| i.kind == Kind::Memory)
+        .unwrap()
+        .id
+        .clone();
+    assert!(app.select(&id));
+    press(&mut app, KeyCode::Char('w'));
+    assert!(app.has_card());
+    for (w, h) in [(80u16, 24u16), (120, 40)] {
+        let frame = screen(&app, w, h);
+        let inside = frame
+            .iter()
+            .skip_while(|l| !l.contains("┌ Where "))
+            .take_while(|l| !l.contains('└'))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The path as a path, home-relative, unquoted; the pointer in words; the scope.
+        assert!(
+            inside.contains(
+                ".claude/settings.local.json › autoMemoryDirectory = ~/memory (old) (this \
+                 project only)"
+            ),
+            "{w}: {inside}"
+        );
+        assert!(!inside.contains('"'), "{inside}");
+    }
+    clean_both(&app, &words, "w on a memory dir with parentheses");
+}
+
+#[test]
 fn hooks_your_own_settings_turned_off_are_listed_and_not_offered_to_o() {
     let f = fixture();
     let file = f.project.join(".claude/settings.json");
