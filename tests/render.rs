@@ -1379,6 +1379,8 @@ fn history_is_newest_first_with_context_and_reasons() {
             hash_after: None,
         }],
         applied_at: at.to_string(),
+        warnings: vec![],
+        undone_at: None,
         diff: None,
     };
     let out = render::history(&[
