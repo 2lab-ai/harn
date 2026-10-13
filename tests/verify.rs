@@ -654,6 +654,38 @@ fn verify_drops_the_cap_state_unknown_warning_once_a_capture_is_bound() {
 }
 
 #[test]
+fn verify_drops_the_cap_state_unknown_warning_when_the_capture_has_no_listing() {
+    // No skills on either side: the request carries no listing, so the over-cap branch never
+    // runs, and the bound capture still settles the cap state. The capture is the fixture minus
+    // its listing item (entries are its children) and its region; `init` keeps its skill names,
+    // which `verify` never reads.
+    let mut capture = run_capture();
+    capture.tree.items.retain(|i| i.kind != Kind::SkillListing);
+    let (listing, rest): (Vec<_>, Vec<_>) = capture
+        .regions
+        .into_iter()
+        .partition(|r| r.name.contains("skill list"));
+    assert_eq!(listing.len(), 1, "{listing:?}");
+    capture.regions = rest;
+    capture.body_bytes -= listing.iter().map(|r| r.bytes).sum::<u64>();
+    assert!(!walk(&capture.tree).any(|i| matches!(i.kind, Kind::SkillListing | Kind::Skill)));
+    assert_eq!(
+        capture.regions.iter().map(|r| r.bytes).sum::<u64>(),
+        capture.body_bytes
+    );
+
+    let mut items = resolved(skills_with(Vec::new()), 138);
+    items.retain(|i| i.kind != Kind::SkillListing);
+    let mut tree = static_tree(items);
+    tree.warnings = vec![CAP_STATE_UNKNOWN.to_string(), "unrelated".to_string()];
+    let report = verify(&mut tree, &capture);
+    assert!(report.passed, "{:#?}", report.rows);
+    assert_eq!(tree.observed_body, Some(capture.body_bytes));
+    assert!(tree.signals.is_empty(), "{:?}", tree.signals);
+    assert_eq!(tree.warnings, ["unrelated"]);
+}
+
+#[test]
 fn verify_flags_observed_items_the_tree_missed() {
     // No `alpha` and no `reviewer` in the tree; the roster's cost is known, so its capture-only
     // child is a resolver miss, while MCP tools under a known-cost server still only attach.
