@@ -31,6 +31,9 @@ pub struct PlannedOp {
 pub struct ActionPlan {
     pub target_dir: PathBuf,
     pub agent: Agent,
+    /// `Tree.agent_version` of the tree the plan was built from; journaled by `apply`.
+    #[serde(default)]
+    pub agent_version: Option<String>,
     pub ops: Vec<PlannedOp>,
     pub predicted_before: u64,
     pub predicted_after: u64,
@@ -557,6 +560,7 @@ fn build(
     Ok(ActionPlan {
         target_dir: target.dir.clone(),
         agent: tree.agent,
+        agent_version: tree.agent_version.clone(),
         ops,
         predicted_before: tree.predicted_known,
         predicted_after: after.predicted_known,

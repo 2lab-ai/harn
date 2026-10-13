@@ -759,6 +759,7 @@ fn plan_for(item: &Item, knob: Knob, known: u64, warnings: Vec<String>) -> Actio
     ActionPlan {
         target_dir: PathBuf::from(DIR),
         agent: Agent::ClaudeCode,
+        agent_version: None,
         ops: vec![PlannedOp {
             item_id: item.id.clone(),
             knob,
