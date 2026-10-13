@@ -300,7 +300,8 @@ Carried over from the P0 drive (`p0-claude-code/loop.md` G3, G7), both P1:
 
 ### First screen — zbrain on the author's machine
 
-A mockup: every number is an `observed` byte count from the 2026-10-13 capture (`research/04`),
+This is the table (`harn --table`, and what a pipe gets); on a terminal the bare command opens the
+interactive view described above, which shows the same rows. A mockup: every number is an `observed` byte count from the 2026-10-13 capture (`research/04`),
 drawn into the table layout: the `observed` column and the header are measured, the `freed`
 column is **predicted** from those measurements by the ActionPlan rule and carries `Δ?` where a
 token-budgeted re-render is involved. `share` = the row's observed bytes over the observed body
