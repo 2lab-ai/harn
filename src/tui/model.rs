@@ -2395,6 +2395,13 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
 /// bare word or path, never a container (`every_link_value_in_the_fixture_is_a_boolean_or_a_json_string`
 /// in `tests/resolve_claude.rs` checks the fixture's links).
 ///
+/// A link with no tail ends in a fixed key (`statusLine`, `allow`, `disabledMcpServers`) or a
+/// list index (`/hooks/Stop/0`, `/deniedMcpServers/2`); a key the user chose — a plugin id, a
+/// server name, a skill name — is never the last token without a tail after it (`= true`,
+/// `= "…"`, `(http)`). So a name like `srv (x)` keeps its parentheses:
+/// `pointer_only_links_end_in_a_fixed_key_or_an_index` in `tests/resolve_claude.rs` checks
+/// the fixture's links.
+///
 /// A JSON string tail (the text ends in an unescaped `"`) is read back to its opening quote,
 /// and the ` = ` right before it is the separator, whatever the string holds. Else, when the
 /// text ends in `)`, what follows its last ` (` is a note if it has no `=` and no `/` (a note

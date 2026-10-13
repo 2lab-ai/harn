@@ -640,6 +640,92 @@ fn every_link_value_in_the_fixture_is_a_boolean_or_a_json_string() {
     }
 }
 
+/// The fixture's links read the way `tui::model::split_link` expects: a link with no tail ends
+/// in a fixed key or a list index; a user-chosen key (a plugin id, a server name, a skill name)
+/// as the last token always carries a tail. A server named `srv (x)` keeps its name.
+#[test]
+fn pointer_only_links_end_in_a_fixed_key_or_an_index() {
+    let f = fixture();
+    with_link_values(&f);
+    let mcp = f.project.join(".mcp.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+    json["mcpServers"]["srv (x)"] =
+        serde_json::json!({ "type": "http", "url": "http://localhost:1/mcp" });
+    std::fs::write(&mcp, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let mut local: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+    local["enabledMcpjsonServers"] = serde_json::json!(["project-server", "srv (x)"]);
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    let t = resolve(&f, None);
+
+    // A JSON pointer token, unescaped.
+    let token = |pointer: &str| -> (String, String) {
+        let unescape = |s: &str| s.replace("~1", "/").replace("~0", "~");
+        let mut parts = pointer.rsplit('/');
+        let last = unescape(parts.next().unwrap_or_default());
+        let parent = unescape(parts.next().unwrap_or_default());
+        (parent, last)
+    };
+    let fixed = |key: &str| {
+        !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    };
+    let (mut bare, mut named) = (0, 0);
+    for item in model::walk(&t) {
+        for why in &item.origin.why {
+            let Some((_, rest)) = why.split_once('#') else {
+                continue;
+            };
+            let (pointer, tail) = harn::tui::model::split_link(rest);
+            let (parent, last) = token(pointer);
+            if tail.is_empty() {
+                assert!(
+                    fixed(&last),
+                    "{}: a link ending in {last:?}: {why}",
+                    item.id
+                );
+                bare += 1;
+            }
+            // A name the user chose (an index under a list is no name).
+            let user_key = matches!(
+                parent.as_str(),
+                "mcpServers" | "enabledPlugins" | "skillOverrides" | "deniedMcpServers"
+            ) && !last.chars().all(|c| c.is_ascii_digit());
+            if user_key {
+                assert!(
+                    !tail.is_empty(),
+                    "{}: {last:?} with no tail: {why}",
+                    item.id
+                );
+                named += 1;
+            }
+        }
+    }
+    assert!(bare > 0 && named > 0, "{bare} bare, {named} named");
+
+    // The server whose name has ` (x)`: its link keeps the name, its transport is the note.
+    let server = find(&t, Kind::McpServer, "srv (x)");
+    let link = server
+        .origin
+        .why
+        .iter()
+        .find(|w| w.contains("#/mcpServers/"))
+        .unwrap();
+    let (pointer, tail) = harn::tui::model::split_link(link.split_once('#').unwrap().1);
+    assert_eq!(token(pointer).1, "srv (x)", "{link}");
+    assert_eq!(tail, "(http)", "{link}");
+    // A plugin id with `@` is a named key with its value.
+    let alpha = find(&t, Kind::Plugin, "alpha@market-one");
+    assert!(alpha.origin.why[0].ends_with("#/enabledPlugins/alpha@market-one = true"));
+}
+
 #[test]
 fn overlay_plugin_off_removes_every_contribution() {
     let f = fixture();
