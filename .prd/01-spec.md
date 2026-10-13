@@ -7,7 +7,7 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
 second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
 
-Status: **planned** — v2.2, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v2.3, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity round 1 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -18,7 +18,7 @@ on both machines.
 ## Problem
 
 A fresh Claude Code 2.1.296 session in `~/2lab.ai/zbrain` sends a first request of 332,548 bytes
-before reading the user's instruction, which is 30 of those bytes (`research/04` §E, measured
+before reading the user's instruction, which is 2 of those bytes (`hi`) (`research/04` §E, measured
 2026-10-13 with Claude Code's own raw-body capture). The bytes come from the four places the user
 named — the agent's built-in prompt and tools, the `~/.claude` harness, the working folder's
 harness, then the instruction — and Codex assembles its own request from `~/.codex` and `AGENTS.md`
@@ -30,22 +30,24 @@ harness today means grepping six config layers and guessing.
 
 The measured composition of that request (text bytes of each region, 2026-10-13, the same machine):
 
-| region | text bytes | what |
+| region | bytes | what |
 |---|---|---|
-| `tools` | 214,313 | 26 built-in tools 69,592 · MCP `plugin:slack` 27 tools 78,695 · MCP `plugin:atlassian` 21 tools 66,026 |
-| `messages[1]` system text | 57,202 | SessionStart hook stdout 3,444 · Environment 841 · agent roster (31) 17,050 · MCP instructions 2,596 · skill list (219 names) 31,212 · date 29 · Advisor 2,018 |
+| `tools` (compact JSON, as on the wire) | 210,679 | 26 built-in tools 68,411 · MCP `plugin:slack` 27 tools 77,536 · MCP `plugin:atlassian` 21 tools 64,732 |
+| `messages[1]` system text | 57,202 | SessionStart hook stdout 3,444 · Environment 841 · agent roster (31) 17,050 · MCP instructions 2,596 · skill list (216 entries, 70 with descriptions) 31,212 · date 29 · Advisor 2,018 |
 | `messages[0]` block 0 | 44,936 | `~/.claude/CLAUDE.md` 738 · `zbrain/CLAUDE.md` 6,835 · `@rules/DEV.md` 9,443 · `@rules/PRINCIPLES.md` 4,261 · auto-memory `MEMORY.md` 23,447 |
 | `system` | 6,137 | billing header 74 · identity 62 · harness rules 6,001 |
-| `messages[0]` block 1 | 3,668 | userEmail + gitStatus |
-| `messages[0]` block 2 | 30 | the instruction |
-| attributed sum | 326,286 | |
-| JSON framing + request parameters | 6,262 | keys, quoting, escapes, `metadata`, `thinking`, `safeguards`, … — the difference to the 332,548-byte body; never attributed to an item |
+| `messages[0]` block 1 | 3,549 | userEmail + gitStatus |
+| `messages[0]` block 2 | 2 | the instruction (`hi`) |
+| `messages[1]` `tool_addition` | 122 | the Advisor tool reference |
+| attributed sum | 322,627 | |
+| request parameters | 7,829 | `model`, `betas`, `metadata`, `max_tokens`, `thinking`, `context_management`, `safeguards`, `output_config`, `stream` — measured as compact JSON |
+| JSON framing + escapes of the text regions | 2,092 | the rest of the 332,548-byte body — measured as body − attributed − parameters; never attributed to an item |
 
 Every MCP schema was sent up front because the session ran behind a non-first-party
 `ANTHROPIC_BASE_URL` (the local llmux proxy), which turns Claude Code's tool search off
 (`research/01` §7, docs). Behind the first-party endpoint the docs say the same 48 tools are
 deferred stubs `[docs — stub size not measured; Open question 1]`. The same item can therefore cost
-144 KB in one configuration and an unmeasured, smaller amount in another: a size without its load
+142 KB in one configuration and an unmeasured, smaller amount in another: a size without its load
 mode and its configuration misleads.
 
 ## Prior art, in one paragraph
@@ -102,9 +104,17 @@ request**. Details and URLs: `research/03`.
    capture (Claude Code: `OTEL_LOG_RAW_API_BODIES=file:<dir>` request body + the `stream-json`
    `system/init` provenance event; Codex: `codex debug prompt-input` + `codex mcp list --json` +
    `codex plugin list --json`), states before running that it will execute hooks and MCP servers and
-   may cost a model request, and is refused under `--readonly`. Matching is **presence by item id**, and the
-   pass/fail gate covers statically discoverable ids only; dynamic children are filled from the
-   capture, not gated. Byte differences are not diffs, they replace `predicted` with `observed`. Only
+   may cost a model request, and is refused under `--readonly`. Matching is done on the **projection each
+   oracle can observe**: items with mode `runtime` or `none` are expected to be absent from a
+   request and are never counted as missing; capture-only children under a `?` parent (an MCP
+   server's tools, a hook's stdout) are attached as `observed` and never counted as
+   `seen-not-predicted` — the diff applies to top-level items and statically known children.
+   Within that projection the gate has two parts: **presence by item id** for statically
+   discoverable ids (A1's set), and **content conformance** for static contributions that are
+   reproducible in the same context (an instruction file's text, a skill's listing entry, the
+   memory block after its cap) — a size or content mismatch there is a resolver defect and fails
+   verify. Values that vary per run (date, git status, hook stdout, MCP runtime text) are
+   observations and replace `predicted` with `observed` without failing. Only
    observed rows and regions are promoted; a Codex verify promotes instructions, skills and blocks
    and says that tools and hook output are outside Codex's dump.
 6. **Same model everywhere.** `harn <dir> --json` (schema `harn/1`), the TUI, `harn why`, `harn
@@ -151,7 +161,8 @@ origin    layer ∈ managed | user | project | local | plugin@marketplace | dyna
                   claudeai (remote connector) | builtin | unresolved
           path   — realpath (symlinks resolved; a shared copy is flagged) or setting file + key
           why    — the admission chain (settings key → plugin manifest → file), nix-tree style
-cost      source: bytes on disk | predicted: bytes in the first request after caps | observed: bytes
+cost      source: bytes on disk | predicted: bytes in the first request after caps | ~: predicted
+          through a modelled cap or a declared ratio, shown with its assumption | observed: bytes
           in a bound capture | ? (unknown until a capture) | — (no first-request cost)
 knob      {file, key, value, scope}  the official off switch, narrowest scope that wins
           | quarantine {from, to}     only when no knob exists
@@ -175,6 +186,15 @@ until a bound capture turns it into `observed`.
 - **What static cannot know is shown as `?`**: a hook's stdout, an MCP server's tool schemas and
   instructions before the server has run, claude.ai connectors, anything the agent fetches. A
   bound capture fills them in.
+- **Caps are evaluated by their unit.** Byte-denominated caps (auto-memory 25 KB / 200 lines,
+  Codex `project_doc_max_bytes` 32 KiB) are applied statically. Token-denominated caps (Claude
+  Code's skill listing at 1 % of the window, Codex skills at 2 % / 10k tokens, Codex hook context
+  at 2,500 tokens) cannot be decided from bytes: statically the cap state is `?` and an entry's
+  freed bytes are shown as a range (`~0 … <entry>`); with `--assume-bytes-per-token N` the state
+  becomes `~` with that assumption printed; a bound capture settles it as `observed` — the
+  listing is at cap when entries appear name-only although their `SKILL.md` carries a description
+  (the documented overflow behavior). On this machine the 2026-10-13 capture shows 146 of 216
+  entries name-only with descriptions on disk, so the zbrain listing is `at cap [observed]`.
 - **`harn verify` = the agent's own oracles**, bound to a `RunContext`. Claude Code: one headless
   run with `OTEL_LOG_RAW_API_BODIES=file:<tmp>` (full request body + `index.jsonl`) and
   `--output-format stream-json --verbose` (`system/init` with `tools`, `mcp_servers[{name,status,
@@ -187,6 +207,10 @@ until a bound capture turns it into `observed`.
   directory, an llmux `raw-io.jsonl` record, or a `CODEX_ROLLOUT_TRACE_ROOT` bundle, and uses a
   record only when its `RunContext` matches the target (same canonical cwd, agent version, model);
   it refuses with the mismatch otherwise. "The newest llmux session" is never a selection rule.
+  For a record that carries no context of its own (an llmux line), the `RunContext` is derived from
+  the request body itself — the `gitStatus` block's cwd line, the `Contents of <path>` headers of
+  the instruction files, the `cc_version` billing header, `model` — and the record is refused when
+  those are absent.
 - **Trade-off, stated once:** static is fast, session-free and drifts; oracles are ground truth and
   cost one request (Claude Code) or a process spawn with side effects (Codex). The spec keeps both
   and labels which one produced every number.
@@ -195,18 +219,20 @@ until a bound capture turns it into `observed`.
 
 ### P0 — CLI (ships first; Claude Code chain complete)
 
-Every command takes `--dir <path>` (default: cwd) and `--agent claude-code|codex` (default: all,
-one table each).
+Every command takes the target directory as `--dir <path>`; the listing commands also accept it as
+the positional `[DIR]` the user's statement uses (`harn ~/2lab.ai/zbrain`). Both normalize to the
+same canonical target; giving both is a usage error. Default: cwd. `--agent claude-code|codex`
+selects one agent (default: all, one table each).
 
 | command | does | output |
 |---|---|---|
-| `harn [--dir D]` | the effective tree, one table per agent, sorted by the freed bytes of each row's default action | table: freed · predicted · share · item · origin · mode · default action |
+| `harn [DIR]` / `harn --dir D` | the effective tree, one table per agent, sorted by the freed bytes of each row's default action | table: freed · predicted · share · item · origin · mode · default action |
 | `harn --json` | the full model | `{"schema":"harn/1", "agents":[…]}` |
 | `harn why <item>` | admission chain, realpath, knob candidates by scope, the freed bytes of each | text |
 | `harn path <item>` | the resolved realpath, one line | path |
 | `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + side effects + warnings, then apply the official knob in the given scope (default `local`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
-| `harn on <item>` / `harn undo [N]` / `harn history` | reverse journal ops; stale targets reported, not forced | text |
-| `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; refused for `builtin`/`managed` items | diff + journal id |
+| `harn on <item>` / `harn undo [N]` / `harn history [--prune <age>]` | reverse journal ops; stale targets reported, not forced; `--prune` is the only way journal entries are ever deleted | text |
+| `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; a JSON/TOML/frontmatter file that no longer parses is journaled and warned about, not reverted; refused for `builtin`/`managed` items | diff + journal id |
 | `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted`; exit 1 on any presence diff |
 | `harn verify --run` | runs the agent once under its official capture after printing what it will execute; refused under `--readonly` | same |
 | `harn completions <shell>` | clap completions | — |
@@ -217,7 +243,7 @@ every active verify), `--no-unicode`, `--color`.
 
 ### P0.5 — Codex resolver (same commands; acceptance A7–A8)
 
-### P1 — TUI (`harn tui` or `harn -i`; `harn` alone always prints the table)
+### P1 — TUI (`harn tui [DIR]` or `harn -i`; `harn [DIR]` always prints the table)
 
 One screen per agent as tabs, the same table, a detail/why pane, a staged-plan pane with the diff
 and freed delta, `?` key overlay and a context key bar; disable = stage + apply through the same
@@ -235,36 +261,38 @@ sum only.
 ```
 harn ~/2lab.ai/zbrain                                     claude-code 2.1.296 (rules verified 2.1.296)
 first request: observed 332.5 KB (capture 2026-10-13) · attributed 326.3 KB · framing 6.3 KB   sort: freed ▼
-tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eager, 144.7 KB
+tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eager, 142.3 KB
     knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]       freed: ?
 
   freed     observed   share  item                              origin                    mode        default action
-  78.7 KB    78.7 KB   23.7%  mcp plugin:slack · 27 tools       plugin slack@official     always      enabledPlugins → false (local) · its 8 skills leave the listing, which is at cap → ≈0 there
-  68.6 KB    66.0 KB   19.8%  mcp plugin:atlassian · 21 tools   plugin atlassian@official always      enabledPlugins → false (local) · +2.6 KB instructions
-  23.4 KB    23.4 KB    7.0%  MEMORY.md · 150 lines / 25 KB cap ~/.claude/projects/…/memory always      autoMemoryEnabled → false
-  20.6 KB     6.8 KB    2.1%  CLAUDE.md (+ 2 @imports)          project                   always      claudeMdExcludes · DEV.md 9.4 KB + PRINCIPLES.md 4.3 KB leave with it
+  77.5 KB    77.5 KB   23.3%  mcp plugin:slack · 27 tools       plugin slack@official     always      enabledPlugins → false (local) · its 8 skills leave the listing, which is at cap → ≈0 there
+  67.3 KB    64.7 KB   19.5%  mcp plugin:atlassian · 21 tools   plugin atlassian@official always      enabledPlugins → false (local) · +2.6 KB instructions
+  23.4 KB    23.4 KB    7.1%  MEMORY.md · 150 lines / 25 KB cap ~/.claude/projects/…/memory always      autoMemoryEnabled → false
+  20.5 KB     6.8 KB    2.1%  CLAUDE.md (+ 2 @imports)          project                   always      claudeMdExcludes · DEV.md 9.4 KB + PRINCIPLES.md 4.3 KB leave with it
    9.4 KB     9.4 KB    2.8%  rules/DEV.md                      project @import           always      claudeMdExcludes
    4.3 KB     4.3 KB    1.3%  rules/PRINCIPLES.md               project @import           always      claudeMdExcludes
    3.4 KB     3.4 KB    1.0%  SessionStart hook stdout          plugin superpowers@official always     enabledPlugins → false (local)
-  ~3.4 KB     3.7 KB    1.1%  gitStatus + userEmail             builtin                   always      includeGitInstructions → false (git part only; userEmail has no switch)
+  ~3.3 KB     3.5 KB    1.1%  gitStatus + userEmail             builtin                   always      includeGitInstructions → false (git part only; userEmail has no switch)
    2.0 KB     2.0 KB    0.6%  Advisor tool text                 builtin                   always      CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1
    0.7 KB     0.7 KB    0.2%  ~/.claude/CLAUDE.md               user                      always      claudeMdExcludes
       ?      17.1 KB    5.1%  agent roster · 31                 project 10 · user 2 · plugins 16 · builtin 3   advertised   per plugin: enabledPlugins; per agent: permissions.deny Agent(x) [roster effect unmeasured]
-   ~0 KB     31.2 KB    9.4%  skill listing · 219 · AT CAP      user 22 · project 63 · plugins 134   advertised   skillOverrides / enabledPlugins — one entry out frees ≈ 0 while over budget
-  partial    69.6 KB   20.9%  built-in tools · 26               builtin                   always      --disallowedTools <tool> (per tool; Bash/Read/Edit stay)
+   ~0 KB     31.2 KB    9.4%  skill listing · 216 · at cap[i]   user 22 · project 63 · plugins 131   advertised   skillOverrides / enabledPlugins — one entry out frees ≈ 0 while over budget
+  partial    68.4 KB   20.6%  built-in tools · 26               builtin                   always      --disallowedTools <tool> (per tool; which tools are irremovable is undocumented → ?)
       —       6.1 KB    1.8%  system prompt · 3 blocks          builtin                   always      none (built-in)
-      —       0.0 KB         your instruction (30 B)            you                       —           —
+      —       0.0 KB         your instruction (2 B)             you                       —           —
   runtime / no first-request cost:
       —          —            hooks · 10 other events           ~/.claude/settings.json   runtime     disableAllHooks / per-event entry
       —          —            permissions.allow · 10 rules      .claude/settings.local.json none      —
       —          —            statusLine                        ~/.claude/settings.json   none        —
+  [i] at cap [observed 2026-10-13]: 146 of 216 entries are name-only although their SKILL.md has a description
+      (documented overflow behavior). A static run without a capture shows `?` here and a range for freed.
 ```
 
 ### Detail pane — `harn why plugin:slack`
 
 ```
 plugin:slack:slack   (claude-code/mcp-server/plugin/plugin:slack:slack)        target: ~/2lab.ai/zbrain
-  27 MCP tools · predicted 78,695 B schemas · 0 B instructions · mode always (tool search off)
+  27 MCP tools · observed 77,536 B schemas (capture 2026-10-13) · 0 B instructions · mode always (tool search off)
   why loaded
     ~/.claude/settings.json        enabledPlugins["slack@claude-plugins-official"] = true
     → ~/.claude/plugins/installed_plugins.json   slack@claude-plugins-official 1.4.1
@@ -272,9 +300,9 @@ plugin:slack:slack   (claude-code/mcp-server/plugin/plugin:slack:slack)        t
     also contributes: 8 skills (advertised, 1.1 KB in the listing) · 0 agents · 0 hooks
   last used   3 of the last 20 sessions in this directory (session jsonl, 14 d)
   actions                                                                    freed (predicted)
-    [1] .claude/settings.local.json   enabledPlugins[…] = false   this project   ← default   78.7 KB (+ listing ≈0: at cap)
-    [2] ~/.claude/settings.json       enabledPlugins[…] = false   every project  (--scope user) 78.7 KB (+ listing ≈0: at cap)
-    [3] ~/.claude.json projects[cwd].disabledMcpServers += "plugin:slack:slack"  server only   78.7 KB
+    [1] .claude/settings.local.json   enabledPlugins[…] = false   this project   ← default   77.5 KB (+ listing ≈0: at cap)
+    [2] ~/.claude/settings.json       enabledPlugins[…] = false   every project  (--scope user) 77.5 KB (+ listing ≈0: at cap)
+    [3] ~/.claude.json projects[cwd].disabledMcpServers += "plugin:slack:slack"  server only   77.5 KB
         the 8 skills stay advertised
   warnings  .claude/settings.local.json is git-ignored here (no tracked file changes)
             [3] edits ~/.claude.json, which Claude Code also writes — apply with no claude running
@@ -331,8 +359,9 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | # | run | observed |
 |---|---|---|
 | A1 | `harn --dir ~/2lab.ai/zbrain --json --agent claude-code` | every statically discoverable name in that session's `init` event (`skills`, `agents`, `plugins`, `mcp_servers` with `source`) appears exactly once in the tree with the same `source`; MCP tool names and hook stdout are `?` rows, not omissions; no session was started (no new file under `~/.claude/projects/<slug>/`, no child process) |
-| A2 | `harn --dir ~/2lab.ai/zbrain` | one table per agent, sorted by freed; every row has origin + mode + cost tag + default action; the header names the cost tag, the attributed/framing split and the tool-search state; runtime < 1 s on both machines |
-| A3 | `harn verify --run --dir ~/2lab.ai/zbrain --agent claude-code` | prints what it will execute, makes one headless run; **among statically discoverable ids (the A1 set)** the report lists 0 `predicted-not-seen` and 0 `seen-not-predicted` against that run's capture on the author's machine; dynamic children (MCP tool names, hook stdout) are filled from the capture and reported, never gated — `?` rows become `observed`; the header switches to `observed` for the matched regions only |
+| A2 | `harn ~/2lab.ai/zbrain` (and the same with `--dir`) | one table per agent, sorted by freed; every row has origin + mode + cost tag + default action; the header names the cost tag, the attributed/framing split and the tool-search state; runtime < 1 s on both machines |
+| A3 | `harn verify --run --dir ~/2lab.ai/zbrain --agent claude-code` | prints what it will execute, makes one headless run; within the Claude Code projection (modes `runtime`/`none` excluded, capture-only children attached under their `?` parent) the report lists 0 `predicted-not-seen` and 0 `seen-not-predicted` **among statically discoverable ids (the A1 set)** and 0 content-conformance failures on reproducible static contributions; `?` rows become `observed`; the header switches to `observed` for the matched regions only |
+| A3b | `just check` | the fixture suite includes before/after `freed` cases: a listing at cap (an entry leaves, the next fills the slot → ≈0), a plugin whose skills leave with it, an item shared by two origins (counted once), and an excluded `CLAUDE.md` taking its `@imports` along — each asserting the exact predicted delta |
 | A4 | `harn off plugin:slack --dir ~/2lab.ai/zbrain` then `claude -p hi --output-format stream-json --verbose` in that directory | the plan showed target dir, diff, freed and side effects; `.claude/settings.local.json` gained `enabledPlugins["slack@claude-plugins-official"]: false`; the new `init` event lists no `plugin:slack:slack` and none of its 8 skills; `harn history` shows the op with its `RunContext`; `harn undo` restores the file byte-for-byte |
 | A5 | `harn off <item>` on an item with no knob | `builtin` → refused with the reason; a project skill dir → moved to `.claude/harn-off/skills/<name>` with a manifest, the next `init` does not list it, `harn undo` moves it back; `--scope` was never widened silently |
 | A6 | `harn edit rules/DEV.md --dir ~/2lab.ai/zbrain` | `$EDITOR` opened the realpath; on exit the diff was printed and journaled; `harn undo` restores the previous bytes |
@@ -393,6 +422,15 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v2.3 (2026-10-13, trinity round 2, all three verdicts)** — request partition re-measured with
+  the wire's compact serialization (tools 210,679 B; instruction 2 B; remainder = measured request
+  parameters 7,829 B + framing 2,092 B); `harn [DIR]` positional restored beside `--dir` and used
+  in A2; caps evaluated by unit (byte caps static, token caps `?`/`~`/observed) with today's
+  listing measured at cap (146/216 name-only); `~` added to the cost vocabulary; verify defined on
+  each oracle's observable projection with capture-only children attached under `?` parents,
+  presence + content conformance, dynamic values exempt; freed fixtures (A3b) in the gate;
+  `history --prune`, edit parse-check warning, llmux `RunContext` derivation; P0/P0.5
+  differential-test split in 02.
 - **v2.2 (2026-10-13, trinity round 2)** — first-screen header and `share` labelled `observed`
   (the mockup's numbers are the 2026-10-13 capture); the static-run header defined as `predicted
   <known> + ? (N unknown)`; slack's default-action freed corrected to 78.7 KB because the skill

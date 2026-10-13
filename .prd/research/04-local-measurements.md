@@ -109,11 +109,16 @@ OTEL_LOG_RAW_API_BODIES=file:<dir> claude -p hi --output-format stream-json --ve
 ```
 
 1. **Raw request body (measured mode).** `<dir>/<uuid>.request.json` = the untruncated JSON body
-   Claude Code sent (355,852 B today: 74 tools, system blocks of 102, 143, 6168 B, `messages[0]` = user
-   blocks of 58,778 B + 3,668 B + 30 B, `messages[1]` = system text 63,229 B + `tool_addition`),
+   Claude Code sent (file = 332,548 B, compact UTF-8 JSON, one line: 74 tools = 210,679 B; system
+   blocks of 74, 62, 6,001 B; `messages[0]` = user text blocks of 44,936 + 3,549 + 2 B (`hi`);
+   `messages[1]` = system text 57,202 B + `tool_addition` 122 B; request parameters 7,829 B; JSON
+   framing and escapes 2,092 B — an earlier draft of this section quoted ASCII-escaped
+   re-serialization sizes, which were larger). The skill listing (31,212 B) holds 216 entries of
+   which 70 carry a description and 146 are name-only although their `SKILL.md` has one — the
+   documented listing-budget overflow, observed,
    plus `<dir>/index.jsonl` with `session_id`, `request_id`, `model`, `query_source` and the two
    file names. No proxy, no llmux, no third-party tool: this is the measured source for Claude Code.
-   Today's body is 125 KB larger than the 2026-10-02 capture (231 KB): three plugin MCP servers are
+   Today's body is 102 KB larger than the 2026-10-02 capture (231 KB): three plugin MCP servers are
    connected now (slack, atlassian; context7 disabled) and the skill list grew to 213 entries.
 2. **Provenance (`system/init` event).** Keys: `tools` (73 names), `mcp_servers[{name,status,source}]`
    (`plugin:slack:slack` connected/plugin, `plugin:atlassian:atlassian` connected/plugin,

@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **planned** — v1.1, 2026-10-13 (revised on trinity round 1). Boundaries for the first
+Status: **planned** — v1.2, 2026-10-13 (revised on trinity rounds 1–2). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 
@@ -19,7 +19,8 @@ and this file is fixed.
   project trees with every discovery rule exercised), plus **differential conformance tests** that
   run the real `claude`/`codex` binaries when present (`research/03` §A, cclint): compare the
   static tree with `stream-json init` / `debug prompt-input` on a fixture directory and fail on any
-  presence diff. Gate = `just check` (`cargo fmt --check`, `cargo clippy --all-targets --locked
+  presence or content-conformance diff within the oracle's projection; plus `freed` fixtures
+  (listing at cap, plugin side effects, shared items, `@imports`) asserting exact deltas. Gate = `just check` (`cargo fmt --check`, `cargo clippy --all-targets --locked
   -- -D warnings`, `cargo test --locked`), the llmux justfile shape. Each resolver carries a
   `VERIFIED_AGAINST` version constant; a newer installed agent sets the header drift warning.
 
@@ -27,15 +28,17 @@ and this file is fixed.
 
 ```
 src/
-  main.rs            clap entry: harn [--dir] | why | path | off | on | edit | undo | history |
-                     verify | tui (feature) | completions
+  main.rs            clap entry: harn [DIR] (= --dir) | why | path | off | on | edit | undo |
+                     history | verify | tui (feature) | completions; DIR and --dir together = usage error
   model.rs           Agent, Item, Kind, Mode, Origin, Cost{source,predicted,observed}, Knob,
                      ActionPlan, RunContext (serde; schema "harn/1"); item selector resolution
                      (full id or unique suffix; ambiguous → candidates, exit 2)
   resolve/
     mod.rs           Resolver trait: fn resolve(target: &Target, overlay: Option<&Overlay>) -> Tree
-                     Target = canonical dir + env + configured model/window; Overlay = an
-                     ActionPlan applied virtually (for freed computation)
+                     Target = canonical dir + env + configured model/window + optional
+                     bytes-per-token assumption; Overlay = an ActionPlan applied virtually (for
+                     freed computation). Byte caps applied here; token caps yield `?` (or `~`
+                     under the assumption) until a capture settles them
     claude/          settings layering (managed/user/project/local/--settings), instruction chain
                      + @imports + rules, auto-memory (200-line/25 KB cap), hooks (all events; mode
                      always vs runtime), skills listing (1 % budget cap, 1,536-char cut), agents
@@ -65,9 +68,14 @@ src/
                      `plugin list --json`; CODEX_ROLLOUT_TRACE_ROOT reader
     capture.rs       readers for an OTEL raw-body dir, an llmux raw-io.jsonl record, a Codex
                      trace bundle → (Tree, RunContext); selection = RunContext match, never "newest"
-  verify.rs          presence-by-id join of the static Tree and a capture Tree: seen /
-                     predicted-not-seen / seen-not-predicted; promotes predicted → observed for
-                     matched rows and regions only
+  verify.rs          inputs: static Tree, capture Tree + RunContext, the oracle's observable
+                     projection (modes runtime/none excluded; capture-only children attach under
+                     their `?` parent, never seen-not-predicted). Gate 1 presence by id over
+                     statically discoverable ids; gate 2 content conformance for reproducible
+                     static contributions (text, listing entry, capped memory block) — mismatch =
+                     resolver defect; per-run values (date, git status, hook stdout, MCP runtime
+                     text) replace predicted → observed without failing; promotion only for
+                     matched rows and regions
   render/
     table.rs         one table per agent (ncdu-style bars, eighth-block + ASCII fallback),
                      header with cost tag, attributed/framing split, tool-search state, drift warning
@@ -122,7 +130,7 @@ A running agent is not restarted; every apply prints "takes effect on the next s
 ## Receipts for the implementation drive (what "green" means, per `01-spec.md` §Acceptance)
 
 1. `just check` green locally and in CI.
-2. Differential tests green on the author's macOS against Claude Code 2.1.x and Codex 0.160.x.
+2. Differential tests green on the author's macOS: P0 against Claude Code 2.1.x; P0.5 adds Codex 0.160.x (Codex never gates P0).
 3. P0 rows A1–A6, A9–A11 run by hand on macOS and on `cachy-z13`, each with its command output
    captured into the workstream's `loop.done.md`; P0.5 adds A7–A8; the TUI drive adds its own rows.
 4. One stable tag → release assets on GitHub → `brew install 2lab-ai/tap/harn` on macOS and the
