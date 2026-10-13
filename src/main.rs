@@ -24,13 +24,27 @@ const EXIT_AMBIGUOUS: u8 = 2;
 const EXIT_REFUSED: u8 = 3;
 const EXIT_STALE: u8 = 4;
 
+/// `--help` epilogue. Lines are kept within 80 columns by hand so clap's `wrap_help` leaves the
+/// aligned steps intact on an 80-column terminal.
+const AFTER_HELP: &str = "\
+Getting started:
+  harn                          the interactive view (TUI) on a terminal
+  harn --table                  the table; the default when not a terminal
+  harn trim                     the AI trims it, reversibly (harn undo)
+  harn report --html harn.html  a shareable read-only page
+  harn verify --run             measure one real session
+
+Commands marked [AI operator] are what an AI runs on your behalf.
+
+Exit codes: 0 ok · 1 error or verify diff · 2 ambiguous selector ·
+3 refused (readonly / builtin / no knob / rejected plan) · 4 stale journal";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "harn",
     about = "Show the effective harness an AI coding agent loads in a directory — origin, cost and \
              the official off switch of every item — and change it reversibly",
-    after_help = "Exit codes: 0 ok · 1 error or verify diff · 2 ambiguous selector · \
-                  3 refused (readonly / builtin / no knob / rejected plan) · 4 stale journal"
+    after_help = AFTER_HELP
 )]
 struct Cli {
     /// Target directory, same as --dir (default: cwd)
@@ -61,17 +75,22 @@ struct Cli {
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorArg::Auto, global = true)]
     color: ColorArg,
 
+    /// Print the table (the default when stdout is not a terminal); the listing only
+    #[arg(long)]
+    table: bool,
+
     #[command(subcommand)]
     command: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Admission chain, realpath, knob candidates by scope and the freed bytes of each
+    /// [AI operator] Admission chain, realpath, knob candidates by scope and the freed bytes of
+    /// each
     Why { selector: String },
-    /// Print the resolved realpath of an item
+    /// [AI operator] Print the resolved realpath of an item
     Path { selector: String },
-    /// Turn an item off through the agent's official switch (plan, then apply)
+    /// [AI operator] Turn an item off through the agent's official switch (plan, then apply)
     Off {
         selector: String,
         /// Scope of the switch; never widened silently (default: local)
@@ -81,9 +100,9 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Turn an item back on by reversing the journaled op that turned it off
+    /// [AI operator] Turn an item back on by reversing the journaled op that turned it off
     On { selector: String },
-    /// Open an item's real file in $EDITOR between a snapshot and a diff
+    /// [AI operator] Open an item's real file in $EDITOR between a snapshot and a diff
     Edit { selector: String },
     /// Reverse the last N journal entries
     Undo {
@@ -98,13 +117,13 @@ enum Cmd {
     },
     /// Diff the static tree against the agent's own request
     Verify(VerifyArgs),
-    /// LLM-oriented summary of the tree, ending with the harn-plan/1 format
+    /// [AI operator] LLM-oriented summary of the tree, ending with the harn-plan/1 format
     Brief {
         /// Target directory, same as --dir (default: cwd)
         #[arg(value_name = "DIR", conflicts_with = "dir")]
         dir_pos: Option<PathBuf>,
     },
-    /// Apply an AI-authored plan file (schema harn-plan/1)
+    /// [AI operator] Apply an AI-authored plan file (schema harn-plan/1)
     Apply {
         #[arg(value_name = "PLAN_JSON")]
         plan: PathBuf,
@@ -212,6 +231,12 @@ where
             "the positional [DIR] is for the listing; give a subcommand its target with --dir",
         ));
     }
+    if cli.table && cli.command.is_some() {
+        return Err(command.error(
+            ErrorKind::ArgumentConflict,
+            "--table is for the listing (`harn [DIR] --table`), not for a subcommand",
+        ));
+    }
     // `--dir` before the subcommand is set on the parent, which clap's per-level conflict check
     // does not see against the subcommand's own positional DIR.
     if let Some(
@@ -282,7 +307,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     let opts = RenderOpts {
         unicode: !cli.no_unicode,
         color: color_enabled(cli.color),
-        width: std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()),
+        width: width_from(std::env::var("COLUMNS").ok().as_deref(), terminal_width),
     };
     match &cli.command {
         None => {
@@ -293,6 +318,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 let tables: Vec<String> =
                     doc.agents.iter().map(|t| render::table(t, &opts)).collect();
                 println!("{}", tables.join("\n\n"));
+                if let Some(tip) = listing_tip(cli, std::io::stdout().is_terminal()) {
+                    println!("{tip}");
+                }
             }
         }
         Some(Cmd::Brief { dir_pos }) => {
@@ -627,6 +655,31 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+/// Table columns: a positive `COLUMNS`, else the width of the terminal on stdout, else `None`
+/// (the renderer's 120). `COLUMNS` of 0 or not a number counts as unset: taken as a width, 0
+/// cut every row down to `…`.
+fn width_from(columns: Option<&str>, terminal: impl FnOnce() -> Option<usize>) -> Option<usize> {
+    columns
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .filter(|&c| c > 0)
+        .or_else(terminal)
+        .filter(|&c| c > 0)
+}
+
+/// Columns of the terminal on stdout; `None` when stdout is not a terminal.
+fn terminal_width() -> Option<usize> {
+    terminal_size::terminal_size_of(std::io::stdout()).map(|(w, _)| usize::from(w.0))
+}
+
+/// The bare listing's last line on a terminal; none under `--table`, `--json` or a pipe.
+/// The interactive view replaces this branch.
+fn listing_tip(cli: &Cli, stdout_is_terminal: bool) -> Option<String> {
+    if cli.table || cli.json || !stdout_is_terminal {
+        return None;
+    }
+    Some("tip: interactive view arrives next preview; harn --help lists the commands".to_string())
+}
+
 fn color_enabled(color: ColorArg) -> bool {
     match color {
         ColorArg::Always => true,
@@ -723,6 +776,103 @@ mod tests {
         assert!(parse(&["--json", "/tmp"]).unwrap().json);
         assert!(parse(&["--dir", "/tmp", "why", "x"]).is_ok());
         assert!(parse(&["why", "x", "--dir", "/tmp"]).is_ok());
+    }
+
+    #[test]
+    fn table_flag_belongs_to_the_listing_and_verify_keeps_its_own() {
+        assert!(parse(&["--table"]).unwrap().table);
+        assert!(parse(&["/tmp", "--table"]).unwrap().table);
+        assert!(parse(&["--json", "--table"]).unwrap().json);
+        assert_eq!(
+            parse(&["--table", "history"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+        // After a subcommand `--table` is not the listing's: `why` has none, `verify` its own.
+        assert!(parse(&["why", "x", "--table"]).is_err());
+        let cli = parse(&["verify", "--capture", "x", "--table"]).unwrap();
+        assert!(!cli.table);
+    }
+
+    #[test]
+    fn width_is_a_positive_columns_else_the_terminal_else_unset() {
+        let terminal = || Some(80);
+        let no_terminal = || None;
+        assert_eq!(width_from(Some("100"), terminal), Some(100));
+        assert_eq!(width_from(Some(" 100 "), no_terminal), Some(100));
+        // COLUMNS=0 (exported by a user shell) is unset, never a width of 0.
+        assert_eq!(width_from(Some("0"), terminal), Some(80));
+        assert_eq!(width_from(Some("0"), no_terminal), None);
+        assert_eq!(width_from(Some("wide"), terminal), Some(80));
+        assert_eq!(width_from(Some(""), no_terminal), None);
+        assert_eq!(width_from(None, terminal), Some(80));
+        assert_eq!(width_from(None, no_terminal), None);
+        assert_eq!(width_from(None, || Some(0)), None);
+    }
+
+    #[test]
+    fn tip_only_under_a_bare_listing_on_a_terminal() {
+        let tip = listing_tip(&parse(&[]).unwrap(), true).unwrap();
+        assert!(tip.starts_with("tip: interactive view"), "{tip}");
+        assert!(tip.contains("harn --help"), "{tip}");
+        assert!(!tip.contains('\n'), "{tip}");
+        // One line on an 80-column terminal in both glyph modes.
+        for args in [&[][..], &["--no-unicode"]] {
+            let tip = listing_tip(&parse(args).unwrap(), true).unwrap();
+            assert!(
+                tip.is_ascii() && tip.chars().count() <= 80,
+                "{args:?}: {tip}"
+            );
+        }
+        assert_eq!(listing_tip(&parse(&[]).unwrap(), false), None);
+        assert_eq!(listing_tip(&parse(&["--table"]).unwrap(), true), None);
+        assert_eq!(listing_tip(&parse(&["--json"]).unwrap(), true), None);
+    }
+
+    #[test]
+    fn help_starts_people_on_the_listing_and_marks_the_ai_operator_commands() {
+        // Pinned: the test's own terminal width must not re-wrap the steps.
+        let help = Cli::command()
+            .term_width(100)
+            .render_long_help()
+            .to_string();
+        let start = help
+            .find("Getting started:")
+            .unwrap_or_else(|| panic!("{help}"));
+        let steps: Vec<&str> = help[start..].lines().skip(1).take(5).collect();
+        let order = [
+            "harn ",
+            "harn --table",
+            "harn trim",
+            "harn report --html",
+            "harn verify --run",
+        ];
+        for (line, cmd) in steps.iter().zip(order) {
+            assert!(
+                line.trim_start().starts_with(cmd),
+                "{line:?} should start with {cmd:?}"
+            );
+        }
+        for line in AFTER_HELP.lines() {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
+        // `wrap_help`: the whole help fits an 80-column terminal.
+        let narrow = Cli::command().term_width(80).render_long_help().to_string();
+        for line in narrow.lines() {
+            assert!(line.chars().count() <= 80, "{line}");
+        }
+        for sub in Cli::command().get_subcommands() {
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let operator = matches!(
+                sub.get_name(),
+                "why" | "path" | "off" | "on" | "edit" | "brief" | "apply"
+            );
+            assert_eq!(
+                about.starts_with("[AI operator] "),
+                operator,
+                "{}: {about}",
+                sub.get_name()
+            );
+        }
     }
 
     #[test]

@@ -5,10 +5,28 @@
 loaded or only advertised, and the official switch that turns it off — and lets you turn items
 off reversibly. Claude Code first, Codex CLI second. One binary for macOS and Linux.
 
-Status: **scaffold, P0 in progress** (2026-10-13). The CLI parses every P0 command and the data
-model is in place; the resolver, renderers, oracle, planner and journal are stubs that say so. The
-product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md); the implementation boundaries in
-[`.prd/02-architecture.md`](.prd/02-architecture.md); the module contract in
+## Install and use
+
+```
+brew install 2lab-ai/tap/harn-preview
+```
+
+1. `harn` — what Claude Code loads in this directory before your first message, biggest saving
+   first. On a terminal this is the interactive view; `harn --table` prints the table (also the
+   default when stdout is not a terminal).
+2. `harn trim` — the AI decides what to turn off and applies it; every change is journaled and
+   `harn undo` puts it back.
+3. `harn report --html harn.html` — the same picture as a shareable read-only page.
+4. `harn verify --run` — measure one real session (starts the agent once: runs your hooks and MCP
+   servers, may cost one model request).
+
+The commands marked `[AI operator]` in `harn --help` (`why`, `path`, `off`, `on`, `edit`, `brief`,
+`apply`) are what the AI runs on your behalf; you never type an item name.
+
+Status: P0 for the Claude Code chain is on main; preview builds install via the tap.
+
+The product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md); the implementation
+boundaries in [`.prd/02-architecture.md`](.prd/02-architecture.md); the module contract in
 [`.prd/03-p0-interfaces.md`](.prd/03-p0-interfaces.md); the research it rests on in
 [`.prd/research/`](.prd/research/).
 

@@ -17,6 +17,8 @@ fn harn(f: &Fixture, envs: &[(&str, &Path)], args: &[&str]) -> Output {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ENABLE_TOOL_SEARCH")
         .env_remove("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        // The table width comes from COLUMNS off a terminal; the caller's must not leak in.
+        .env_remove("COLUMNS")
         .arg("--dir")
         .arg(&f.project)
         .args(args);
@@ -158,4 +160,69 @@ fn verify_prints_the_report_then_the_observed_header_or_the_whole_table() {
         .unwrap_or_else(|| panic!("no table in:\n{table}"));
     assert!(columns.contains("observed"), "{columns}");
     assert!(table.contains("sort: freed"), "{table}");
+}
+
+#[test]
+fn table_flag_prints_the_whole_table_and_matches_the_piped_listing() {
+    let f = fixture();
+    // Wide enough that the column header is not cut (at 120 this fixture's cuts it).
+    let wide = [("COLUMNS", Path::new("200"))];
+    let table = harn(&f, &wide, &["--table"]);
+    assert!(table.status.success(), "{table:?}");
+    let text = stdout(&table);
+    let columns = text
+        .lines()
+        .find(|l| l.contains("freed(pred)"))
+        .unwrap_or_else(|| panic!("no column header in:\n{text}"));
+    assert!(columns.contains("default action"), "{columns}");
+    assert!(text.contains("sort: freed"), "{text}");
+    // stdout is a pipe here: the bare listing is the same table, without the terminal tip.
+    assert_eq!(stdout(&harn(&f, &wide, &[])), text);
+    assert_eq!(
+        stdout(&harn(&f, &[], &[])),
+        stdout(&harn(&f, &[], &["--table"]))
+    );
+    assert!(!text.contains("tip:"), "{text}");
+}
+
+#[test]
+fn table_flag_is_for_the_listing_only() {
+    let f = fixture();
+    let out = harn(&f, &[], &["--table", "history"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--table"),
+        "{out:?}"
+    );
+}
+
+/// Rows of the table (between the column header and the footnotes), as printed.
+fn table_rows(text: &str) -> Vec<&str> {
+    text.lines()
+        .skip_while(|l| !l.contains("freed(pred)"))
+        .skip(1)
+        .filter(|l| !l.contains("more (harn why") && !l.trim_start().starts_with('['))
+        .collect()
+}
+
+#[test]
+fn columns_zero_is_unset_and_a_positive_columns_cuts_rows() {
+    let f = fixture();
+    let unset = stdout(&harn(&f, &[], &["--table"]));
+    // A shell that exports COLUMNS=0 must not cut every row down to the ellipsis.
+    let zero = stdout(&harn(&f, &[("COLUMNS", Path::new("0"))], &["--table"]));
+    assert_eq!(zero, unset);
+    assert!(
+        table_rows(&zero).iter().all(|row| row.trim() != "…"),
+        "{zero}"
+    );
+    let garbage = stdout(&harn(&f, &[("COLUMNS", Path::new("wide"))], &["--table"]));
+    assert_eq!(garbage, unset);
+
+    let narrow = stdout(&harn(&f, &[("COLUMNS", Path::new("80"))], &["--table"]));
+    let rows = table_rows(&narrow);
+    assert!(!rows.is_empty(), "{narrow}");
+    for row in rows {
+        assert!(row.chars().count() <= 80, "{row}");
+    }
 }
