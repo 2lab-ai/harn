@@ -1,8 +1,8 @@
 //! `harn why <sel>`: the detail pane (01-spec §Detail pane).
 
 use super::common::{
-    cost_tagged, exact, freed_cell, freed_value, kb, knob_full, request_bytes, sorted, Glyphs,
-    UNICODE,
+    cost_tagged, exact, freed_cell, freed_value, glyphs, kb, knob_full, request_bytes, sorted,
+    Glyphs,
 };
 use crate::model::{Item, Tree};
 use crate::plan::ActionPlan;
@@ -10,9 +10,10 @@ use std::path::Path;
 
 /// Header (label, id, target), cost and mode, origin, signal, the `why loaded` chain, every
 /// child (`also contributes`), last used, one action line per plan (or per knob candidate when
-/// nothing was planned), warnings.
-pub fn why(tree: &Tree, item: &Item, plans: &[ActionPlan]) -> String {
-    let g = &UNICODE;
+/// nothing was planned), warnings. `unicode` false = ASCII decorations (`|`, `->`, `D?`); labels,
+/// ids and paths are printed as they are.
+pub fn why(tree: &Tree, item: &Item, plans: &[ActionPlan], unicode: bool) -> String {
+    let g = glyphs(unicode);
     let base = tree.target_dir.as_path();
     let mut out = vec![
         format!(

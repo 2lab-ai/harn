@@ -119,6 +119,20 @@ pub fn undo(journal: &mut Journal, n: usize) -> anyhow::Result<Vec<JournalEntry>
     undo_entries(journal, live)
 }
 
+/// Reverses the live entry `id` (the one a user confirmed), wherever it sits in the journal.
+/// Same stale check as [`undo`]; an unknown or already undone id → [`Refused`], nothing written.
+pub fn undo_entry(journal: &mut Journal, id: &str) -> anyhow::Result<JournalEntry> {
+    let (dir, entry) = read_entries(journal)?
+        .into_iter()
+        .find(|(_, entry)| entry.id == id)
+        .ok_or_else(|| Refused(format!("journal entry {id} not found")))?;
+    if entry.undone_at.is_some() {
+        return Err(Refused(format!("journal entry {id} is already undone")).into());
+    }
+    let mut undone = undo_entries(journal, vec![(dir, entry)])?;
+    Ok(undone.remove(0))
+}
+
 /// Every entry, newest first (undone ones included, with `undone_at`).
 pub fn history(journal: &Journal) -> anyhow::Result<Vec<JournalEntry>> {
     Ok(read_entries(journal)?

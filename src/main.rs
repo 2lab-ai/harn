@@ -63,6 +63,11 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Print the table instead of opening the interactive view (the default unless stdin and
+    /// stdout are both a terminal)
+    #[arg(long, conflicts_with = "json")]
+    table: bool,
+
     /// Refuse every write and every active verify (exit 3)
     #[arg(long, global = true)]
     readonly: bool,
@@ -74,10 +79,6 @@ struct Cli {
     /// Color output (auto = stdout is a terminal and NO_COLOR is unset)
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorArg::Auto, global = true)]
     color: ColorArg,
-
-    /// Print the table (the default when stdout is not a terminal); the listing only
-    #[arg(long)]
-    table: bool,
 
     #[command(subcommand)]
     command: Option<Cmd>,
@@ -234,7 +235,7 @@ where
     if cli.table && cli.command.is_some() {
         return Err(command.error(
             ErrorKind::ArgumentConflict,
-            "--table is for the listing (`harn [DIR] --table`), not for a subcommand",
+            "--table is for the listing (`harn --table [DIR]`), not for a subcommand",
         ));
     }
     // `--dir` before the subcommand is set on the parent, which clap's per-level conflict check
@@ -310,6 +311,14 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         width: width_from(std::env::var("COLUMNS").ok().as_deref(), terminal_width),
     };
     match &cli.command {
+        None if opens_tui(
+            cli,
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        ) =>
+        {
+            return tui_cmd(cli, &opts);
+        }
         None => {
             let doc = document(cli, cli.dir_pos.as_deref())?;
             if cli.json {
@@ -318,9 +327,6 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 let tables: Vec<String> =
                     doc.agents.iter().map(|t| render::table(t, &opts)).collect();
                 println!("{}", tables.join("\n\n"));
-                if let Some(tip) = listing_tip(cli, std::io::stdout().is_terminal()) {
-                    println!("{tip}");
-                }
             }
         }
         Some(Cmd::Brief { dir_pos }) => {
@@ -346,7 +352,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             if cli.json {
                 print_json(&serde_json::json!({ "item": item, "plans": plans }))?;
             } else {
-                println!("{}", render::why(&resolved.tree, item, &plans));
+                println!(
+                    "{}",
+                    render::why(&resolved.tree, item, &plans, !cli.no_unicode)
+                );
             }
         }
         Some(Cmd::Path { selector }) => {
@@ -459,6 +468,38 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The interactive view: every requested agent resolved and freed-annotated, as for the table.
+fn tui_cmd(cli: &Cli, opts: &RenderOpts) -> Result<ExitCode> {
+    let target = target(cli, cli.dir_pos.as_deref())?;
+    let mut tabs = Vec::new();
+    for resolved in resolve_trees(cli, &target)? {
+        let mut tree = resolved.tree;
+        plan::annotate_freed(resolved.resolver.as_ref(), &target, &mut tree)
+            .with_context(|| tree.agent.to_string())?;
+        tabs.push((resolved.resolver, tree));
+    }
+    let exit = harn::tui::run(
+        target,
+        tabs,
+        harn::tui::Opts {
+            unicode: opts.unicode,
+            color: opts.color,
+            readonly: cli.readonly,
+        },
+    )?;
+    Ok(match exit {
+        harn::tui::Exit::Quit => ExitCode::SUCCESS,
+        // The shell convention: 130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP.
+        harn::tui::Exit::Signal(n) => ExitCode::from(u8::try_from(128 + n).unwrap_or(1)),
+    })
+}
+
+/// The bare command on a terminal (keys come from stdin, frames go to stdout) without
+/// `--json` / `--table`.
+fn opens_tui(cli: &Cli, stdin_tty: bool, stdout_tty: bool) -> bool {
+    cli.command.is_none() && !cli.json && !cli.table && stdin_tty && stdout_tty
+}
+
 /// The report, then the verified tree's header (`--table`: the whole table, freed annotated) so
 /// the observed totals and their region split are visible; `--json` prints the report only.
 fn verify_cmd(cli: &Cli, args: &VerifyArgs, opts: &RenderOpts) -> Result<ExitCode> {
@@ -514,7 +555,7 @@ fn apply_plan(cli: &Cli, plan: &plan::ActionPlan, dry_run: bool) -> Result<()> {
     if cli.json {
         return print_json(&serde_json::json!({ "plan": plan, "entry": entry }));
     }
-    println!("{}", render::plan(plan));
+    println!("{}", render::plan(plan, !cli.no_unicode));
     match entry {
         Some(entry) => println!(
             "applied: journal {} · takes effect on the next session",
@@ -671,15 +712,6 @@ fn terminal_width() -> Option<usize> {
     terminal_size::terminal_size_of(std::io::stdout()).map(|(w, _)| usize::from(w.0))
 }
 
-/// The bare listing's last line on a terminal; none under `--table`, `--json` or a pipe.
-/// The interactive view replaces this branch.
-fn listing_tip(cli: &Cli, stdout_is_terminal: bool) -> Option<String> {
-    if cli.table || cli.json || !stdout_is_terminal {
-        return None;
-    }
-    Some("tip: interactive view arrives next preview; harn --help lists the commands".to_string())
-}
-
 fn color_enabled(color: ColorArg) -> bool {
     match color {
         ColorArg::Always => true,
@@ -782,7 +814,10 @@ mod tests {
     fn table_flag_belongs_to_the_listing_and_verify_keeps_its_own() {
         assert!(parse(&["--table"]).unwrap().table);
         assert!(parse(&["/tmp", "--table"]).unwrap().table);
-        assert!(parse(&["--json", "--table"]).unwrap().json);
+        assert_eq!(
+            parse(&["--json", "--table"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
         assert_eq!(
             parse(&["--table", "history"]).unwrap_err().kind(),
             ErrorKind::ArgumentConflict
@@ -807,25 +842,6 @@ mod tests {
         assert_eq!(width_from(None, terminal), Some(80));
         assert_eq!(width_from(None, no_terminal), None);
         assert_eq!(width_from(None, || Some(0)), None);
-    }
-
-    #[test]
-    fn tip_only_under_a_bare_listing_on_a_terminal() {
-        let tip = listing_tip(&parse(&[]).unwrap(), true).unwrap();
-        assert!(tip.starts_with("tip: interactive view"), "{tip}");
-        assert!(tip.contains("harn --help"), "{tip}");
-        assert!(!tip.contains('\n'), "{tip}");
-        // One line on an 80-column terminal in both glyph modes.
-        for args in [&[][..], &["--no-unicode"]] {
-            let tip = listing_tip(&parse(args).unwrap(), true).unwrap();
-            assert!(
-                tip.is_ascii() && tip.chars().count() <= 80,
-                "{args:?}: {tip}"
-            );
-        }
-        assert_eq!(listing_tip(&parse(&[]).unwrap(), false), None);
-        assert_eq!(listing_tip(&parse(&["--table"]).unwrap(), true), None);
-        assert_eq!(listing_tip(&parse(&["--json"]).unwrap(), true), None);
     }
 
     #[test]
@@ -882,6 +898,37 @@ mod tests {
         let cli = parse(&["off", "x", "--readonly", "--agent", "claude-code"]).unwrap();
         assert!(cli.readonly);
         assert!(matches!(cli.agent, Some(AgentArg::ClaudeCode)));
+    }
+
+    #[test]
+    fn table_flag_is_for_the_listing_only() {
+        let cli = parse(&["--table", "/tmp"]).unwrap();
+        assert!(cli.table && cli.dir_pos.is_some());
+        assert_eq!(
+            parse(&["--table", "--json"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse(&["--table", "why", "x"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+        // `verify --table` stays verify's own flag.
+        assert!(
+            !parse(&["verify", "--capture", "x", "--table"])
+                .unwrap()
+                .table
+        );
+    }
+
+    #[test]
+    fn tui_needs_a_terminal_on_both_stdin_and_stdout() {
+        let bare = parse(&["/tmp"]).unwrap();
+        assert!(opens_tui(&bare, true, true));
+        assert!(!opens_tui(&bare, false, true), "keys piped in");
+        assert!(!opens_tui(&bare, true, false), "output piped out");
+        assert!(!opens_tui(&parse(&["--table"]).unwrap(), true, true));
+        assert!(!opens_tui(&parse(&["--json"]).unwrap(), true, true));
+        assert!(!opens_tui(&parse(&["history"]).unwrap(), true, true));
     }
 
     #[test]

@@ -12,16 +12,21 @@ brew install 2lab-ai/tap/harn-preview
 ```
 
 1. `harn` — what Claude Code loads in this directory before your first message, biggest saving
-   first. On a terminal this is the interactive view; `harn --table` prints the table (also the
-   default when stdout is not a terminal).
+   first. On a terminal this is the interactive view: one tab per agent, the tree sorted by freed
+   bytes, children folded under their parent (`▸ N`). `j`/`k` move · `h`/`l` fold · `/` filter ·
+   `s` sort (freed, cost, name; again reverses) · `w` why · `d` stage off (shows the plan) · `a`
+   apply · `o` back on · `u` undo · `e` edit in `$EDITOR` · `r` refresh · `t` AI trim · `?` every
+   key · `q` quit. `--readonly` greys and refuses the keys that write.
 2. `harn trim` — the AI decides what to turn off and applies it; every change is journaled and
-   `harn undo` puts it back.
+   `harn undo` puts it back (`/harn-trim` inside Claude Code does the same loop).
 3. `harn report --html harn.html` — the same picture as a shareable read-only page.
 4. `harn verify --run` — measure one real session (starts the agent once: runs your hooks and MCP
    servers, may cost one model request).
 
-The commands marked `[AI operator]` in `harn --help` (`why`, `path`, `off`, `on`, `edit`, `brief`,
-`apply`) are what the AI runs on your behalf; you never type an item name.
+`harn --table [DIR]` prints the table (also what `harn` prints unless stdin and stdout are both a
+terminal); `harn --json [DIR]` prints the same model as JSON (schema `harn/1`). The commands marked
+`[AI operator]` in `harn --help` (`why`, `path`, `off`, `on`, `edit`, `brief`, `apply`) are what the
+AI runs on your behalf; you never type an item name.
 
 Status: P0 for the Claude Code chain is on main; preview builds install via the tap.
 
