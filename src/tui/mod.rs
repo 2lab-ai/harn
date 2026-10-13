@@ -20,6 +20,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use std::io;
@@ -158,6 +159,23 @@ fn trap_signals() -> io::Result<(Arc<AtomicUsize>, Vec<signal_hook::SigId>)> {
     Ok((flag, ids))
 }
 
+/// A full-screen [`Terminal`] on `backend`, blank and owed a full repaint.
+fn full_screen<B: Backend>(backend: B) -> Result<Terminal<B>, B::Error> {
+    let mut terminal = Terminal::new(backend)?;
+    repaint(&mut terminal)?;
+    Ok(terminal)
+}
+
+/// Clears the screen and makes the next draw write every cell. Not [`Terminal::clear`]: that
+/// first reads the cursor position (`ESC[6n`) and waits for the terminal's reply, and a pty
+/// driver or a slow terminal never sends one (harn exited 1 after a 2 s timeout). A full-screen
+/// resize to the current size (TIOCGWINSZ) clears the same way and asks the terminal nothing.
+/// Unlike `clear`, the cursor is not put back: it stays hidden and every draw places its cells.
+fn repaint<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let size = terminal.size()?;
+    terminal.resize(Rect::new(0, 0, size.width, size.height))
+}
+
 /// Runs the interactive view until `q` or a signal. `tabs` = one resolved, freed-annotated tree
 /// per agent with its resolver. The journal is opened (created) only when writes are allowed;
 /// `e` runs `$EDITOR` (default `vi`) with the terminal suspended.
@@ -180,8 +198,7 @@ pub fn run(
     install_panic_hook();
     let restore = Restore;
     enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    terminal.clear()?;
+    let mut terminal = full_screen(CrosstermBackend::new(io::stdout()))?;
     let exit = drive(
         &mut app,
         &mut terminal,
@@ -192,7 +209,7 @@ pub fn run(
             if let Err(err) = leave() {
                 // Never start an editor over a half-restored terminal.
                 enter()?;
-                terminal.clear()?;
+                repaint(terminal)?;
                 app.report_error(format!(
                     "e: could not leave the full screen ({err}); $EDITOR not started"
                 ));
@@ -206,7 +223,7 @@ pub fn run(
                     signal.compare_exchange(SIGINT as usize, 0, Ordering::SeqCst, Ordering::SeqCst);
             }
             enter()?;
-            terminal.clear()?;
+            repaint(terminal)?;
             Ok(())
         },
     );
@@ -223,8 +240,11 @@ mod tests {
     use crate::model::Agent;
     use crate::resolve::ClaudeCode;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::Cell;
+    use ratatui::layout::{Position, Rect, Size};
     use std::collections::{BTreeMap, VecDeque};
+    use std::convert::Infallible;
     use std::path::PathBuf;
 
     fn app() -> App {
@@ -288,6 +308,138 @@ mod tests {
 
     fn no_suspend(_: &mut App, _: Pending, _: &mut Terminal<TestBackend>) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// A terminal that never answers a query (a pty driver, a slow or odd emulator): the cursor
+    /// position cannot be read, and every attempt is counted. Everything else is a `TestBackend`.
+    struct Mute {
+        screen: TestBackend,
+        queries: usize,
+    }
+
+    impl Mute {
+        fn new(width: u16, height: u16) -> Mute {
+            Mute {
+                screen: TestBackend::new(width, height),
+                queries: 0,
+            }
+        }
+    }
+
+    fn ok<T>(result: Result<T, Infallible>) -> io::Result<T> {
+        result.map_err(|never| match never {})
+    }
+
+    impl Backend for Mute {
+        type Error = io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            ok(self.screen.draw(content))
+        }
+
+        fn hide_cursor(&mut self) -> io::Result<()> {
+            ok(self.screen.hide_cursor())
+        }
+
+        fn show_cursor(&mut self) -> io::Result<()> {
+            ok(self.screen.show_cursor())
+        }
+
+        fn get_cursor_position(&mut self) -> io::Result<Position> {
+            self.queries += 1;
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the cursor position could not be read",
+            ))
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+            ok(self.screen.set_cursor_position(position))
+        }
+
+        fn clear(&mut self) -> io::Result<()> {
+            ok(self.screen.clear())
+        }
+
+        fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+            ok(self.screen.clear_region(clear_type))
+        }
+
+        fn size(&self) -> io::Result<Size> {
+            ok(self.screen.size())
+        }
+
+        fn window_size(&mut self) -> io::Result<WindowSize> {
+            ok(self.screen.window_size())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            ok(self.screen.flush())
+        }
+    }
+
+    fn key(code: KeyCode) -> Option<Event> {
+        Some(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    #[test]
+    fn a_terminal_that_never_answers_starts_and_takes_keys_without_a_cursor_query() {
+        let mut terminal = full_screen(Mute::new(80, 24)).expect("no reply is needed to start");
+        let mut events = Script {
+            script: VecDeque::from([
+                None,
+                key(KeyCode::Char('j')),
+                key(KeyCode::Char('l')),
+                key(KeyCode::Char('?')),
+                key(KeyCode::Esc),
+                key(KeyCode::Char('q')),
+            ]),
+            ticks: 0,
+            after: &|_| {},
+        };
+        let exit = drive(
+            &mut app(),
+            &mut terminal,
+            &mut events,
+            &AtomicUsize::new(0),
+            |_, _, terminal| Ok(repaint(terminal)?),
+        );
+        assert_eq!(exit.unwrap(), Exit::Quit);
+        assert_eq!(terminal.backend().queries, 0);
+    }
+
+    #[test]
+    fn repaint_rewrites_the_cells_the_editor_left_on_the_screen() {
+        let app = app();
+        let mut terminal = full_screen(Mute::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let drawn = terminal.backend().screen.buffer().clone();
+        // $EDITOR wrote over the whole alternate screen.
+        let x = Cell::new("x");
+        let cells: Vec<(u16, u16, &Cell)> =
+            drawn.area.positions().map(|p| (p.x, p.y, &x)).collect();
+        terminal.backend_mut().draw(cells.into_iter()).unwrap();
+        // Same frame, no repaint: the diff is empty and the editor's cells stay.
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_ne!(terminal.backend().screen.buffer(), &drawn);
+        repaint(&mut terminal).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().screen.buffer(), &drawn);
+        assert_eq!(terminal.backend().queries, 0);
+    }
+
+    #[test]
+    fn a_resized_terminal_is_picked_up_at_the_next_draw() {
+        let app = app();
+        let mut terminal = full_screen(Mute::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.backend_mut().screen.resize(100, 30);
+        let area = terminal.draw(|frame| app.draw(frame)).unwrap().area;
+        assert_eq!(area, Rect::new(0, 0, 100, 30));
+        assert_eq!(terminal.backend().queries, 0);
     }
 
     #[test]
