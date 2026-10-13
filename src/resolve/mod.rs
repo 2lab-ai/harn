@@ -3,14 +3,24 @@
 
 pub mod claude;
 
-use crate::model::{Agent, Overlay, Target, Tree};
+use crate::model::{Agent, Item, Knob, Overlay, Target, Tree};
 use anyhow::anyhow;
 
-pub trait Resolver {
+/// `Send + Sync`: `plan::annotate_freed` re-resolves distinct overlays on several threads.
+pub trait Resolver: Send + Sync {
     fn agent(&self) -> Agent;
     /// Agent version the discovery rules were checked against (`harn --version`, drift warning).
     fn rules_verified_against(&self) -> &'static str;
     fn resolve(&self, target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tree>;
+
+    /// The tree after `item`'s `knob` is applied, derived from `tree` without reading a file —
+    /// only when the resolver's own rules prove the knob removes exactly `item` with its
+    /// descendants and changes nothing else with a first-request cost. It must equal what
+    /// [`Resolver::resolve`] with the knob's overlay gives, as far as freed bytes can tell;
+    /// `plan::annotate_freed` uses it to skip that re-resolve. None (the default) = re-resolve.
+    fn after_removal(&self, _tree: &Tree, _item: &Item, _knob: &Knob) -> Option<Tree> {
+        None
+    }
 }
 
 /// Claude Code resolver. Reads only files; never spawns a process.
@@ -32,6 +42,10 @@ impl Resolver for ClaudeCode {
 
     fn resolve(&self, target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
         claude::resolve(target, overlay)
+    }
+
+    fn after_removal(&self, tree: &Tree, item: &Item, knob: &Knob) -> Option<Tree> {
+        claude::after_removal(tree, item, knob)
     }
 }
 

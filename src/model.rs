@@ -249,6 +249,16 @@ pub struct Tree {
     pub unknown_rows: u32,
     pub observed_body: Option<u64>,
     pub warnings: Vec<String>,
+    /// `$HOME` the tree was resolved with (`Target.home`); renderers print it as `~`.
+    #[serde(default)]
+    pub home: Option<PathBuf>,
+    /// The bound capture's leaf request regions `(name, bytes)`, a partition of `observed_body`;
+    /// filled by `verify` (the header splits them into attributed / parameters / framing).
+    #[serde(default)]
+    pub observed_regions: Vec<(String, u64)>,
+    /// Why tool search is on or off, e.g. `ANTHROPIC_BASE_URL is non-first-party (localhost)`.
+    #[serde(default)]
+    pub tool_search_cause: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -366,10 +376,14 @@ impl fmt::Display for Stale {
 
 impl std::error::Error for Stale {}
 
-/// Item selector: exact id, else unique suffix of id, else unique label.
+/// Item selector: exact id, else unique suffix of id, else unique label, else unique substring
+/// of id.
 ///
 /// A stage that matches exactly one item wins. When no stage is unique, every candidate seen in
-/// the suffix and label stages is returned as `Ambiguous`; when nothing matched, `NotFound`.
+/// the suffix and label stages is returned as `Ambiguous`. Only when those stages matched nothing
+/// does the substring stage run; there a match inside another match is that ancestor's part (an
+/// MCP server's instructions and tools under `plugin:slack`) and is folded into it. When nothing
+/// matched, `NotFound`.
 pub fn select<'a>(tree: &'a Tree, selector: &str) -> Result<&'a Item, SelectError> {
     let mut candidates: Vec<&Item> = Vec::new();
     let stages: [&dyn Fn(&Item) -> bool; 3] = [
@@ -389,11 +403,33 @@ pub fn select<'a>(tree: &'a Tree, selector: &str) -> Result<&'a Item, SelectErro
         }
     }
     if candidates.is_empty() {
+        let found: Vec<&Item> = walk(tree)
+            .filter(|item| item.id.contains(selector))
+            .collect();
+        let outermost: Vec<&Item> = found
+            .iter()
+            .copied()
+            .filter(|item| !found.iter().any(|other| is_inside(item, other)))
+            .collect();
+        if let [only] = outermost.as_slice() {
+            return Ok(only);
+        }
+        candidates = outermost;
+    }
+    if candidates.is_empty() {
         return Err(SelectError::NotFound(selector.to_string()));
     }
     let mut ids: Vec<String> = candidates.iter().map(|item| item.id.clone()).collect();
     ids.sort();
     Err(SelectError::Ambiguous(ids))
+}
+
+/// `item` is a strict descendant of `ancestor`.
+fn is_inside(item: &Item, ancestor: &Item) -> bool {
+    ancestor
+        .children
+        .iter()
+        .any(|child| std::ptr::eq(child, item) || is_inside(item, child))
 }
 
 /// Every item of the tree, depth-first (parent before its children, in stored order).
@@ -445,6 +481,9 @@ mod tests {
             unknown_rows: 0,
             observed_body: None,
             warnings: Vec::new(),
+            home: None,
+            observed_regions: Vec::new(),
+            tool_search_cause: None,
         }
     }
 
@@ -544,6 +583,40 @@ mod tests {
                 "claude-code/skill/user/a".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn select_unique_substring_takes_the_outermost_match() {
+        // `plugin:slack` is no suffix and no label; it is inside the server's id and its tool's.
+        let t = sample();
+        assert_eq!(select(&t, "plugin:slack").unwrap().id, SLACK);
+    }
+
+    #[test]
+    fn select_substring_in_two_unrelated_ids_lists_both() {
+        let mut t = sample();
+        let other = "claude-code/mcp-server/plugin/plugin:slack-extra:x";
+        t.items
+            .push(item(other, "plugin:slack-extra:x", Vec::new()));
+        assert_eq!(
+            select(&t, "plugin:slack").unwrap_err(),
+            SelectError::Ambiguous(vec![other.to_string(), SLACK.to_string()])
+        );
+    }
+
+    #[test]
+    fn select_substring_never_breaks_an_ambiguous_suffix() {
+        // Two ids end with `DEV.md`; the substring stage must not pick one of them.
+        let mut t = sample();
+        t.items.push(item(
+            "claude-code/instruction/user//home/DEV.md",
+            "~/DEV.md",
+            Vec::new(),
+        ));
+        assert!(matches!(
+            select(&t, "DEV.md"),
+            Err(SelectError::Ambiguous(ids)) if ids.len() == 2
+        ));
     }
 
     #[test]

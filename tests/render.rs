@@ -392,6 +392,9 @@ fn tree() -> Tree {
         unknown_rows: 4,
         observed_body: None,
         warnings: Vec::new(),
+        home: None,
+        observed_regions: Vec::new(),
+        tool_search_cause: None,
     }
 }
 
@@ -624,6 +627,57 @@ fn observed_body_switches_the_totals_and_the_cost_column() {
         line_with(&out, "MEMORY.md").contains("23.4 KB pred"),
         "{out}"
     );
+}
+
+#[test]
+fn observed_header_splits_the_body_and_tool_search_names_its_cause() {
+    let mut t = tree();
+    t.observed_body = Some(332_548);
+    // A partition of the body, as `verify` copies it from the capture.
+    t.observed_regions = vec![
+        ("tools · builtin (26 tools)".to_string(), 200_000),
+        ("messages[0] block 0 · /x/CLAUDE.md".to_string(), 131_000),
+        ("request parameters".to_string(), 1_100),
+        ("framing".to_string(), 448),
+    ];
+    t.tool_search_cause = Some("ANTHROPIC_BASE_URL is non-first-party (localhost)".to_string());
+    let table = render::table(&t, &unicode());
+    assert!(
+        table.contains(
+            "first request: observed 332.5 KB = attributed 331.0 KB + parameters 1.1 KB + framing 0.4 KB (bound capture)"
+        ),
+        "{table}"
+    );
+    assert!(
+        table.contains("tool search: OFF (ANTHROPIC_BASE_URL is non-first-party (localhost)) →"),
+        "{table}"
+    );
+    let brief = render::brief(&doc(vec![t.clone()]));
+    assert!(
+        brief.contains("observed 332548 = attributed 331000 + parameters 1100 + framing 448"),
+        "{brief}"
+    );
+    let html = render::html(&doc(vec![t.clone()]));
+    assert!(
+        html.contains("= attributed 331.0 KB + parameters"),
+        "{html}"
+    );
+    t.tool_search = Some(true);
+    t.tool_search_cause = Some("ANTHROPIC_BASE_URL unset (first-party)".to_string());
+    assert!(render::table(&t, &unicode())
+        .contains("tool search: ON (ANTHROPIC_BASE_URL unset (first-party)) →"));
+}
+
+#[test]
+fn html_footer_is_the_version_line_of_the_lib() {
+    let line = harn::version_line();
+    assert!(
+        line.starts_with(&format!("harn {} (", env!("CARGO_PKG_VERSION"))),
+        "{line}"
+    );
+    assert!(line.ends_with(") rules: claude-code 2.1.296"), "{line}");
+    let html = render::html(&doc(vec![tree()]));
+    assert!(html.contains(&format!("by {line}</footer>")), "{html}");
 }
 
 #[test]
@@ -923,10 +977,11 @@ fn brief_rows_header_and_unknowns() {
         Layer::Project,
         &format!("{DIR}/rules/DEV.md"),
     );
-    // Same layer and mode as the line above; its own exclude entry is a different knob.
+    // Same layer and mode as the line above; its own exclude entry is a different knob. A child
+    // row carries no why step (top-level rows only).
     assert_eq!(
         line_with(&out, &dev),
-        format!(" {dev}|^|^|9443|9443|claudeMdExcludes|@rules/DEV.md")
+        format!(" {dev}|^|^|9443|9443|claudeMdExcludes")
     );
     // Same compact text as slack's knob, another plugin's knob: no ditto.
     let atlassian_row = line_with(&out, &format!("{}|", atlassian().id));
@@ -1183,21 +1238,106 @@ fn brief_of_a_zbrain_sized_tree_stays_under_40_kb() {
     );
 }
 
-/// With realpath ids for skills/agents/commands the ids alone are ~35 KB of a 400-row brief, so
-/// 40 KB is out of reach there whatever the format does; what the format adds on top of the ids
-/// stays under 45 B per row (legend, headers, unknowns and the plan format included).
+/// The rows section of a brief: every line between `rows:` and the blank line after the rows.
+fn brief_rows(brief: &str) -> Vec<&str> {
+    brief
+        .lines()
+        .skip_while(|l| *l != "rows:")
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .collect()
+}
+
+/// With realpath ids for skills/agents/commands the ids are most of a 400-row brief; what the
+/// format adds on top of the printed ids stays under 45 B per printed row (legend, headers,
+/// unknowns and the plan format included).
 #[test]
 fn brief_overhead_beyond_the_ids_is_bounded() {
     let t = big_tree(true);
-    let rows = walk(&t).count();
-    let ids: usize = walk(&t).map(|item| item.id.len()).sum();
     let out = render::brief(&doc(vec![t]));
+    let rows = brief_rows(&out);
+    let ids: usize = rows
+        .iter()
+        .map(|l| l.trim_start().split('|').next().unwrap_or_default().len())
+        .sum();
     let overhead = out.len() - ids;
     assert!(
-        overhead <= 45 * rows,
-        "brief {} B = ids {ids} B + format {overhead} B for {rows} rows",
-        out.len()
+        overhead <= 45 * rows.len(),
+        "brief {} B = ids {ids} B + format {overhead} B for {} printed rows",
+        out.len(),
+        rows.len()
     );
+}
+
+#[test]
+fn brief_collapses_children_past_40_prints_home_as_tilde_and_keeps_every_top_level_id() {
+    let mut t = big_tree(true);
+    t.home = Some(PathBuf::from(UHOME));
+    let listing = t
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .expect("big tree listing");
+    let total = listing.children.len();
+    assert!(total > 40, "{total}");
+    for child in &mut listing.children {
+        child.freed = freed(10, true);
+        child.origin.why = vec![format!("{UHOME}/.claude/skills/x/SKILL.md (user skill)")];
+    }
+    listing.origin.why = vec![format!("{UHOME}/.claude/skills (user skills)")];
+    let listing_id = listing.id.clone();
+    let out = render::brief(&doc(vec![t.clone()]));
+    let rows = brief_rows(&out);
+
+    // Every top-level id, verbatim.
+    for item in &t.items {
+        assert!(
+            rows.iter()
+                .any(|l| l.split('|').next() == Some(item.id.as_str())),
+            "missing top-level {}",
+            item.id
+        );
+    }
+    // 40 children printed, the rest counted on one line right after them.
+    let at = rows
+        .iter()
+        .position(|l| l.starts_with(&format!("{listing_id}|")))
+        .unwrap();
+    let children: Vec<&&str> = rows[at + 1..]
+        .iter()
+        .take_while(|l| l.starts_with(' '))
+        .collect();
+    assert_eq!(children.len(), 41, "{children:#?}");
+    assert_eq!(
+        children[40].to_string(),
+        format!(" … {} more (harn --json)", total - 40)
+    );
+    // The why step: on the top-level row (home → `~`), never on a child row.
+    assert!(
+        rows[at].ends_with("|~/.claude/skills (user skills)"),
+        "{}",
+        rows[at]
+    );
+    for child in &children[..40] {
+        assert_eq!(child.split('|').count(), 6, "{child}");
+    }
+    // The row after the collapse line repeats nothing from a hidden row.
+    let next = rows[at + 42];
+    assert!(!next.starts_with(' ') && !next.contains("|^|"), "{next}");
+    // Unknowns count the children's Δ? on the parent; both closing sections stay.
+    let unknowns = &out[out.find("UNKNOWNS:").unwrap()..out.find("PLAN FORMAT").unwrap()];
+    assert!(
+        unknowns.contains(&format!(
+            "- {listing_id}: freed has Δ? on {total} of {total} children"
+        )),
+        "{unknowns}"
+    );
+    assert!(unknowns.contains("- claude-code: Δ? = "), "{unknowns}");
+    assert!(
+        out.contains("= children beyond the first 40, in the same order."),
+        "the legend names the collapse threshold"
+    );
+    assert!(out.contains("PLAN FORMAT (harn-plan/1)"));
 }
 
 // ---------- html ----------

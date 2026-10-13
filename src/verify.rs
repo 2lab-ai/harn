@@ -1,17 +1,22 @@
 //! Static tree vs a bound capture (WU-D), on the oracle's observable projection
 //! (`01-spec.md` Goal 5, acceptance A3).
 //!
-//! Items join by id; when one side's layer is `unresolved` (a capture cannot tell a user skill
-//! from a project one), or the item is named by a file path, they join by kind + name. A listing
-//! entry joins a static skill or command of the same name (Claude Code lists both in the Skill
-//! tool's listing).
+//! Items join by id, else by kind + name. For the kinds a capture names without a reliable layer
+//! ([`layer_free`]: files named by realpath, and skills, commands, subagents, plugins, MCP servers,
+//! MCP instructions, hooks — a capture cannot tell a user skill from a project one, nor a
+//! claude.ai-synced plugin's skill from a marketplace plugin's) the layer is ignored: a candidate
+//! with the same (or an `unresolved`) layer is preferred, any other layer still joins, and the
+//! difference is a tree warning, never a diff. A listing entry joins a static skill or command of
+//! the same name (Claude Code lists both in the Skill tool's listing).
 //!
 //! - **Projection.** Static items whose mode (or an ancestor's) is `runtime`, `none` or
 //!   `on-demand` are expected absent and never counted missing; if the request carries one, it is
 //!   `seen-not-predicted`. Built-in tools removed by the run's launch options
 //!   (`--disallowedTools`, `--tools`) are not expected. Plugins are observable only with an
-//!   `init` event; an MCP server the `init` event reports as not connected (other than
-//!   `disabled`) is a runtime condition, reported as a warning.
+//!   `init` event, which lists every enabled plugin whatever its contributions cost, so a plugin
+//!   row is expected in any mode (the resolver emits enabled plugins only). An MCP server the
+//!   `init` event reports as not connected (other than `disabled`) is a runtime condition,
+//!   reported as a warning.
 //! - **Presence gate** on the statically discoverable kinds ([`gated`]): instruction files,
 //!   memory, skills / commands, subagents, the two listings, MCP servers, plugins, built-in
 //!   tools — `predicted-not-seen` and `seen-not-predicted` both fail.
@@ -26,7 +31,8 @@
 //! - **Per-run values** (git status, environment, date, hook stdout, MCP runtime text, built-in
 //!   prompt) never fail; matched ones are promoted.
 //! - **Promotion**: every matched static item gets `cost.observed`; the tree gets
-//!   `observed_body`, the observed tool-search state, and the over-cap signal.
+//!   `observed_body` with the capture's regions (`observed_regions`), the observed tool-search
+//!   state, and the over-cap signal.
 
 use crate::model::{Cost, Item, Kind, Layer, Mode, RunContext, Tree};
 use crate::oracle::claude::{version_triple, NAME_ONLY};
@@ -107,7 +113,10 @@ fn flatten(items: &[Item]) -> Vec<Node> {
         for (i, item) in items.iter().enumerate() {
             let mut path = prefix.to_vec();
             path.push(i);
-            let absent = absent || matches!(item.mode, Mode::Runtime | Mode::None | Mode::OnDemand);
+            // A plugin's presence is its enable state (the `init` event), not its bytes.
+            let absent = absent
+                || (item.kind != Kind::Plugin
+                    && matches!(item.mode, Mode::Runtime | Mode::None | Mode::OnDemand));
             let (layer, name) = id_parts(&item.id).unwrap_or((item.origin.layer, &item.id));
             out.push(Node {
                 id: item.id.clone(),
@@ -136,6 +145,22 @@ fn id_parts(id: &str) -> Option<(Layer, &str)> {
     let (_agent, _kind, layer, name) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
     let layer = Layer::ALL.iter().copied().find(|l| l.as_str() == layer)?;
     Some((layer, name))
+}
+
+/// Kinds whose static and capture rows join by kind + name with the layer ignored.
+pub fn layer_free(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Instruction
+            | Kind::Memory
+            | Kind::Skill
+            | Kind::Command
+            | Kind::SubAgent
+            | Kind::Plugin
+            | Kind::McpServer
+            | Kind::McpInstructions
+            | Kind::Hook
+    )
 }
 
 fn join_class(kind: Kind) -> Kind {
@@ -234,44 +259,55 @@ pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
             }
         }
     }
+    // (kind, tree layer, capture layer) → the joined static ids, for one warning per pair.
+    let mut relayered: Vec<((Kind, Layer, Layer), Vec<String>)> = Vec::new();
     for (ci, c) in observed.iter().enumerate() {
         if static_of[ci].is_some() {
             continue;
         }
-        let path_named = matches!(c.kind, Kind::Instruction | Kind::Memory);
         let candidates = by_name
             .get(&(join_class(c.kind), c.name.as_str()))
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let free = |si: &&usize| {
-            let s = &statics[**si];
-            capture_of[**si].is_none()
-                && (path_named
-                    || c.layer == s.layer
-                    || c.layer == Layer::Unresolved
-                    || s.layer == Layer::Unresolved)
+        let same_layer = |s: &Node| {
+            c.layer == s.layer || c.layer == Layer::Unresolved || s.layer == Layer::Unresolved
         };
-        let pick = candidates
-            .iter()
-            .filter(free)
-            .find(|si| !statics[**si].absent)
-            .or_else(|| candidates.iter().find(free))
-            .copied();
+        let any_layer = layer_free(c.kind);
+        // Same layer before another layer; within each, an expected row before an absent one.
+        let pick = [(true, true), (true, false), (false, true), (false, false)]
+            .into_iter()
+            .filter(|(same, _)| *same || any_layer)
+            .find_map(|(same, present)| {
+                candidates.iter().copied().find(|&si| {
+                    let s = &statics[si];
+                    capture_of[si].is_none() && (!same || same_layer(s)) && (!present || !s.absent)
+                })
+            });
         if let Some(si) = pick {
             let s = &statics[si];
-            if path_named
-                && s.layer != c.layer
-                && s.layer != Layer::Unresolved
-                && c.layer != Layer::Unresolved
-            {
-                warnings.push(format!(
-                    "{}: layer {} in the tree, {} in the capture",
-                    s.id, s.layer, c.layer
-                ));
+            if !same_layer(s) {
+                let key = (s.kind, s.layer, c.layer);
+                match relayered.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, ids)) => ids.push(s.id.clone()),
+                    None => relayered.push((key, vec![s.id.clone()])),
+                }
             }
             capture_of[si] = Some(ci);
             static_of[ci] = Some(si);
         }
+    }
+    for ((kind, tree_layer, capture_layer), ids) in relayered {
+        warnings.push(match ids.as_slice() {
+            [one] => {
+                format!("{one}: layer {tree_layer} in the tree, {capture_layer} in the capture")
+            }
+            [first, ..] => format!(
+                "{} {kind} rows: layer {tree_layer} in the tree, {capture_layer} in the capture \
+                 (joined by name; e.g. {first})",
+                ids.len()
+            ),
+            [] => unreachable!("a relayered entry holds at least one id"),
+        });
     }
 
     // ---- static side: presence, conformance, promotion ---------------------------------------
@@ -285,7 +321,9 @@ pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
             if s.absent || !gated(s.kind) {
                 continue;
             }
-            if !matches!(s.mode, Mode::Always | Mode::Advertised | Mode::Deferred) {
+            if s.kind != Kind::Plugin
+                && !matches!(s.mode, Mode::Always | Mode::Advertised | Mode::Deferred)
+            {
                 continue;
             }
             if s.kind == Kind::BuiltinTool
@@ -398,8 +436,17 @@ pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
         get_mut(&mut static_tree.items, &path).children.push(item);
     }
     static_tree.observed_body = Some(capture.body_bytes);
+    static_tree.observed_regions = capture
+        .regions
+        .iter()
+        .map(|r| (r.name.clone(), r.bytes))
+        .collect();
     match (static_tree.tool_search, capture.tree.tool_search) {
-        (None, observed) => static_tree.tool_search = observed,
+        (None, Some(observed)) => {
+            static_tree.tool_search = Some(observed);
+            static_tree.tool_search_cause = Some("observed in the bound capture".to_string());
+        }
+        (None, None) => {}
         (Some(a), Some(b)) if a != b => warnings.push(format!(
             "tool search: predicted {}, observed {}",
             if a { "on" } else { "off" },

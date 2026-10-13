@@ -1,103 +1,13 @@
-//! Claude Code resolver against the synthetic `tests/fixtures/zbrain-like` fixture.
-//!
-//! The fixture is copied into a fresh temp dir per test so the resolve is hermetic: the real
-//! ancestors of the harn checkout (and its git root) never enter the instruction chain. At copy
-//! time `@HOME@` / `@PROJECT@` in every `.json` become the canonical temp paths, the
-//! `PROJECT_SLUG` memory dir is renamed to the slug computed from the project path, and a `.git`
-//! dir makes `project/` its own repo root.
+//! Claude Code resolver against the synthetic `tests/fixtures/zbrain-like` fixture (copied per
+//! test by [`common::fixture`]).
 
+mod common;
+
+use common::{fixture, slug, target, Fixture};
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
+use harn::plan;
 use harn::resolve::{ClaudeCode, Resolver};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-struct Fixture {
-    root: PathBuf,
-    home: PathBuf,
-    project: PathBuf,
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-fn slug(path: &Path) -> String {
-    path.display()
-        .to_string()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let src = entry.path();
-        if src.is_dir() {
-            copy_dir(&src, &to.join(&name));
-        } else {
-            std::fs::copy(&src, to.join(&name)).unwrap();
-        }
-    }
-}
-
-fn substitute(dir: &Path, home: &Path, project: &Path) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            substitute(&path, home, project);
-        } else if path.extension().is_some_and(|e| e == "json") {
-            let text = std::fs::read_to_string(&path).unwrap();
-            let text = text
-                .replace("@HOME@", &home.display().to_string())
-                .replace("@PROJECT@", &project.display().to_string());
-            std::fs::write(&path, text).unwrap();
-        }
-    }
-}
-
-fn fixture() -> Fixture {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zbrain-like");
-    let root = std::env::temp_dir().join(format!(
-        "harn-resolve-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    copy_dir(&src, &root);
-    let root = std::fs::canonicalize(&root).unwrap();
-    let home = root.join("home");
-    let project = root.join("project");
-    std::fs::create_dir(project.join(".git")).unwrap();
-    std::fs::rename(
-        home.join(".claude/projects/PROJECT_SLUG"),
-        home.join(".claude/projects").join(slug(&project)),
-    )
-    .unwrap();
-    substitute(&root, &home, &project);
-    Fixture {
-        root,
-        home,
-        project,
-    }
-}
-
-fn target(f: &Fixture) -> Target {
-    Target {
-        dir: f.project.clone(),
-        home: f.home.clone(),
-        env: BTreeMap::new(),
-        model: None,
-        context_window: None,
-        bytes_per_token: None,
-    }
-}
 
 fn resolve(f: &Fixture, overlay: Option<&Overlay>) -> Tree {
     ClaudeCode.resolve(&target(f), overlay).expect("resolve")
@@ -717,4 +627,97 @@ fn builtin_blocks_and_tools() {
         .iter()
         .all(|c| c.label != "WebSearch"));
     assert!(of_kind(&after, Kind::GitBlock).is_empty());
+}
+
+/// Claude Code without the re-resolve shortcut: every freed value comes from an overlay resolve.
+struct ReResolveOnly;
+
+impl Resolver for ReResolveOnly {
+    fn agent(&self) -> model::Agent {
+        ClaudeCode.agent()
+    }
+
+    fn rules_verified_against(&self) -> &'static str {
+        ClaudeCode.rules_verified_against()
+    }
+
+    fn resolve(&self, target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
+        ClaudeCode.resolve(target, overlay)
+    }
+}
+
+#[test]
+fn freed_shortcut_equals_the_re_resolve_for_every_row() {
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+
+    // The shortcut applies to the bare-name tool denies, and its after-tree differs from the
+    // re-resolved one only by rows with no first-request cost.
+    let mut shortcuts = 0;
+    for item in model::walk(&tree) {
+        let Some(knob) = item.knobs.first() else {
+            continue;
+        };
+        let Some(after) = ClaudeCode.after_removal(&tree, item, knob) else {
+            continue;
+        };
+        shortcuts += 1;
+        let overlay = match knob {
+            Knob::Setting {
+                file,
+                pointer,
+                value,
+                ..
+            } => Overlay {
+                ops: vec![OverlayOp::SetJson {
+                    file: file.clone(),
+                    pointer: pointer.clone(),
+                    value: value.clone(),
+                }],
+            },
+            other => panic!("shortcut on a non-setting knob {other:?}"),
+        };
+        let real = resolve(&f, Some(&overlay));
+        let ids = |tree: &Tree| -> Vec<String> {
+            let mut ids: Vec<String> = model::walk(tree)
+                .filter(|i| !i.cost.not_applicable)
+                .map(|i| i.id.clone())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(&after), ids(&real), "{}", item.id);
+        assert_eq!(after.predicted_known, real.predicted_known, "{}", item.id);
+        assert_eq!(after.unknown_rows, real.unknown_rows, "{}", item.id);
+    }
+    assert!(shortcuts >= 20, "{shortcuts} shortcut rows");
+
+    // Every row's freed is the same either way.
+    let mut fast = tree.clone();
+    let mut exact = tree;
+    plan::annotate_freed(&ClaudeCode, &t, &mut fast).unwrap();
+    plan::annotate_freed(&ReResolveOnly, &t, &mut exact).unwrap();
+    let freed = |tree: &Tree| -> Vec<(String, Option<model::Freed>)> {
+        model::walk(tree)
+            .map(|i| (i.id.clone(), i.freed.clone()))
+            .collect()
+    };
+    assert_eq!(freed(&fast), freed(&exact));
+    assert!(model::walk(&fast).filter(|i| i.freed.is_some()).count() > shortcuts);
+    assert_eq!(fast.warnings, exact.warnings);
+}
+
+#[test]
+fn shortcut_refuses_every_knob_but_a_bare_tool_deny() {
+    let f = fixture();
+    let tree = resolve(&f, None);
+    for item in model::walk(&tree) {
+        for knob in &item.knobs {
+            let shortcut = ClaudeCode.after_removal(&tree, item, knob).is_some();
+            let bare_deny = item.kind == Kind::BuiltinTool
+                && matches!(knob, Knob::Setting { pointer, .. } if pointer == "/permissions/deny/-");
+            assert_eq!(shortcut, bare_deny, "{} {knob:?}", item.id);
+        }
+    }
 }

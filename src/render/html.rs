@@ -88,32 +88,11 @@ pub fn html(doc: &Document) -> String {
     out.push(format!(
         "<footer>generated {} by {}</footer>",
         esc(&doc.generated_at),
-        esc(&version_line(doc))
+        esc(&crate::version_line())
     ));
     out.push("</body>".to_string());
     out.push("</html>".to_string());
     out.join("\n")
-}
-
-/// `harn <ver> (<channel> <rev12>) rules: <agent> <verified>` — the `harn --version` shape, from
-/// the same compile-time values `main` uses and the rules versions recorded in each tree.
-fn version_line(doc: &Document) -> String {
-    let channel = option_env!("HARN_BUILD_CHANNEL").unwrap_or("dev");
-    let rev12: String = option_env!("HARN_BUILD_ID")
-        .unwrap_or("unknown")
-        .chars()
-        .take(12)
-        .collect();
-    let rules: Vec<String> = doc
-        .agents
-        .iter()
-        .map(|t| format!("{} {}", t.agent, t.rules_verified_against))
-        .collect();
-    let mut line = format!("harn {} ({channel} {rev12})", env!("CARGO_PKG_VERSION"));
-    if !rules.is_empty() {
-        line.push_str(&format!(" rules: {}", rules.join(", ")));
-    }
-    line
 }
 
 fn section(out: &mut Vec<String>, tree: &Tree, g: &Glyphs) {

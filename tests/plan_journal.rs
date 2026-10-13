@@ -15,7 +15,6 @@ use harn::resolve::Resolver;
 use harn::writers;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -74,7 +73,8 @@ struct Gate {
 struct Fake {
     /// tree.json with the placeholders already replaced.
     spec: String,
-    resolves: Cell<usize>,
+    /// Resolves so far (atomic: `annotate_freed` re-resolves on several threads).
+    resolves: AtomicUsize,
 }
 
 impl Fake {
@@ -185,7 +185,7 @@ impl Resolver for Fake {
     }
 
     fn resolve(&self, target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
-        self.resolves.set(self.resolves.get() + 1);
+        self.resolves.fetch_add(1, Ordering::SeqCst);
         let specs: Vec<Spec> = serde_json::from_str(&self.spec)?;
         let (mut total, mut unknown) = (0, 0);
         let items = specs
@@ -204,6 +204,9 @@ impl Resolver for Fake {
             unknown_rows: unknown,
             observed_body: None,
             warnings: Vec::new(),
+            home: None,
+            observed_regions: Vec::new(),
+            tool_search_cause: None,
         })
     }
 }
@@ -254,7 +257,7 @@ impl Sandbox {
             },
             fake: Fake {
                 spec,
-                resolves: Cell::new(0),
+                resolves: AtomicUsize::new(0),
             },
             root,
             project,
@@ -584,9 +587,13 @@ fn request_merges_every_op_into_one_plan_and_keeps_reasons() {
         op("CLAUDE.md", "project notes are stale"),
         op("plugin:slack:slack", "slack is unused here"),
     ]);
-    let resolves = sb.fake.resolves.get();
+    let resolves = sb.fake.resolves.load(Ordering::SeqCst);
     let plan = plan::build_plan_from_request(&sb.fake, &sb.target, &tree, &req).unwrap();
-    assert_eq!(sb.fake.resolves.get(), resolves + 1, "one after-resolve");
+    assert_eq!(
+        sb.fake.resolves.load(Ordering::SeqCst),
+        resolves + 1,
+        "one after-resolve"
+    );
     assert_eq!(plan.freed.known, 1500 + 250);
     assert_eq!(
         plan.ops
@@ -994,7 +1001,7 @@ fn edit_journals_the_diff_and_undo_restores() {
     let before = read(&path);
     let item = find(&sb.resolve(), &sb.id("rules/a.md")).unwrap().clone();
     let editor = sb.editor("append.sh", "printf 'added by the editor\\n' >> \"$1\"");
-    let entry = journal::edit(&item, &mut sb.journal, &editor).unwrap();
+    let entry = journal::edit(&item, &sb.target, &mut sb.journal, &editor).unwrap();
     assert!(entry
         .diff
         .as_deref()
@@ -1002,6 +1009,8 @@ fn edit_journals_the_diff_and_undo_restores() {
         .contains("+added by the editor"));
     assert!(entry.warnings.is_empty(), "{:?}", entry.warnings);
     assert_eq!(entry.context.capture_kind, journal::KIND_EDIT);
+    // The target the item was resolved for, not the shell's working directory.
+    assert_eq!(entry.context.cwd, sb.target.dir);
     assert_eq!(read(&entry.snapshots[0].file), before);
     journal::undo(&mut sb.journal, 1).unwrap();
     assert_eq!(read(&path), before);
@@ -1012,7 +1021,7 @@ fn edit_that_breaks_json_is_journaled_with_a_warning_not_reverted() {
     let mut sb = Sandbox::new();
     let item = file_item("claude-code/x/local/settings", &sb.local(), Layer::Local);
     let editor = sb.editor("break.sh", "printf '{broken' > \"$1\"");
-    let entry = journal::edit(&item, &mut sb.journal, &editor).unwrap();
+    let entry = journal::edit(&item, &sb.target, &mut sb.journal, &editor).unwrap();
     assert_eq!(read(&sb.local()), "{broken");
     assert!(
         entry
@@ -1031,22 +1040,54 @@ fn edit_refuses_builtin_managed_and_pathless_items_and_skips_no_change() {
     let mut sb = Sandbox::new();
     let path = sb.project.join("CLAUDE.md");
     for layer in [Layer::Builtin, Layer::Managed] {
-        let err =
-            journal::edit(&file_item("x", &path, layer), &mut sb.journal, "true").unwrap_err();
+        let err = journal::edit(
+            &file_item("x", &path, layer),
+            &sb.target,
+            &mut sb.journal,
+            "true",
+        )
+        .unwrap_err();
         refused(&err);
     }
     let mut pathless = file_item("x", &path, Layer::User);
     pathless.origin.path = None;
-    refused(&journal::edit(&pathless, &mut sb.journal, "true").unwrap_err());
+    refused(&journal::edit(&pathless, &sb.target, &mut sb.journal, "true").unwrap_err());
 
     let err = journal::edit(
         &file_item("x", &path, Layer::Project),
+        &sb.target,
         &mut sb.journal,
         "true",
     )
     .unwrap_err();
     assert!(format!("{err:#}").contains("unchanged"), "{err:#}");
     assert!(journal::history(&sb.journal).unwrap().is_empty());
+}
+
+#[test]
+fn why_lists_a_knob_that_serves_two_scopes_once() {
+    // slack: a local and a user knob. `project` falls back to the local knob (narrowest below),
+    // so three scope requests are two plans.
+    let sb = Sandbox::new();
+    let tree = sb.resolve();
+    // The duplicate a plain per-scope loop lists: `project` plans the local file again.
+    let project = plan::build_plan(&sb.fake, &sb.target, &tree, SLACK, Some(Scope::Project));
+    assert_eq!(project.unwrap().ops[0].file, Some(sb.local()));
+    let plans = plan::plans_by_scope(&sb.fake, &sb.target, &tree, SLACK).unwrap();
+    let files: Vec<Option<PathBuf>> = plans.iter().map(|p| p.ops[0].file.clone()).collect();
+    assert_eq!(files, [Some(sb.local()), Some(sb.user())]);
+    // An item with one knob: one plan; with none: no plan, no error.
+    assert_eq!(
+        plan::plans_by_scope(&sb.fake, &sb.target, &tree, HOOK)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        plan::plans_by_scope(&sb.fake, &sb.target, &tree, SYSTEM_PROMPT)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1056,10 +1097,10 @@ fn edit_refuses_builtin_managed_and_pathless_items_and_skips_no_change() {
 fn annotate_freed_fills_local_defaults_and_memoizes_by_overlay() {
     let sb = Sandbox::new();
     let mut tree = sb.resolve();
-    let before = sb.fake.resolves.get();
+    let before = sb.fake.resolves.load(Ordering::SeqCst);
     plan::annotate_freed(&sb.fake, &sb.target, &mut tree).unwrap();
     // CLAUDE.md, hook, foo, and ONE resolve shared by slack and its two skills.
-    assert_eq!(sb.fake.resolves.get() - before, 4);
+    assert_eq!(sb.fake.resolves.load(Ordering::SeqCst) - before, 4);
 
     let freed = |id: &str| find(&tree, id).unwrap().freed.clone();
     assert_eq!(
@@ -1113,11 +1154,14 @@ fn annotate_freed_caps_the_work_on_a_large_tree() {
     }]);
     let fake = Fake {
         spec: spec.to_string(),
-        resolves: Cell::new(0),
+        resolves: AtomicUsize::new(0),
     };
     let mut tree = fake.resolve(&sb.target, None).unwrap();
     plan::annotate_freed(&fake, &sb.target, &mut tree).unwrap();
-    assert_eq!(fake.resolves.get(), 1 + plan::ANNOTATE_CHILDREN_CAP);
+    assert_eq!(
+        fake.resolves.load(Ordering::SeqCst),
+        1 + plan::ANNOTATE_CHILDREN_CAP
+    );
     let annotated = harn::model::walk(&tree)
         .filter(|i| i.freed.is_some())
         .count();

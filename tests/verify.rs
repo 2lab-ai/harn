@@ -396,6 +396,9 @@ fn static_tree(items: Vec<Item>) -> Tree {
         unknown_rows: 0,
         observed_body: None,
         warnings: Vec::new(),
+        home: None,
+        observed_regions: Vec::new(),
+        tool_search_cause: None,
     }
 }
 
@@ -700,6 +703,125 @@ fn verify_without_init_does_not_expect_plugins() {
         .rows
         .iter()
         .any(|(id, _)| id.contains("/plugin/plugin/")));
+}
+
+#[test]
+fn verify_joins_listing_entries_across_layers_with_one_warning_per_layer_pair() {
+    // The capture guesses `plugin` for every `x:y` entry; a claude.ai-synced plugin's skill and a
+    // plugin command the resolver files under `claudeai` are the same names, not misses.
+    let mut skills = skills_with(Vec::new());
+    for s in &mut skills {
+        if s.label == "demo:gamma" {
+            s.origin.layer = Layer::ClaudeAi;
+            s.id = id(Kind::Command, Layer::ClaudeAi, "demo:gamma");
+        }
+    }
+    let mut items = resolved(skills, 138);
+    // A plugin agent under another layer joins the same way.
+    let helper = &mut items[3].children[2];
+    helper.origin.layer = Layer::ClaudeAi;
+    helper.id = id(Kind::SubAgent, Layer::ClaudeAi, "demo:helper");
+    let mut tree = static_tree(items);
+    let report = verify(&mut tree, &run_capture());
+    assert!(report.passed, "{:#?}", report.rows);
+    assert!(report.rows.contains(&(
+        id(Kind::Command, Layer::ClaudeAi, "demo:gamma"),
+        RowVerdict::Seen
+    )));
+    assert_eq!(
+        find(&tree, &id(Kind::SubAgent, Layer::ClaudeAi, "demo:helper"))
+            .cost
+            .observed,
+        Some(43)
+    );
+    assert_eq!(
+        tree.warnings,
+        [
+            format!(
+                "{}: layer claudeai in the tree, plugin in the capture",
+                id(Kind::SubAgent, Layer::ClaudeAi, "demo:helper")
+            ),
+            format!(
+                "{}: layer claudeai in the tree, plugin in the capture",
+                id(Kind::Command, Layer::ClaudeAi, "demo:gamma")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn verify_aggregates_a_repeated_layer_difference_into_one_warning() {
+    // Two synced skills (`claudeai` in the tree) that the capture lists as `plugin` entries.
+    let synced = ["anthropic-skills:one", "anthropic-skills:two"];
+    let extra = synced
+        .iter()
+        .map(|name| item(Kind::Skill, Layer::ClaudeAi, name, Mode::Advertised, None))
+        .collect();
+    let mut tree = static_tree(resolved(skills_with(extra), 138));
+    let mut capture = run_capture();
+    let listing = capture
+        .tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .expect("fixture listing");
+    let template = listing.children[0].clone();
+    for name in synced {
+        let mut entry = template.clone();
+        entry.id = id(Kind::Skill, Layer::Plugin, name);
+        entry.label = name.to_string();
+        entry.origin.layer = Layer::Plugin;
+        listing.children.push(entry);
+    }
+    let report = verify(&mut tree, &capture);
+    assert!(report.passed, "{:#?}", report.rows);
+    assert_eq!(
+        tree.warnings,
+        [format!(
+            "2 skill rows: layer claudeai in the tree, plugin in the capture (joined by name; \
+             e.g. {})",
+            id(Kind::Skill, Layer::ClaudeAi, synced[0])
+        )]
+    );
+}
+
+#[test]
+fn verify_expects_every_enabled_plugin_in_init_whatever_its_mode() {
+    // `demo@market` contributes nothing to the first request (mode none) but is enabled: the
+    // `init` event lists it, so it is seen, not seen-not-predicted.
+    let mut items = resolved(skills_with(Vec::new()), 138);
+    let plugin = items
+        .iter_mut()
+        .find(|i| i.kind == Kind::Plugin)
+        .expect("fixture plugin");
+    plugin.mode = Mode::None;
+    plugin.cost.not_applicable = true;
+    // An enabled plugin the init event does not list is missing, even with mode runtime.
+    items.push(item(
+        Kind::Plugin,
+        Layer::Builtin,
+        "ghost@builtin",
+        Mode::Runtime,
+        None,
+    ));
+    let mut tree = static_tree(items);
+    let report = verify(&mut tree, &run_capture());
+    let failing: Vec<&(String, RowVerdict)> = report
+        .rows
+        .iter()
+        .filter(|(_, v)| *v != RowVerdict::Seen)
+        .collect();
+    assert_eq!(
+        failing,
+        [&(
+            id(Kind::Plugin, Layer::Builtin, "ghost@builtin"),
+            RowVerdict::PredictedNotSeen
+        )]
+    );
+    assert!(report.rows.contains(&(
+        id(Kind::Plugin, Layer::Plugin, "demo@market"),
+        RowVerdict::Seen
+    )));
 }
 
 // ---- receipts on real data (ignored) --------------------------------------------------------------

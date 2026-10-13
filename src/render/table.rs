@@ -45,36 +45,54 @@ struct Ctx<'a> {
     observed_column: bool,
 }
 
+/// The lines [`table`] prints above its rows: title, drift, totals (with the
+/// `observed = attributed + parameters + framing` split when a capture is bound), tool search
+/// with its cause, signals, warnings. `harn verify` prints them after its report.
+pub fn header(tree: &Tree, opts: &RenderOpts) -> String {
+    header_lines(tree, opts, None).join("\n")
+}
+
+fn paint(opts: &RenderOpts, text: String, code: &str) -> String {
+    if opts.color {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text
+    }
+}
+
+/// [`header`]; `sort` (the rows' order) is appended to the totals line.
+fn header_lines(tree: &Tree, opts: &RenderOpts, sort: Option<&str>) -> Vec<String> {
+    let g = glyphs(opts.unicode);
+    let f = facts(tree, g, kb);
+    let mut out = vec![format!("harn {}   {}", tree.target_dir.display(), f.title)];
+    if let Some(drift) = f.drift {
+        out.push(paint(opts, drift, "33"));
+    }
+    out.push(match sort {
+        Some(sort) => format!("{}   {sort}", f.totals),
+        None => f.totals,
+    });
+    for (i, line) in f.tool_search.into_iter().enumerate() {
+        out.push(if i == 0 { line } else { format!("    {line}") });
+    }
+    out.extend(f.signals.into_iter().map(|s| paint(opts, s, "33")));
+    out.extend(f.warnings.into_iter().map(|w| paint(opts, w, "33")));
+    out
+}
+
 /// Header lines (title, drift, totals, tool search, signals, warnings), then rows sorted by
 /// freed.known desc (freed not computed → first-request bytes), children under their container,
 /// Runtime/None rows in a trailing block, then the signal footnotes.
 pub fn table(tree: &Tree, opts: &RenderOpts) -> String {
     let g = glyphs(opts.unicode);
     let width = opts.width.unwrap_or(DEFAULT_WIDTH);
-    let paint = |text: String, code: &str| {
-        if opts.color {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text
-        }
-    };
-
-    let f = facts(tree, g, kb);
+    let paint = |text: String, code: &str| paint(opts, text, code);
     let sort = if freed_computed(tree) {
         format!("sort: freed {}", g.down)
     } else {
         format!("sort: predicted {} (freed not computed)", g.down)
     };
-    let mut out = vec![format!("harn {}   {}", tree.target_dir.display(), f.title)];
-    if let Some(drift) = f.drift {
-        out.push(paint(drift, "33"));
-    }
-    out.push(format!("{}   {sort}", f.totals));
-    for (i, line) in f.tool_search.into_iter().enumerate() {
-        out.push(if i == 0 { line } else { format!("    {line}") });
-    }
-    out.extend(f.signals.into_iter().map(|s| paint(s, "33")));
-    out.extend(f.warnings.into_iter().map(|w| paint(w, "33")));
+    let mut out = header_lines(tree, opts, Some(&sort));
 
     let ctx = Ctx {
         g,

@@ -535,23 +535,188 @@ pub fn escape_token(raw: &str) -> String {
 }
 
 /// `current` (None or blank = `{}`) with every `(pointer, value)` set in order, rendered the way
-/// harn writes JSON: key order preserved, 2-space indent, trailing newline. A file that does not
-/// parse is [`Refused`], never overwritten.
+/// harn writes JSON: key order preserved, 2-space indent, trailing newline. An array of scalars
+/// that the file had on one line stays on one line (`["a", "b"]`), appended entries included, so
+/// the diff shows only the change; every other array and object is multi-line. A file that does
+/// not parse is [`Refused`], never overwritten.
 pub fn patch_json(current: Option<&[u8]>, sets: &[(String, Value)]) -> anyhow::Result<Vec<u8>> {
-    let mut doc = match current {
+    let (mut doc, one_line) = match current {
         Some(bytes) if !bytes.iter().all(u8::is_ascii_whitespace) => {
-            serde_json::from_slice::<Value>(bytes).map_err(|e| {
+            let doc = serde_json::from_slice::<Value>(bytes).map_err(|e| {
                 Refused(format!(
                     "does not parse as JSON ({e}); harn will not rewrite it"
                 ))
-            })?
+            })?;
+            (doc, one_line_arrays(bytes))
         }
-        _ => Value::Object(serde_json::Map::new()),
+        _ => (Value::Object(serde_json::Map::new()), Vec::new()),
     };
     for (pointer, value) in sets {
         set_json_pointer(&mut doc, pointer, value.clone())?;
     }
-    Ok(render_json(&doc))
+    let mut out = String::new();
+    write_json(&mut out, &doc, "", 0, &one_line);
+    out.push('\n');
+    Ok(out.into_bytes())
+}
+
+/// JSON pointers of the arrays written on one line in `source` (no newline between `[` and `]`).
+/// `source` already parsed; anything the scan does not expect yields no pointers (all multi-line).
+fn one_line_arrays(source: &[u8]) -> Vec<String> {
+    struct Scan<'a> {
+        src: &'a [u8],
+        at: usize,
+        path: Vec<String>,
+        found: Vec<String>,
+    }
+    impl Scan<'_> {
+        fn skip_ws(&mut self) {
+            while self.src.get(self.at).is_some_and(u8::is_ascii_whitespace) {
+                self.at += 1;
+            }
+        }
+        fn peek(&mut self) -> Option<u8> {
+            self.skip_ws();
+            self.src.get(self.at).copied()
+        }
+        fn expect(&mut self, byte: u8) -> Option<()> {
+            (self.peek()? == byte).then(|| self.at += 1)
+        }
+        /// The decoded string starting at `at` (on its opening quote).
+        fn string(&mut self) -> Option<String> {
+            let start = self.at;
+            self.at += 1;
+            loop {
+                match *self.src.get(self.at)? {
+                    b'\\' => self.at += 2,
+                    b'"' => break,
+                    _ => self.at += 1,
+                }
+            }
+            self.at += 1;
+            serde_json::from_slice(&self.src[start..self.at]).ok()
+        }
+        fn pointer(&self) -> String {
+            self.path
+                .iter()
+                .map(|t| format!("/{}", escape_token(t)))
+                .collect()
+        }
+        fn value(&mut self) -> Option<()> {
+            match self.peek()? {
+                b'{' => {
+                    self.at += 1;
+                    if self.peek()? == b'}' {
+                        self.at += 1;
+                        return Some(());
+                    }
+                    loop {
+                        if self.peek()? != b'"' {
+                            return None;
+                        }
+                        let key = self.string()?;
+                        self.expect(b':')?;
+                        self.path.push(key);
+                        self.value()?;
+                        self.path.pop();
+                        match self.peek()? {
+                            b',' => self.at += 1,
+                            b'}' => {
+                                self.at += 1;
+                                return Some(());
+                            }
+                            _ => return None,
+                        }
+                    }
+                }
+                b'[' => {
+                    let start = self.at;
+                    self.at += 1;
+                    if self.peek()? != b']' {
+                        let mut index = 0usize;
+                        loop {
+                            self.path.push(index.to_string());
+                            self.value()?;
+                            self.path.pop();
+                            index += 1;
+                            match self.peek()? {
+                                b',' => self.at += 1,
+                                b']' => break,
+                                _ => return None,
+                            }
+                        }
+                    }
+                    self.at += 1;
+                    if !self.src[start..self.at].contains(&b'\n') {
+                        self.found.push(self.pointer());
+                    }
+                    Some(())
+                }
+                b'"' => self.string().map(|_| ()),
+                _ => {
+                    while self.src.get(self.at).is_some_and(|b| {
+                        !matches!(b, b',' | b']' | b'}') && !b.is_ascii_whitespace()
+                    }) {
+                        self.at += 1;
+                    }
+                    Some(())
+                }
+            }
+        }
+    }
+    let mut scan = Scan {
+        src: source,
+        at: 0,
+        path: Vec::new(),
+        found: Vec::new(),
+    };
+    match scan.value() {
+        Some(()) => scan.found,
+        None => Vec::new(),
+    }
+}
+
+/// `serde_json`'s 2-space pretty layout, except that an array of scalars whose pointer is in
+/// `one_line` is written `[a, b]`.
+fn write_json(out: &mut String, value: &Value, pointer: &str, depth: usize, one_line: &[String]) {
+    let indent = |out: &mut String, depth: usize| out.push_str(&"  ".repeat(depth));
+    match value {
+        Value::Object(map) if map.is_empty() => out.push_str("{}"),
+        Value::Object(map) => {
+            out.push_str("{\n");
+            for (i, (key, child)) in map.iter().enumerate() {
+                indent(out, depth + 1);
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push_str(": ");
+                let child_pointer = format!("{pointer}/{}", escape_token(key));
+                write_json(out, child, &child_pointer, depth + 1, one_line);
+                out.push_str(if i + 1 < map.len() { ",\n" } else { "\n" });
+            }
+            indent(out, depth);
+            out.push('}');
+        }
+        Value::Array(items) if items.is_empty() => out.push_str("[]"),
+        Value::Array(items)
+            if one_line.iter().any(|p| p == pointer)
+                && items.iter().all(|v| !v.is_array() && !v.is_object()) =>
+        {
+            let parts: Vec<String> = items.iter().map(Value::to_string).collect();
+            out.push('[');
+            out.push_str(&parts.join(", "));
+            out.push(']');
+        }
+        Value::Array(items) => {
+            out.push_str("[\n");
+            for (i, child) in items.iter().enumerate() {
+                indent(out, depth + 1);
+                write_json(out, child, &format!("{pointer}/{i}"), depth + 1, one_line);
+                out.push_str(if i + 1 < items.len() { ",\n" } else { "\n" });
+            }
+            indent(out, depth);
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
 }
 
 /// 2-space JSON with a trailing newline (`serde_json` pretty printer, `preserve_order`).
@@ -729,6 +894,78 @@ mod tests {
         assert_eq!(blank, b"{\n  \"y\": 1\n}\n");
         let err = patch_json(Some(b"{nope"), &[("/y".into(), json!(1))]).unwrap_err();
         assert!(err.is::<Refused>());
+    }
+
+    #[test]
+    fn patch_json_keeps_one_line_scalar_arrays_on_one_line() {
+        let source = br#"{
+    "enabledMcpjsonServers": ["project-server"],
+    "permissions": {"allow": ["Bash(ls:*)", "Read"], "deny": [
+        "WebSearch"
+    ]},
+    "nums": [1,2],
+    "objs": [{"a": 1}],
+    "k\/ey": ["x"],
+    "empty": []
+}"#;
+        let out = patch_json(
+            Some(source),
+            &[
+                ("/permissions/allow/-".into(), json!("Grep")),
+                ("/permissions/deny/-".into(), json!("Bash")),
+                ("/nums/-".into(), json!({"n": 3})),
+                ("/skillOverrides/s".into(), json!("off")),
+                ("/fresh".into(), json!(["a", "b"])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{
+  "enabledMcpjsonServers": ["project-server"],
+  "permissions": {
+    "allow": ["Bash(ls:*)", "Read", "Grep"],
+    "deny": [
+      "WebSearch",
+      "Bash"
+    ]
+  },
+  "nums": [
+    1,
+    2,
+    {
+      "n": 3
+    }
+  ],
+  "objs": [
+    {
+      "a": 1
+    }
+  ],
+  "k/ey": ["x"],
+  "empty": [],
+  "skillOverrides": {
+    "s": "off"
+  },
+  "fresh": [
+    "a",
+    "b"
+  ]
+}
+"#
+        );
+    }
+
+    #[test]
+    fn patch_json_without_one_line_arrays_is_serde_pretty() {
+        let doc = json!({
+            "a": [1, [2, 3], {"b": []}, "x\"y"],
+            "c": {"d": {}, "e": [null, true, 1.5]},
+            "u": "é/~"
+        });
+        let source = serde_json::to_vec_pretty(&doc).unwrap();
+        let out = patch_json(Some(&source), &[]).unwrap();
+        assert_eq!(out, render_json(&doc));
     }
 
     #[test]
