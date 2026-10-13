@@ -20,7 +20,8 @@ and this file is fixed.
   run the real `claude`/`codex` binaries when present (`research/03` §A, cclint): compare the
   static tree with `stream-json init` / `debug prompt-input` on a fixture directory and fail on any
   presence or content-conformance diff within the oracle's projection; plus `freed` fixtures
-  (listing at cap, plugin side effects, shared items, `@imports`) asserting exact deltas. Gate = `just check` (`cargo fmt --check`, `cargo clippy --all-targets --locked
+  (listing at cap, plugin side effects, shared items, `@imports`), each fixture defining both the
+  before and the after rendering so the assertion is the fixture's own byte difference. Gate = `just check` (`cargo fmt --check`, `cargo clippy --all-targets --locked
   -- -D warnings`, `cargo test --locked`), the llmux justfile shape. Each resolver carries a
   `VERIFIED_AGAINST` version constant; a newer installed agent sets the header drift warning.
 
@@ -37,8 +38,10 @@ src/
     mod.rs           Resolver trait: fn resolve(target: &Target, overlay: Option<&Overlay>) -> Tree
                      Target = canonical dir + env + configured model/window + optional
                      bytes-per-token assumption; Overlay = an ActionPlan applied virtually (for
-                     freed computation). Byte caps applied here; token caps yield `?` (or `~`
-                     under the assumption) until a capture settles them
+                     freed computation). Byte caps applied here; token caps yield `?` for the
+                     state and `Δ?` for any delta (or `~` under the assumption) until captures
+                     settle them — a before-only capture settles the state, only a before/after
+                     pair settles a delta
     claude/          settings layering (managed/user/project/local/--settings), instruction chain
                      + @imports + rules, auto-memory (200-line/25 KB cap), hooks (all events; mode
                      always vs runtime), skills listing (1 % budget cap, 1,536-char cut), agents

@@ -7,7 +7,7 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
 second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
 
-Status: **planned** — v2.4, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v2.5, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity round 1 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -85,10 +85,12 @@ request**. Details and URLs: `research/03`.
 3. **The number that drives decisions is the freed bytes of a concrete action**, not the size of a
    row. `freed(action)` = `predicted(before) − predicted(after)`, computed by re-resolving the tree
    with the action applied as an overlay. This counts a plugin's skills, agents and hooks together
-   with its tools, counts shared items once, respects the agent's caps (a listing at its budget
-   frees ≈ 0 when one entry leaves — the next entry fills the slot), and shows `—` for items with no
-   knob and `?` for items whose cost is unknown. The default sort key is the freed bytes of each
-   row's default action.
+   with its tools, counts shared items once, applies the agent's caps where the cap's unit allows
+   it, and keeps the parts it cannot derive explicit: `—` for items with no knob, `?` for a cost or
+   a delta that is unknown (a token-budgeted listing re-rendered after a removal is not derivable
+   from a before-only capture). A row's freed value is therefore a sum of known parts plus named
+   unknowns, e.g. `77.5 KB + Δ?`, never a single number that hides one. The default sort key is
+   the known part of each row's default action.
 4. **Change the harness reversibly, through the agent's own switch, with an explicit target.**
    Every command takes `--dir` (default: cwd) and prints the canonical target directory in its plan,
    diff and journal entry. Mechanism order: official knob in the narrowest scope (project-local
@@ -189,12 +191,17 @@ until a bound capture turns it into `observed`.
 - **Caps are evaluated by their unit.** Byte-denominated caps (auto-memory 25 KB / 200 lines,
   Codex `project_doc_max_bytes` 32 KiB) are applied statically. Token-denominated caps (Claude
   Code's skill listing at 1 % of the window, Codex skills at 2 % / 10k tokens, Codex hook context
-  at 2,500 tokens) cannot be decided from bytes: statically the cap state is `?` and an entry's
-  freed bytes are shown as a range (`~0 … <entry>`); with `--assume-bytes-per-token N` the state
-  becomes `~` with that assumption printed; a bound capture settles it as `observed` — the
-  listing is at cap when entries appear name-only although their `SKILL.md` carries a description
-  (the documented overflow behavior). On this machine the 2026-10-13 capture shows 146 of 216
-  entries name-only with descriptions on disk, so the zbrain listing is `at cap [observed]`.
+  at 2,500 tokens) cannot be decided from bytes: statically the cap state is `?`; with
+  `--assume-bytes-per-token N` it becomes `~` with that assumption printed; a bound capture settles
+  the **state** as `observed` — the listing is at cap when entries appear name-only although their
+  `SKILL.md` carries a description (the documented overflow behavior). On this machine the
+  2026-10-13 capture shows 146 of 216 entries name-only with descriptions on disk, so the zbrain
+  listing is `at cap [observed]`. The cap state does **not** give the delta of a change: which
+  descriptions return after an entry leaves, at what byte length, and whether the listing is still
+  at cap are properties of the re-rendered listing, which a before-only capture does not contain.
+  The listing delta of any action is therefore `Δ?` until (a) a before/after pair of captures
+  exists for that action (`observed` delta), or (b) the user supplies a bytes-per-token assumption
+  (`~` delta). The same rule applies to every token-budgeted container.
 - **`harn verify` = the agent's own oracles**, bound to a `RunContext`. Claude Code: one headless
   run with `OTEL_LOG_RAW_API_BODIES=file:<tmp>` (full request body + `index.jsonl`) and
   `--output-format stream-json --verbose` (`system/init` with `tools`, `mcp_servers[{name,status,
@@ -253,10 +260,12 @@ lazygit, k9s) and are fixed in the P1 drive, not here.
 ### First screen — zbrain on the author's machine
 
 A mockup: every number is an `observed` byte count from the 2026-10-13 capture (`research/04`),
-drawn into the table layout; the header says `observed`, and `share` = the row's observed bytes
-over the observed body (332,548 B). Rows that bundle side effects (CLAUDE.md with its `@imports`,
-atlassian with its instructions) repeat bytes that other rows also carry, so the `freed` column
-does not sum to the body — only the attributed partition in §Problem does. A
+drawn into the table layout: the `observed` column and the header are measured, the `freed`
+column is **predicted** from those measurements by the ActionPlan rule and carries `Δ?` where a
+token-budgeted re-render is involved. `share` = the row's observed bytes over the observed body
+(332,548 B). Rows that bundle side effects (CLAUDE.md with its `@imports`, atlassian with its
+instructions) repeat bytes that other rows also carry, so `freed` does not sum to the body — only
+the attributed partition in §Problem does. A
 real static first run has no capture: its header reads `predicted <sum of known rows> + ? (N rows
 unknown)`, the MCP schema rows and the hook row show `?`, and `share` is computed over the known
 sum only.
@@ -267,8 +276,8 @@ first request: observed 332.5 KB (capture 2026-10-13) = attributed 322.6 + param
 tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eager, 142.3 KB
     knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]       freed: ?
 
-  freed     observed   share  item                              origin                    mode        default action
-  77.5 KB    77.5 KB   23.3%  mcp plugin:slack · 27 tools       plugin slack@official     always      enabledPlugins → false (local) · its 8 skills leave the listing, which is at cap → ≈0 there
+  freed(pred) observed share  item                              origin                    mode        default action
+  77.5 KB+Δ? 77.5 KB   23.3%  mcp plugin:slack · 27 tools       plugin slack@official     always      enabledPlugins → false (local) · its 8 skills leave the listing (at cap; re-render Δ unknown)
   67.3 KB    64.7 KB   19.5%  mcp plugin:atlassian · 21 tools   plugin atlassian@official always      enabledPlugins → false (local) · +2.6 KB instructions
   23.4 KB    23.4 KB    7.1%  MEMORY.md · 150 lines / 25 KB cap ~/.claude/projects/…/memory always      autoMemoryEnabled → false
   20.5 KB     6.8 KB    2.1%  CLAUDE.md (+ 2 @imports)          project                   always      claudeMdExcludes · DEV.md 9.4 KB + PRINCIPLES.md 4.3 KB leave with it
@@ -279,7 +288,7 @@ tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eage
    2.0 KB     2.0 KB    0.6%  Advisor tool text                 builtin                   always      CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1
    0.7 KB     0.7 KB    0.2%  ~/.claude/CLAUDE.md               user                      always      claudeMdExcludes
       ?      17.1 KB    5.1%  agent roster · 31                 project 10 · user 2 · plugins 16 · builtin 3   advertised   per plugin: enabledPlugins; per agent: permissions.deny Agent(x) [roster effect unmeasured]
-   ~0 KB     31.2 KB    9.4%  skill listing · 216 · at cap[i]   user 22 · project 63 · plugins 131   advertised   skillOverrides / enabledPlugins — one entry out frees ≈ 0 while over budget
+      Δ?    31.2 KB    9.4%  skill listing · 216 · at cap[i]   user 22 · project 63 · plugins 131   advertised   skillOverrides / enabledPlugins — the re-rendered listing after a removal is not derivable here
   partial    68.4 KB   20.6%  built-in tools · 26               builtin                   always      --disallowedTools <tool> (per tool; which tools are irremovable is undocumented → ?)
       —       6.1 KB    1.8%  system prompt · 3 blocks          builtin                   always      none (built-in)
       —       0.0 KB         your instruction (2 B)             you                       —           —
@@ -288,7 +297,8 @@ tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eage
       —          —            permissions.allow · 10 rules      .claude/settings.local.json none      —
       —          —            statusLine                        ~/.claude/settings.json   none        —
   [i] at cap [observed 2026-10-13]: 146 of 216 entries are name-only although their SKILL.md has a description
-      (documented overflow behavior). A static run without a capture shows `?` here and a range for freed.
+      (documented overflow behavior). The state is observed; the delta of removing an entry is not — `Δ?` until a
+      before/after pair exists or a bytes-per-token assumption is given. A static run without a capture shows `?` for both.
 ```
 
 ### Detail pane — `harn why plugin:slack`
@@ -303,9 +313,9 @@ plugin:slack:slack   (claude-code/mcp-server/plugin/plugin:slack:slack)        t
     also contributes: 8 skills (advertised, 1.1 KB in the listing) · 0 agents · 0 hooks
   last used   3 of the last 20 sessions in this directory (session jsonl, 14 d)
   actions                                                                    freed (predicted)
-    [1] .claude/settings.local.json   enabledPlugins[…] = false   this project   ← default   77.5 KB (+ listing ≈0: at cap)
-    [2] ~/.claude/settings.json       enabledPlugins[…] = false   every project  (--scope user) 77.5 KB (+ listing ≈0: at cap)
-    [3] ~/.claude.json projects[cwd].disabledMcpServers += "plugin:slack:slack"  server only   77.5 KB
+    [1] .claude/settings.local.json   enabledPlugins[…] = false   this project   ← default   77.5 KB schemas + listing Δ? (8 entries leave a listing at cap)
+    [2] ~/.claude/settings.json       enabledPlugins[…] = false   every project  (--scope user) 77.5 KB schemas + listing Δ?
+    [3] ~/.claude.json projects[cwd].disabledMcpServers += "plugin:slack:slack"  server only   77.5 KB (listing unchanged)
         the 8 skills stay advertised
   warnings  .claude/settings.local.json is git-ignored here (no tracked file changes)
             [3] edits ~/.claude.json, which Claude Code also writes — apply with no claude running
@@ -364,7 +374,7 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A1 | `harn --dir ~/2lab.ai/zbrain --json --agent claude-code` | every statically discoverable name in that session's `init` event (`skills`, `agents`, `plugins`, `mcp_servers` with `source`) appears exactly once in the tree with the same `source`; MCP tool names and hook stdout are `?` rows, not omissions; no session was started (no new file under `~/.claude/projects/<slug>/`, no child process) |
 | A2 | `harn ~/2lab.ai/zbrain` (and the same with `--dir`) | one table per agent, sorted by freed; every row has origin + mode + cost tag + default action; the header names the cost tag, the attributed/framing split and the tool-search state; runtime < 1 s on both machines |
 | A3 | `harn verify --run --dir ~/2lab.ai/zbrain --agent claude-code` | prints what it will execute, makes one headless run; within the Claude Code projection (modes `runtime`/`none` excluded, capture-only children attached under their `?` parent) the report lists 0 `predicted-not-seen` and 0 `seen-not-predicted` **among statically discoverable ids (the A1 set)** and 0 content-conformance failures on reproducible static contributions; `?` rows become `observed`; the header switches to `observed` for the matched regions only |
-| A3b | `just check` | the fixture suite includes before/after `freed` cases: a listing at cap (an entry leaves, the next fills the slot → ≈0), a plugin whose skills leave with it, an item shared by two origins (counted once), and an excluded `CLAUDE.md` taking its `@imports` along — each asserting the exact predicted delta |
+| A3b | `just check` | the fixture suite includes before/after `freed` cases, each fixture defining **both** renderings (before and after) so the assertion is against the fixture's actual byte difference and never against a rule such as "at cap → 0": a token-budgeted listing (asserts `Δ?` statically and the exact delta when the fixture supplies the after-listing), a plugin whose skills leave with it, an item shared by two origins (counted once), and an excluded `CLAUDE.md` taking its `@imports` along |
 | A4 | `harn off plugin:slack --dir ~/2lab.ai/zbrain` then `claude -p hi --output-format stream-json --verbose` in that directory | the plan showed target dir, diff, freed and side effects; `.claude/settings.local.json` gained `enabledPlugins["slack@claude-plugins-official"]: false`; the new `init` event lists no `plugin:slack:slack` and none of its 8 skills; `harn history` shows the op with its `RunContext`; `harn undo` restores the file byte-for-byte |
 | A5 | `harn off <item>` on an item with no knob | `builtin` → refused with the reason; a project skill dir → moved to `.claude/harn-off/skills/<name>` with a manifest, the next `init` does not list it, `harn undo` moves it back; `--scope` was never widened silently |
 | A6 | `harn edit rules/DEV.md --dir ~/2lab.ai/zbrain` | `$EDITOR` opened the realpath; on exit the diff was printed and journaled; `harn undo` restores the previous bytes |
@@ -425,6 +435,11 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v2.5 (2026-10-13, trinity round 3, second verdict)** — cap *state* and change *delta*
+  separated: a token-budgeted listing's delta is `Δ?` until a before/after pair or a declared
+  bytes-per-token assumption exists; the `freed` column is labelled predicted and shows
+  `known + Δ?`; slack = `77.5 KB + Δ?`; A3b fixtures assert the fixture's own before/after bytes,
+  never a cap rule.
 - **v2.4 (2026-10-13, trinity round 3)** — mockup header partition aligned with the measured
   table (322.6 + 7.8 + 2.1); caption states the `share` denominator and why `freed` rows do not
   sum; `verify --capture` output lists `content-mismatch` and exits 1 on it.
