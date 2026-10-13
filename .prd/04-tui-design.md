@@ -1,6 +1,6 @@
 # 04 — The interactive view: information design
 
-Status: planned — 2026-10-13. Written after the user read the first TUI (frames in zbrain
+Status: in-progress — 2026-10-13 (first rebuild captured and read; six fixes in round 2). Written after the user read the first TUI (frames in zbrain
 `workflow/2lab-ai/harn/receipts-2026-10-13/tui-80x24/`) and called it unreadable. He was right:
 that screen was the CLI table, the `why` text and the `apply` dump placed inside ratatui boxes.
 This document is the screen, not the data model (the model stays `01-spec.md` §The model).
@@ -74,6 +74,31 @@ Rules that produce it:
 - **Key bar in words**, only the keys valid now. `d turn off` (not `off`), `u undo`, `→← open/close`.
 - **Footer honesty**: `345 items · 5 shown · filter: none` only when a filter or fold hides rows
   that would otherwise be visible; otherwise no footer (the panel is the footer).
+
+## Rules fixed after reading the first rebuild's frames (2026-10-13 19:1x)
+
+- **Shares partition.** A row's number is its OWN bytes; skill- and agent-listing entries are
+  counted once, under the listing groups. Group bytes = sum of rows; group shares sum to ≤ 100%.
+  What turning a row off frees is a sentence in the detail panel and the `d` card: "frees 32 KB:
+  4 KB of its own plus 28 KB of its entries in the skill and agent listings" (nix-tree's two sizes).
+- **Groups are ordered by bytes, descending**; groups without a size follow; Built-in is last.
+- **An unknown size reads `unmeasured`**, never a bare `?`; the notes card says how to measure.
+- **Counting.** "N items load before your first message" counts items that are always loaded or
+  advertised (312 on zbrain); runtime / not-loaded items (33) are listed in their groups with the
+  words `runs later` / `not loaded` / `when used` instead of a size.
+- **Agent listing** is a group of its own (31 entries, 15 KB on zbrain); the catch-all `Other`
+  exists but is empty on known trees; status-line and permission rules are never shown (they are
+  never in the request).
+- **Built-in** rows that have a switch (gitStatus → `includeGitInstructions`, attribution,
+  built-in tools → `permissions.deny`) keep `d`; the group line says `mostly cannot be turned off`.
+- **A message line** (refusal, `undone: …`) takes the panel's first line and drops whole sentences
+  from the end of the detail; a sentence is never cut with `…`.
+- **80-column adaptations** of the mockups: the version drops from the title (shown at 120), the
+  `biggest:` line keeps what fits, the key bar tightens gaps before dropping keys, the plugin
+  "what" line drops the version, the footer rule appears only when lines are hidden and never
+  says `filter: none`.
+- **Readonly**: write keys are greyed (attributes do not survive `capture-pane -p`); pressing one
+  shows `readonly: d would change files; harn was started with --readonly` on the message line.
 
 ## 80×24 — group opened, cursor on a plugin
 
