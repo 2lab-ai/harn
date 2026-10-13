@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; CLI only — no TUI; a GUI only as a read-only view.
 
-Status: **in-progress** — v3.2, 2026-10-13 (P0 implementation under way; receipts in `p0-claude-code/`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **shipped (P0, Claude Code chain)** — v3.3, 2026-10-13 (P0.5 Codex resolver and P1 remain planned; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -291,6 +291,11 @@ repo (`.claude/skills/harn-trim/SKILL.md`) packages that loop so `/harn-trim` do
 the skill is text, the contract is the CLI. The human looks at `harn report --html` before and
 after. No TUI is planned; the former TUI section was removed on the user's direction.
 
+Carried over from the P0 drive (`p0-claude-code/loop.md` G3, G7), both P1:
+- pointer-level undo for `harn on` — today `on A` after `off A; off B` on the same file reports
+  `Stale` because snapshots are whole-file (test `on_of_an_older_entry_sharing_a_file_is_stale`);
+- a join rule between a configured hook and its stdout in a capture, so hook rows can leave `?`.
+
 ### First screen — zbrain on the author's machine
 
 A mockup: every number is an `observed` byte count from the 2026-10-13 capture (`research/04`),
@@ -423,6 +428,11 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
 | A13 | `harn report --dir ~/2lab.ai/zbrain --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
 
+**P0 receipt (2026-10-13):** every P0 gate row observed on macOS (release build, zbrain) and A1/A2/A9
+on cachy-z13; A5's quarantine half is unreachable while every emitted item has a knob. Per-row
+summary in [`p0-claude-code/loop.done.md`](p0-claude-code/loop.done.md); raw command output stays
+in the private control-plane repo. A7–A8 (Codex) not run — P0.5.
+
 ## Tensions
 
 - **"llmux can edit the built-in prompt" (user's statement) vs llmux as shipped.** llmux records
@@ -464,6 +474,10 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.3 (2026-10-13, P0 shipped)** — Status flipped to shipped for the Claude Code chain: P0 gate
+  rows A1–A6, A9–A13 observed (A4 run for real on zbrain: one knob, fresh `init` without the
+  plugin, `undo` byte-identical); P1 carry-overs G3/G7 recorded; A3's observed header and the
+  OVER CAP signal are the 2026-10-13 capture's numbers (144 of 216 descriptions dropped).
 - **v2.1 (2026-10-13, trinity round 1)** — effective list separated from first-request cost (modes
   `runtime`/`none`, cost tags `source`/`predicted`/`observed`/`?`/`—`); `freed` redefined as the
   before/after delta of an `ActionPlan` with caps, shared items and side effects; the user's

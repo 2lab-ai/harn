@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **planned** — v1.4, 2026-10-13 (revised on trinity rounds 1–4; user direction: no TUI, AI operator). Boundaries for the first
+Status: **shipped (P0)** — v1.5, 2026-10-13 (modules as built on `main`; P0.5 Codex resolver still planned). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 

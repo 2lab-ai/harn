@@ -1,6 +1,6 @@
 # 03 — P0 interfaces (Rust)
 
-Status: planned — 2026-10-13. The contract between the P0 work units. Owned by the drive; a WU
+Status: shipped — 2026-10-13 (P0 landed on `main`; the amendments below are the contract as built). Owned by the drive; a WU
 that needs a change reports it, the dispatcher edits here and re-dispatches. Everything is
 `serde::{Serialize, Deserialize}` unless noted. Crate name `harn`, edition 2021, `src/lib.rs`
 re-exports `model`, `resolve`, `render`, `oracle`, `verify`, `plan`, `writers`, `journal`.
