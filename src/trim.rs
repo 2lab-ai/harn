@@ -229,20 +229,25 @@ impl ScratchDir {
     }
 }
 
-/// The first candidate (canonicalized) that is not inside `target_dir`: the agent's cwd and its
-/// ancestors must not be the target or under it, or the agent would load the target's own
-/// CLAUDE.md, hooks and MCP servers into the planning request.
+/// The first candidate (canonicalized) outside the target's [`project_root`]: the agent's cwd
+/// must not be in the target's project, or the agent would load the target's own CLAUDE.md,
+/// hooks and MCP servers into the planning request. The error names the excluded root.
 fn scratch_base(target_dir: &Path, candidates: &[PathBuf]) -> anyhow::Result<PathBuf> {
+    let root = project_root(target_dir);
     candidates
         .iter()
         .filter_map(|dir| std::fs::canonicalize(dir).ok())
-        .find(|dir| !dir.starts_with(target_dir))
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot find a scratch directory outside {}",
-                target_dir.display()
-            )
-        })
+        .find(|dir| !dir.starts_with(root))
+        .ok_or_else(|| anyhow!("cannot find a scratch directory outside {}", root.display()))
+}
+
+/// The nearest ancestor of `target_dir` (itself included) holding a `.git` (dir, file or
+/// symlink); `target_dir` when there is none.
+fn project_root(target_dir: &Path) -> &Path {
+    target_dir
+        .ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .unwrap_or(target_dir)
 }
 
 impl Drop for ScratchDir {
@@ -524,11 +529,17 @@ mod tests {
         let target = root.join("project");
         let inside = target.join("tmp");
         let outside = root.join("elsewhere");
-        for dir in [&inside, &outside] {
+        // A repo whose root is above the target, with a sibling of the target inside it.
+        let repo = root.join("repo");
+        let nested = repo.join("sub/project");
+        let sibling = repo.join("tmp");
+        for dir in [&inside, &outside, &repo.join(".git"), &nested, &sibling] {
             std::fs::create_dir_all(dir).unwrap();
         }
         let target = std::fs::canonicalize(&target).unwrap();
         let outside = std::fs::canonicalize(&outside).unwrap();
+        let repo = std::fs::canonicalize(&repo).unwrap();
+        let nested = std::fs::canonicalize(&nested).unwrap();
         // The first candidate is inside the target: the next one is used.
         assert_eq!(
             scratch_base(&target, &[inside.clone(), outside.clone()]).unwrap(),
@@ -545,6 +556,23 @@ mod tests {
                 target.display()
             )
         );
+        // In a repo: the project root is the nearest `.git` above the target, so a sibling of
+        // the target inside the repo is rejected and a dir outside the repo is used.
+        assert_eq!(project_root(&nested), repo);
+        assert_eq!(
+            scratch_base(&nested, &[sibling.clone(), outside.clone()]).unwrap(),
+            outside
+        );
+        let err = scratch_base(&nested, &[sibling, repo.clone()])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            format!("cannot find a scratch directory outside {}", repo.display())
+        );
+        // A `.git` file (a linked worktree) marks a root too.
+        std::fs::write(nested.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert_eq!(project_root(&nested), nested);
         // A target that contains everything leaves no candidate.
         assert!(scratch_base(Path::new("/"), &[outside]).is_err());
         std::fs::remove_dir_all(&root).unwrap();

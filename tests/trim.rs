@@ -517,6 +517,39 @@ fn trim_keeps_the_agent_out_of_the_target_when_tmpdir_is_inside_it() {
 }
 
 #[test]
+fn trim_keeps_the_agent_out_of_the_enclosing_repo_when_tmpdir_is_a_sibling() {
+    let f = fixture();
+    let cmd = agent(&f, &claude_reply(&turn_off_plugin(&f)));
+    // The project is a plain subdirectory of a repo rooted at the fixture copy, and TMPDIR is
+    // the project's sibling inside that repo.
+    std::fs::remove_dir(f.project.join(".git")).unwrap();
+    std::fs::create_dir(f.root.join(".git")).unwrap();
+    let tmpdir = f.root.join("tmp");
+    std::fs::create_dir(&tmpdir).unwrap();
+
+    let out = harn_cmd(
+        &f,
+        &[("TMPDIR", &tmpdir)],
+        &["trim", "--dry-run", "--agent-cmd", &cmd],
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let cwd = agent_cwd(&f);
+    assert!(!cwd.starts_with(&f.root), "{}", cwd.display());
+    assert!(
+        cwd.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("harn-trim-"),
+        "{}",
+        cwd.display()
+    );
+    assert!(!cwd.exists(), "{} left behind", cwd.display());
+    assert_eq!(std::fs::read_dir(&tmpdir).unwrap().count(), 0);
+}
+
+#[test]
 fn trim_decodes_an_escaped_schema_and_an_empty_plan_is_nothing() {
     let f = fixture();
     // Raw stdout, the slash escaped: the text never contains `harn-plan/1` literally.
