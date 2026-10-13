@@ -130,7 +130,7 @@ fn push_list(out: &mut Vec<String>, title: &str, items: &[String]) {
 }
 
 /// One line per entry, newest first: id, applied_at, its `RunContext` (agent, version, cwd),
-/// op count, and each op's item with its reason.
+/// op count, and each op's item with its reason; an undone entry ends with `undone <undone_at>`.
 pub fn history(entries: &[JournalEntry]) -> String {
     if entries.is_empty() {
         return "no journal entries".to_string();
@@ -155,8 +155,12 @@ pub fn history(entries: &[JournalEntry]) -> String {
                 })
                 .collect();
             let noun = if entry.ops.len() == 1 { "op" } else { "ops" };
+            let undone = match &entry.undone_at {
+                Some(at) => format!("  undone {at}"),
+                None => String::new(),
+            };
             format!(
-                "{}  {}  {} {} {} {}  {} {noun}: {}",
+                "{}  {}  {} {} {} {}  {} {noun}: {}{undone}",
                 entry.id,
                 entry.applied_at,
                 ctx.agent,
