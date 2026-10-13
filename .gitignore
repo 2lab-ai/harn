@@ -2,3 +2,6 @@ target/
 .worktrees/
 *.tar.gz
 .DS_Store
+# fixtures must carry their settings.local.json despite any global ignore
+!tests/fixtures/**/.claude/settings.local.json
+!tests/fixtures/**/.claude.json
