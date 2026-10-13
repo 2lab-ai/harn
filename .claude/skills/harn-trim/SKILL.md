@@ -24,9 +24,9 @@ journaled and reversible. Never edit the agent's settings files by hand — only
 4. **Dry-run, then apply.** `harn apply plan.json --dry-run` prints the diff, freed and side
    effects; read the side effects (a plugin takes its skills, agents and hooks with it). If they
    are acceptable, `harn apply plan.json`.
-5. **Verify.** `harn verify --run` (one headless session of the agent) or `harn` again to see the
-   predicted totals; report before → after to the human with the journal id, and the one line
-   that undoes everything: `harn undo`.
+5. **Verify.** `harn verify --run` (one headless session of the agent) or `harn --table` again to
+   see the predicted totals; report before → after to the human with the journal id, and the one
+   line that undoes everything: `harn undo`.
 
 ## Rules
 
