@@ -7,7 +7,7 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
 second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
 
-Status: **planned** — v2.8, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v2.9, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -279,8 +279,9 @@ drawn into the table layout: the `observed` column and the header are measured, 
 column is **predicted** from those measurements by the ActionPlan rule and carries `Δ?` where a
 token-budgeted re-render is involved. `share` = the row's observed bytes over the observed body
 (332,548 B). Rows that bundle side effects (CLAUDE.md with its `@imports`, atlassian with its
-instructions) repeat bytes that other rows also carry, so `freed` does not sum to the body — only
-the attributed partition in §Problem does. A
+instructions, a plugin with the listing entries that leave with it) repeat bytes or unknowns that
+other rows also carry — the slack row's `+Δ?` and the listing row's `Δ?` are the same unknown, not
+two — so `freed` does not sum to the body; only the attributed partition in §Problem does. A
 real static first run has no capture: its header reads `predicted <sum of known rows> + ? (N rows
 unknown)`, the MCP schema rows and the hook row show `?`, and `share` is computed over the known
 sum only.
@@ -452,6 +453,8 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v2.9 (2026-10-13, trinity round 4, last item)** — caption names the listing among the
+  bundled rows and states that a plugin row's `+Δ?` and the listing row's `Δ?` are one unknown.
 - **v2.8 (2026-10-13, trinity round 4, nits)** — `Δ?` added to the model vocabulary; status
   lines name rounds 1–4.
 - **v2.7 (2026-10-13, trinity round 4)** — the over-cap default action corrected: no bulk
