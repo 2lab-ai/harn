@@ -7,7 +7,7 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
 second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
 
-Status: **planned** — v2.5, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v2.6, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity round 1 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -90,7 +90,13 @@ request**. Details and URLs: `research/03`.
    a delta that is unknown (a token-budgeted listing re-rendered after a removal is not derivable
    from a before-only capture). A row's freed value is therefore a sum of known parts plus named
    unknowns, e.g. `77.5 KB + Δ?`, never a single number that hides one. The default sort key is
-   the known part of each row's default action.
+   the known part of each row's default action. Bytes are not the only loss a harness suffers:
+   a token-budgeted listing that is over its cap drops descriptions, and an advertised skill
+   without its description is invisible to description-based routing. That loss has no byte
+   value and would sink to the bottom of a byte sort, so every over-cap container carries a
+   **signal** (`over cap: N of M descriptions dropped`) shown in the header and as a row badge,
+   with a default action that returns the listing under its cap (`skillOverrides` the N
+   least-used entries to `name-only` or `off`). On this machine that signal reads `146 of 216`.
 4. **Change the harness reversibly, through the agent's own switch, with an explicit target.**
    Every command takes `--dir` (default: cwd) and prints the canonical target directory in its plan,
    diff and journal entry. Mechanism order: official knob in the narrowest scope (project-local
@@ -226,8 +232,9 @@ until a bound capture turns it into `observed`.
 
 ### P0 — CLI (ships first; Claude Code chain complete)
 
-Every command takes the target directory as `--dir <path>`; the listing commands also accept it as
-the positional `[DIR]` the user's statement uses (`harn ~/2lab.ai/zbrain`). Both normalize to the
+Every command takes the target directory as `--dir <path>`; the listing commands — `harn [DIR]`,
+`harn --json [DIR]`, `harn tui [DIR]` — also accept it as the positional `[DIR]` the user's
+statement uses (`harn ~/2lab.ai/zbrain`). Both normalize to the
 same canonical target; giving both is a usage error. Default: cwd. `--agent claude-code|codex`
 selects one agent (default: all, one table each).
 
@@ -275,6 +282,8 @@ harn ~/2lab.ai/zbrain                                     claude-code 2.1.296 (r
 first request: observed 332.5 KB (capture 2026-10-13) = attributed 322.6 + parameters 7.8 + framing 2.1   sort: freed ▼
 tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eager, 142.3 KB
     knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]       freed: ?
+skill listing: OVER CAP — 146 of 216 descriptions dropped (observed); those skills cannot be routed by description
+    default action: skillOverrides → name-only/off for the 146 least-used (session logs)      freed: Δ?
 
   freed(pred) observed share  item                              origin                    mode        default action
   77.5 KB+Δ? 77.5 KB   23.3%  mcp plugin:slack · 27 tools       plugin slack@official     always      enabledPlugins → false (local) · its 8 skills leave the listing (at cap; re-render Δ unknown)
@@ -288,7 +297,7 @@ tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eage
    2.0 KB     2.0 KB    0.6%  Advisor tool text                 builtin                   always      CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1
    0.7 KB     0.7 KB    0.2%  ~/.claude/CLAUDE.md               user                      always      claudeMdExcludes
       ?      17.1 KB    5.1%  agent roster · 31                 project 10 · user 2 · plugins 16 · builtin 3   advertised   per plugin: enabledPlugins; per agent: permissions.deny Agent(x) [roster effect unmeasured]
-      Δ?    31.2 KB    9.4%  skill listing · 216 · at cap[i]   user 22 · project 63 · plugins 131   advertised   skillOverrides / enabledPlugins — the re-rendered listing after a removal is not derivable here
+      Δ?    31.2 KB    9.4%  skill listing · 216 · OVER CAP[i] user 22 · project 63 · plugins 131   advertised   prune 146 least-used to name-only/off (skillOverrides) → descriptions return; byte Δ?
   partial    68.4 KB   20.6%  built-in tools · 26               builtin                   always      --disallowedTools <tool> (per tool; which tools are irremovable is undocumented → ?)
       —       6.1 KB    1.8%  system prompt · 3 blocks          builtin                   always      none (built-in)
       —       0.0 KB         your instruction (2 B)             you                       —           —
@@ -435,6 +444,10 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v2.6 (2026-10-13, trinity round 3, third verdict)** — over-cap **signal** (`N of M
+  descriptions dropped`) in the header and as a row badge with a prune-to-fit default action, so
+  a routing loss with no byte value is not buried by the byte sort; the positional-`[DIR]`
+  commands enumerated.
 - **v2.5 (2026-10-13, trinity round 3, second verdict)** — cap *state* and change *delta*
   separated: a token-budgeted listing's delta is `Δ?` until a before/after pair or a declared
   bytes-per-token assumption exists; the `freed` column is labelled predicted and shows
