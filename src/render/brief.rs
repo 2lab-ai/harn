@@ -7,8 +7,8 @@
 //! per parent instead of listed per child.
 
 use super::common::{
-    cost_cell, facts, freed_cell, has_action, knob_compact, partition, plain, sorted, CostCell,
-    Glyphs, UNICODE,
+    cost_cell, facts, freed_cell, has_action, knob_compact, partition, plain, sorted, step_text,
+    CostCell, Glyphs, UNICODE,
 };
 use crate::model::{Document, Item, Knob, Scope, Tree};
 use crate::plan::{PlanOp, PlanRequest, PLAN_SCHEMA};
@@ -227,6 +227,8 @@ fn why_cell(item: &Item, paths: &Paths) -> String {
     let Some(step) = item.origin.why.last() else {
         return String::new();
     };
+    // A string setting as its text, as every surface shows it.
+    let step = &step_text(step);
     let name = item.id.splitn(4, '/').nth(3).unwrap_or_default();
     let own_file = item
         .origin

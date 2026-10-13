@@ -10,11 +10,12 @@
 //! `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`; attribution reminder → `attribution: {commit: "", pr:
 //! ""}`; a tool → a bare `permissions.deny` entry (removes it from context) or its
 //! `CLAUDE_CODE_DISABLE_*` variable; prompt / environment / date / userEmail → none. Output style
-//! (`outputStyle`), `statusLine` (mode none: runs locally) and permission rule lists (mode none)
-//! come from the merged settings.
+//! (`outputStyle`), `statusLine` (mode none: runs locally; `disableAllHooks` stops it, said in its
+//! `signal`) and permission rule lists (mode none) come from the merged settings.
 
 use super::fs::file_name;
-use super::{cost_na, env_knob, frontmatter, new_item, setting_knob, Ctx};
+use super::hooks::OFF_ALL_HOOKS;
+use super::{cost_na, env_knob, frontmatter, json_string, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use serde_json::{json, Value};
 
@@ -232,7 +233,7 @@ pub(crate) fn blocks(ctx: &Ctx) -> Vec<Item> {
                 Kind::BuiltinTool,
                 "advisor",
                 "advisor",
-                &format!("{} = {model}", file.at("/advisorModel")),
+                &format!("{} = {}", file.at("/advisorModel"), json_string(model)),
                 vec![env_knob(
                     "CLAUDE_CODE_DISABLE_ADVISOR_TOOL",
                     "1",
@@ -257,7 +258,7 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
                 &format!("output style: {style}"),
             );
             item.origin.setting = Some(setting.clone());
-            item.origin.why = vec![format!("{setting} = {style}")];
+            item.origin.why = vec![format!("{setting} = {}", json_string(style))];
             match find_style(ctx, style) {
                 Some((path, bytes)) => {
                     item.origin.path = Some(ctx.fs.realpath(&path));
@@ -285,11 +286,13 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
         }
     }
 
+    // `disableAllHooks` stops the status line too: it stays a row, saying so.
     let hooks_off = ctx
         .settings
         .get_bool("/disableAllHooks")
-        .is_some_and(|(b, _)| b);
-    if let (Some((_, file)), false) = (ctx.settings.get("/statusLine"), hooks_off) {
+        .filter(|(b, _)| *b)
+        .map(|(_, f)| format!("{} = true", f.at("/disableAllHooks")));
+    if let Some((_, file)) = ctx.settings.get("/statusLine") {
         let setting = file.at("/statusLine");
         let mut item = new_item(
             Kind::StatusLine,
@@ -302,6 +305,10 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
         item.origin.path = Some(file.path.clone());
         item.origin.setting = Some(setting.clone());
         item.origin.why = vec![setting, "runs locally; never reaches the model".to_string()];
+        if let Some(set_at) = hooks_off {
+            item.origin.why.push(set_at);
+            item.signal = Some(OFF_ALL_HOOKS.to_string());
+        }
         item.knobs = vec![Knob::None {
             reason: "not in the request".to_string(),
         }];

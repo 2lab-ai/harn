@@ -669,6 +669,57 @@ fn observed_header_splits_the_body_and_tool_search_names_its_cause() {
 }
 
 #[test]
+fn brief_and_html_show_a_string_setting_as_its_text() {
+    // The resolver writes a string value as JSON (`= "…"`); every surface shows its text.
+    let mut t = tree();
+    let memory = t.items.iter_mut().find(|i| i.kind == Kind::Memory).unwrap();
+    memory.origin.why = vec![format!(
+        "{DIR}/.claude/settings.local.json#/autoMemoryDirectory = \"{HOME}/memory (old)\""
+    )];
+    let id = memory.id.clone();
+    let brief = render::brief(&doc(vec![t.clone()]));
+    let row = brief
+        .lines()
+        .find(|l| l.contains(&id))
+        .unwrap_or_else(|| panic!("no memory row:\n{brief}"));
+    assert!(
+        row.ends_with(&format!(
+            "./.claude/settings.local.json#/autoMemoryDirectory = {HOME}/memory (old)"
+        )),
+        "{row}"
+    );
+    assert!(!row.contains('"'), "{row}");
+    let html = render::html(&doc(vec![t]));
+    assert!(
+        html.contains(&format!(
+            "<li>{DIR}/.claude/settings.local.json#/autoMemoryDirectory = {HOME}/memory (old)</li>"
+        )),
+        "{html}"
+    );
+    assert!(!html.contains("autoMemoryDirectory = &quot;"), "{html}");
+}
+
+#[test]
+fn html_escapes_a_string_setting_once() {
+    let mut t = tree();
+    let memory = t.items.iter_mut().find(|i| i.kind == Kind::Memory).unwrap();
+    memory.origin.why = vec![format!(
+        "{DIR}/.claude/settings.local.json#/outputStyle = \"a <b> & \\\"c\\\"\""
+    )];
+    let html = render::html(&doc(vec![t]));
+    assert!(
+        html.contains(&format!(
+            "<li>{DIR}/.claude/settings.local.json#/outputStyle = a &lt;b&gt; &amp; \
+             &quot;c&quot;</li>"
+        )),
+        "{html}"
+    );
+    for twice in ["&amp;lt;", "&amp;gt;", "&amp;amp;", "&amp;quot;", "<b>"] {
+        assert!(!html.contains(twice), "{twice}");
+    }
+}
+
+#[test]
 fn html_footer_is_the_version_line_of_the_lib() {
     let line = harn::version_line();
     assert!(
@@ -769,6 +820,7 @@ fn plan_for(item: &Item, knob: Knob, known: u64, warnings: Vec<String>) -> Actio
         }],
         predicted_before: 229_705,
         predicted_after: 229_705 - known,
+        items_after: 0,
         freed: Freed {
             known,
             delta_unknown: true,

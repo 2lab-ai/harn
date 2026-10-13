@@ -1,15 +1,16 @@
-//! `harn` on a terminal: the interactive tree (fold, filter, sort, why, stage → plan → apply,
-//! on, undo, edit). [`App`] is the terminal-free core (keys in, frames out); [`run`] owns raw
+//! `harn` on a terminal: what loads before the first message, grouped by kind (`model`), with
+//! one card per action (`d` turn off, `o` turn back on, `u` undo, `w` where from, `e` edit).
+//! [`App`] is the terminal-free core (keys in, frames out); [`run`] owns raw
 //! mode, the alternate screen and the event loop, and restores the terminal on every exit path:
 //! `q`, an error, a panic, and SIGINT / SIGTERM / SIGHUP (a flag the loop polls every
 //! [`TICK`]).
 
 mod app;
-mod rows;
+pub mod model;
 mod view;
 
-pub use app::{App, Message, Pending, Staged, Tone, TRIM_HINT};
-pub use rows::{Sort, SortKey};
+pub use app::{App, Message, Part, Pending, Staged, Tone, TRIM_HINT};
+pub use model::Sort;
 
 use crate::journal::Journal;
 use crate::model::{Target, Tree};
@@ -34,7 +35,8 @@ pub struct Opts {
     pub unicode: bool,
     /// Colors (yellow warnings, red errors); modifiers only without.
     pub color: bool,
-    /// `--readonly`: d/a/o/u/e are greyed and refused; the journal dir is not created.
+    /// `--readonly`: d/o/u/e are left out of the key bar and refused; the journal dir is not
+    /// created.
     pub readonly: bool,
 }
 

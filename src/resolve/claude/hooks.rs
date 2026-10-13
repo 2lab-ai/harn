@@ -5,7 +5,11 @@
 //! capture); every other event is `runtime` (`—`). A `SessionStart` group whose matcher cannot
 //! match `startup` does not fire on the first request and is `runtime` too.
 //! `disableAllHooks` turns off every non-managed hook (managed ones too when set in managed
-//! settings); `allowManagedHooksOnly` (managed) keeps only managed hooks.
+//! settings); `allowManagedHooksOnly` (managed) keeps only managed hooks. A hook
+//! `disableAllHooks` turned off stays a row: mode none, its `signal` naming the setting
+//! (`off: disableAllHooks`), a `why` step saying where it is set (`<file>#/disableAllHooks =
+//! true`), its knobs as when on — a reader sees what went off and why, and `o`/undo
+//! still find it. A hook only `allowManagedHooksOnly` drops is left out, as before.
 
 use super::fs::esc;
 use super::plugins::Plugin;
@@ -14,6 +18,9 @@ use super::{cost_na, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use serde_json::{json, Map, Value};
 use std::path::Path;
+
+/// The `signal` of a hook (and of the status line) `disableAllHooks` turned off.
+pub const OFF_ALL_HOOKS: &str = "off: disableAllHooks";
 
 const INJECTING: &[&str] = &[
     "SessionStart",
@@ -45,6 +52,8 @@ fn push_groups(
     layer: Layer,
     plugin: Option<&Plugin>,
     knobs: &[Knob],
+    // The signal and the `why` step naming where the switch is set.
+    off: Option<(&str, &str)>,
 ) {
     for (event, groups) in events {
         let Value::Array(groups) = groups else {
@@ -71,7 +80,10 @@ fn push_groups(
                 None => format!("{event} hook · {commands} cmd · {owner}"),
             };
             let mut item = new_item(Kind::Hook, layer, &setting, &label);
-            item.mode = mode_of(event, group);
+            item.mode = match off {
+                Some(_) => Mode::None,
+                None => mode_of(event, group),
+            };
             item.cost = if item.mode == Mode::Always {
                 Cost::default()
             } else {
@@ -88,6 +100,10 @@ fn push_groups(
                     "{event} stdout is injected; size unknown until a capture"
                 ));
             }
+            if let Some((signal, set_at)) = off {
+                item.origin.why.push(set_at.to_string());
+                item.signal = Some(signal.to_string());
+            }
             item.origin.plugin = plugin.map(|p| p.id.clone());
             item.knobs = knobs.to_vec();
             out.push(item);
@@ -103,6 +119,13 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
     });
     let all_off = matches!(disable_all, Some((true, f)) if f.source == Source::Managed);
     let non_managed_off = all_off || matches!(disable_all, Some((true, _))) || managed_only;
+    // Off by the switch: still listed. Off only by `allowManagedHooksOnly`: dropped, as before
+    // — no view has words for "your organisation allows only its own hooks" yet.
+    let set_at = disable_all.map(|(_, f)| format!("{} = true", f.at("/disableAllHooks")));
+    let switch_off = match (disable_all, &set_at) {
+        (Some((true, _)), Some(at)) => Some((OFF_ALL_HOOKS, at.as_str())),
+        _ => None,
+    };
     let disable_knob = setting_knob(
         ctx,
         Scope::Local,
@@ -115,9 +138,14 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
             continue;
         };
         let managed = file.source == Source::Managed;
-        if all_off || (!managed && non_managed_off) {
-            continue;
-        }
+        let off = if all_off || (!managed && non_managed_off) {
+            match switch_off {
+                Some(signal) => Some(signal),
+                None => continue,
+            }
+        } else {
+            None
+        };
         let knobs = if managed {
             vec![Knob::None {
                 reason: "managed hook".to_string(),
@@ -134,11 +162,14 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
             file.source.layer(),
             None,
             &knobs,
+            off,
         );
     }
-    if non_managed_off {
-        return out;
-    }
+    let off = match (non_managed_off, switch_off) {
+        (false, _) => None,
+        (true, Some(signal)) => Some(signal),
+        (true, None) => return out,
+    };
     for p in plugins {
         for (file, prefix, events) in p.hook_sources(ctx) {
             let knobs = vec![p.contribution_knob(), disable_knob.clone()];
@@ -151,6 +182,7 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
                 p.layer,
                 Some(p),
                 &knobs,
+                off,
             );
         }
     }

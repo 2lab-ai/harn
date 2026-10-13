@@ -73,6 +73,9 @@ Rules that produce it:
   listing would also shrink ("…and the skill listing shrinks; how much needs `harn verify --run`").
   Built-in rows say why they cannot be turned off. Group rows describe the group.
 - **Key bar in words**, only the keys valid now. `d turn off` (not `off`), `u undo`, `→← open/close`.
+  Under `--readonly` d, o, u and e are absent (the `?` card still lists them, with the line
+  `read-only: d, o, u and e are off`; the header says `read-only`; the detail says what `d`
+  would do — "d would turn it off …" — and promises no `u`); the Built-in group row has no `d`.
 - **Footer honesty**: `345 items · 5 shown · filter: none` only when a filter or fold hides rows
   that would otherwise be visible; otherwise no footer (the panel is the footer).
 
@@ -141,7 +144,7 @@ Rules that produce it:
 ```
 ┌ Turn off slack for this project ─────────────────────────────────────────────┐
 │ Writes   .claude/settings.local.json → enabledPlugins.slack = false          │
-│ Leaves   8 skills, 5 commands, 1 MCP server (next session)      → list       │
+│ Leaves   15 at start (slack, 8 skills, 5 commands, 1 MCP server)      → list │
 │ Saves    3.7 KB now; the skill listing shrinks too (unmeasured)              │
 │ Undo     u here, or `harn undo` later — the file is restored byte for byte   │
 │                                                        Enter apply · Esc    │
@@ -150,8 +153,35 @@ Rules that produce it:
 
 One card replaces the old `d` → plan pane → `a` → `y/N` chain: `d` opens the card, Enter applies,
 Esc cancels; `→` on the "Leaves" line opens the list of what leaves (scrollable, Esc back). After
-Enter the detail panel shows `turned off · u undoes · takes effect next session` and the row shows
-`off` in the state column (greyed name). `o` on an off row = the same card titled "Turn … back on".
+Enter the message row says how the header's count moved (`turned off alpha · 6 fewer items load at
+start (83 → 77)`), the detail panel shows `turned off · u undoes · takes effect next session` and
+the row shows `off` in the state column (greyed name). `o` on an off row = the same card titled
+"Turn … back on"; `u` = the same card titled "Undo the last change" (Enter undo · Esc keep; `y` and
+`n` work too).
+
+`→` list: every item that stops loading, under `at start (N)` — N is exactly what the header's
+count drops by after Enter — then `when used / later (M)` (hooks that run later, rules read on
+demand, the status line); what a change makes appear comes last under `appears (K)`. The Leaves
+line summarises the two groups (`6 at start (alpha, 2 skills, 1 MCP server, …), 1 later (hook)`);
+its `→ list` hint takes a line of its own when the summary fills the first one. The Saves line
+carries no count.
+
+```
+┌ What leaves with slack ──────────────────────────────────────────────────────┐
+│ at start (15)                                                                │
+│   slack (plugin)                                                             │
+│   slack-search (skill)                                                       │
+│   …                                                                          │
+│   slack (MCP server)                                                         │
+│                                                                     Esc back │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+Action cards (`d`, `o`, `u`) show their whole body before Enter (or `y`) can do anything, because
+Enter commits a write; in a smaller frame the card is not drawn, the message row
+says the size it needs, and only Esc works. Informational cards (`w`, `?`, `i`) have nothing to
+commit and scroll instead — ↑↓ moves the body, Esc closes — and are drawn whenever the frame is
+at least 40×10.
 
 ## `w` — where it comes from (card, not a path wall)
 
@@ -160,7 +190,7 @@ Enter the detail panel shows `turned off · u undoes · takes effect next sessio
 │ 1  ~/.claude/settings.json › enabledPlugins › slack = true   (every project) │
 │ 2  installed from claude-plugins-official, version 1.4.1                     │
 │ 3  files: ~/.claude/plugins/cache/claude-plugins-official/slack/1.4.1        │
-│ 4  contributes 8 skills · 5 commands · 1 MCP server · 0 agents · 0 hooks      │
+│ 4  contributes 8 skills · 5 commands · 1 MCP server                          │
 │ Switches  this project (.claude/settings.local.json) · you (~/.claude/…)     │
 │                                                              Esc close      │
 └──────────────────────────────────────────────────────────────────────────────┘

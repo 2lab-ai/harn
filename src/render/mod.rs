@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 pub use brief::brief;
 pub use html::html;
-pub(crate) use table::bar as share_bar;
 pub use table::{header, table};
 pub use text::{history, plan, plan_footer, verify_report};
 pub use why::why;

@@ -3,8 +3,8 @@
 //! resolve with an [`Overlay`](crate::model::Overlay), side effects and warnings.
 
 use crate::model::{
-    self, Agent, Cost, Freed, Item, Kind, Knob, Overlay, OverlayOp, Refused, Scope, SelectError,
-    Target, Tree,
+    self, Agent, Cost, Freed, Item, Kind, Knob, Mode, Overlay, OverlayOp, Refused, Scope,
+    SelectError, Target, Tree,
 };
 use crate::resolve::Resolver;
 use crate::writers;
@@ -37,6 +37,10 @@ pub struct ActionPlan {
     pub ops: Vec<PlannedOp>,
     pub predicted_before: u64,
     pub predicted_after: u64,
+    /// Items in the first request (mode always or advertised) once the plan is applied, as
+    /// the re-resolve sees them; 0 in a plan written before the field existed.
+    #[serde(default)]
+    pub items_after: usize,
     pub freed: Freed,
     pub side_effects: Vec<String>,
     pub warnings: Vec<String>,
@@ -564,6 +568,9 @@ fn build(
         ops,
         predicted_before: tree.predicted_known,
         predicted_after: after.predicted_known,
+        items_after: model::walk(&after)
+            .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
+            .count(),
         freed,
         side_effects,
         warnings,
@@ -773,7 +780,8 @@ impl<'a> Index<'a> {
 
 /// What differs between the tree before and after an overlay.
 struct Delta<'a> {
-    /// In the before tree, not in the after tree (walk order).
+    /// In the before tree and gone from the request after it (walk order): not in the after
+    /// tree, or there but switched off ([`left`]).
     removed: Vec<(&'a Item, Option<&'a Item>)>,
     /// In the after tree, not in the before tree.
     appeared: Vec<(&'a Item, Option<&'a Item>)>,
@@ -786,7 +794,7 @@ impl<'a> Delta<'a> {
         let removed: Vec<_> = before
             .rows
             .iter()
-            .filter(|(item, _)| after.get(&item.id).is_none())
+            .filter(|(item, _)| left(item, after.get(&item.id).map(|(now, _)| *now)))
             .copied()
             .collect();
         let appeared: Vec<_> = after
@@ -856,6 +864,25 @@ impl<'a> Delta<'a> {
         }
         out
     }
+}
+
+/// `item` (as before the overlay) leaves the request: it is gone from the after tree (`now`
+/// None), or still there but switched off — mode none with an `off:` signal. A resolver keeps
+/// such an item to say what turned it off (every hook and the status line under
+/// `disableAllHooks`); it leaves all the same. An item already switched off before the overlay
+/// never leaves, whether it stays or goes (a hook of a plugin turned off while every hook is
+/// off was not running).
+fn left(item: &Item, now: Option<&Item>) -> bool {
+    !switched_off(item) && now.is_none_or(switched_off)
+}
+
+/// Mode none with an `off:` signal: listed, but something turned it off.
+fn switched_off(item: &Item) -> bool {
+    item.mode == Mode::None
+        && item
+            .signal
+            .as_deref()
+            .is_some_and(|signal| signal.starts_with("off:"))
 }
 
 fn child_ids(item: &Item) -> Vec<&str> {

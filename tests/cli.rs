@@ -69,6 +69,84 @@ fn edit_prints_the_diff_then_the_journal_line_and_records_the_target() {
 }
 
 #[test]
+fn off_dry_run_on_a_hook_names_every_hook_and_the_status_line_that_leave() {
+    let f = fixture();
+    let out = harn(
+        &f,
+        &[],
+        &[
+            "off",
+            "PreToolUse hook [Bash] · 1 cmd · ~/.claude/settings.json",
+            "--agent",
+            "claude-code",
+            "--dry-run",
+            "--no-unicode",
+            "--color",
+            "never",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    // `side effects: none` when nothing leaves; else a `side effects` heading and one line each.
+    assert!(!text.contains("side effects: none"), "{text}");
+    let effects: Vec<&str> = text
+        .lines()
+        .skip_while(|l| *l != "side effects")
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .collect();
+    assert_eq!(effects.len(), 3, "{text}");
+    for (line, name) in
+        effects
+            .iter()
+            .zip(["SessionStart hook", "UserPromptSubmit hook", "statusLine"])
+    {
+        assert!(line.trim_start().starts_with(name), "{name}:\n{text}");
+        assert!(line.ends_with(") leaves"), "{line}");
+    }
+    // Two of them print into the request, unmeasured.
+    assert!(text.contains("freed D?"), "{text}");
+    assert!(text.contains("dry run: nothing written"), "{text}");
+}
+
+#[test]
+fn why_prints_a_string_setting_as_its_text() {
+    let f = fixture();
+    let dir = f.home.join("memory (old)");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("MEMORY.md"), "- a note\n").unwrap();
+    let local = f.project.join(".claude/settings.local.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+    json["autoMemoryDirectory"] = serde_json::json!("~/memory (old)");
+    std::fs::write(&local, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let out = harn(
+        &f,
+        &[],
+        &[
+            "why",
+            "MEMORY.md",
+            "--agent",
+            "claude-code",
+            "--no-unicode",
+            "--color",
+            "never",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    let step = text
+        .lines()
+        .find(|l| l.contains("#/autoMemoryDirectory = "))
+        .unwrap_or_else(|| panic!("no autoMemoryDirectory step:\n{text}"));
+    assert!(
+        step.trim_end()
+            .ends_with(&format!("#/autoMemoryDirectory = {}", dir.display())),
+        "{step}"
+    );
+}
+
+#[test]
 fn edit_journals_the_agent_version_of_the_picked_tree() {
     let f = fixture();
     // An installed version in the copy's HOME only: the resolver reports the newest

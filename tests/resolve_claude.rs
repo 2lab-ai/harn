@@ -6,6 +6,7 @@ mod common;
 use common::{fixture, slug, target, Fixture};
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
 use harn::plan;
+use harn::resolve::claude::OFF_ALL_HOOKS;
 use harn::resolve::{ClaudeCode, Resolver};
 use std::path::{Path, PathBuf};
 
@@ -347,6 +348,382 @@ fn disabled_mcp_server_is_present_with_mode_none() {
     };
     assert_eq!(file, &f.home.join(".claude.json"));
     assert!(pointer.ends_with("/disabledMcpServers/-"), "{pointer}");
+}
+
+#[test]
+fn every_hook_and_the_status_line_stay_with_mode_none_once_all_hooks_are_off() {
+    let f = fixture();
+    let before = resolve(&f, None);
+    let hooks = |t: &Tree| -> Vec<String> {
+        let mut ids: Vec<String> = of_kind(t, Kind::Hook)
+            .into_iter()
+            .map(|i| i.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let overlay = Overlay {
+        ops: vec![OverlayOp::SetJson {
+            file: local_settings(&f),
+            pointer: "/disableAllHooks".to_string(),
+            value: serde_json::json!(true),
+        }],
+    };
+    let after = resolve(&f, Some(&overlay));
+    // The same hooks (settings and plugin ones), each off and saying why; none is in the request.
+    assert_eq!(hooks(&after), hooks(&before));
+    assert_eq!(hooks(&after).len(), 3, "2 in settings + the alpha plugin's");
+    for hook in of_kind(&after, Kind::Hook) {
+        assert_eq!(hook.mode, Mode::None, "{}", hook.id);
+        assert!(hook.cost.not_applicable, "{}", hook.id);
+        assert_eq!(hook.signal.as_deref(), Some(OFF_ALL_HOOKS), "{}", hook.id);
+        assert!(
+            hook.knobs.iter().any(
+                |k| matches!(k, Knob::Setting { pointer, .. } if pointer == "/disableAllHooks")
+            ),
+            "{}: the switch that turned it off stays its knob",
+            hook.id
+        );
+    }
+    let status = of_kind(&after, Kind::StatusLine);
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].mode, Mode::None);
+    assert_eq!(status[0].signal.as_deref(), Some(OFF_ALL_HOOKS));
+    assert_eq!(of_kind(&before, Kind::StatusLine)[0].signal, None);
+    // Nothing that was `?` before is still counted as unknown.
+    assert_eq!(
+        before.unknown_rows - after.unknown_rows,
+        2,
+        "SessionStart and the plugin's UserPromptSubmit"
+    );
+    assert_eq!(before.predicted_known, after.predicted_known);
+}
+
+/// The side effects naming `label` (one line per item that leaves).
+fn effects_naming<'p>(plan: &'p plan::ActionPlan, label: &str) -> Vec<&'p String> {
+    plan.side_effects
+        .iter()
+        .filter(|e| e.starts_with(label))
+        .collect()
+}
+
+#[test]
+fn turning_one_hook_off_plans_every_hook_and_the_status_line_as_leaving() {
+    let f = fixture();
+    let t = target(&f);
+    let mut tree = resolve(&f, None);
+    let hook = of_kind(&tree, Kind::Hook)
+        .into_iter()
+        .find(|h| h.label.starts_with("PreToolUse hook"))
+        .unwrap()
+        .id
+        .clone();
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &hook, None).unwrap();
+    // They stay in the after tree (mode none, `off:` signal): they leave all the same.
+    let mut effects = plan.side_effects.clone();
+    effects.sort();
+    assert_eq!(effects.len(), 3, "{effects:#?}");
+    for (label, kind) in [
+        ("SessionStart hook", "(hook) leaves"),
+        ("UserPromptSubmit hook", "(hook) leaves"),
+        ("statusLine", "(status-line) leaves"),
+    ] {
+        let named = effects_naming(&plan, label);
+        assert_eq!(named.len(), 1, "{label}: {effects:#?}");
+        assert!(named[0].ends_with(kind), "{}", named[0]);
+    }
+    // Two of them printed into the request, unmeasured: what it frees is unknown.
+    assert_eq!(plan.freed.known, 0);
+    assert!(plan.freed.delta_unknown);
+    // The per-row annotation sees the same.
+    plan::annotate_freed(&ClaudeCode, &t, &mut tree).unwrap();
+    let freed = model::walk(&tree)
+        .find(|i| i.id == hook)
+        .and_then(|i| i.freed.clone())
+        .unwrap();
+    assert!(freed.delta_unknown, "{freed:?}");
+}
+
+#[test]
+fn a_plugin_hook_leaving_by_both_rules_is_one_side_effect() {
+    // One plan turning the alpha plugin off (its hook leaves the tree) and every hook off (the
+    // others stay with mode none).
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+    let hook = of_kind(&tree, Kind::Hook)
+        .into_iter()
+        .find(|h| h.label.starts_with("PreToolUse hook"))
+        .unwrap()
+        .id
+        .clone();
+    let op = |selector: &str| plan::PlanOp {
+        selector: selector.to_string(),
+        scope: None,
+        knob: None,
+        reason: "test".to_string(),
+    };
+    let req = plan::PlanRequest {
+        schema: plan::PLAN_SCHEMA.to_string(),
+        target_dir: f.project.clone(),
+        ops: vec![op("alpha@market-one"), op(&hook)],
+    };
+    let plan = plan::build_plan_from_request(&ClaudeCode, &t, &tree, &req).unwrap();
+    for label in ["UserPromptSubmit hook", "SessionStart hook", "statusLine"] {
+        assert_eq!(
+            effects_naming(&plan, label).len(),
+            1,
+            "{label}: {:#?}",
+            plan.side_effects
+        );
+    }
+
+    // Every hook already off (mode none): the plugin's hook goes from the tree with its plugin,
+    // but it was not running, so nothing about it leaves.
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&{
+            let mut v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap())
+                    .unwrap();
+            v["disableAllHooks"] = serde_json::json!(true);
+            v
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let tree = resolve(&f, None);
+    let off = find(&tree, Kind::Plugin, "alpha@market-one").id.clone();
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &off, None).unwrap();
+    for label in ["UserPromptSubmit hook", "SessionStart hook", "statusLine"] {
+        assert!(
+            effects_naming(&plan, label).is_empty(),
+            "{label}: {:#?}",
+            plan.side_effects
+        );
+    }
+    // Its skills and server still leave.
+    assert!(!plan.side_effects.is_empty());
+}
+
+/// Items in the first request: mode always or advertised.
+fn at_start(tree: &Tree) -> usize {
+    model::walk(tree)
+        .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
+        .count()
+}
+
+#[test]
+fn items_after_is_the_count_at_start_once_the_plan_is_applied() {
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+    let alpha = find(&tree, Kind::Plugin, "alpha@market-one").id.clone();
+    // By hand: 83 at start, and alpha takes 6 with it — its plugin row, its 2 skills' listing
+    // entries, its server and that server's instructions, its UserPromptSubmit hook.
+    assert_eq!(at_start(&tree), 83);
+    let alpha_rows: Vec<(Kind, Mode)> = model::walk(&tree)
+        .filter(|i| i.id == alpha || i.origin.plugin.as_deref() == Some("alpha@market-one"))
+        .map(|i| (i.kind, i.mode))
+        .collect();
+    assert_eq!(alpha_rows.len(), 6, "{alpha_rows:?}");
+    assert!(alpha_rows
+        .iter()
+        .all(|(_, m)| matches!(m, Mode::Always | Mode::Advertised)));
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &alpha, None).unwrap();
+    assert_eq!(plan.items_after, 77);
+
+    // Every hook already off: the two that printed into the request are mode none, so 81 at
+    // start; alpha then takes 5 (its hook was not counted). The hooks the switch keeps, with
+    // mode none, never count.
+    let mut local: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+    local["disableAllHooks"] = serde_json::json!(true);
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    let tree = resolve(&f, None);
+    assert_eq!(at_start(&tree), 81);
+    assert_eq!(of_kind(&tree, Kind::Hook).len(), 3, "kept, mode none");
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &alpha, None).unwrap();
+    assert_eq!(plan.items_after, 76);
+}
+
+/// The fixture with a value of every link-writing setting: every hook off, a memory dir whose
+/// name has a space and parentheses (`~/memory (old)`), an output style and an advisor model
+/// with them too. Returns that memory dir.
+fn with_link_values(f: &Fixture) -> PathBuf {
+    let dir = f.home.join("memory (old)");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("MEMORY.md"), "- a note\n").unwrap();
+    let mut local: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(f)).unwrap()).unwrap();
+    local["disableAllHooks"] = serde_json::json!(true);
+    local["autoMemoryDirectory"] = serde_json::json!("~/memory (old)");
+    local["outputStyle"] = serde_json::json!("My Style (x)");
+    local["advisorModel"] = serde_json::json!("opus (fast)");
+    local["skillOverrides"] = serde_json::json!({
+        "user-one": "user-invocable-only",
+        "user-two": "name-only",
+    });
+    std::fs::write(
+        local_settings(f),
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    dir
+}
+
+/// A regression test on this fixture, not a guarantee about every producer: each link the
+/// resolver writes here that carries a value (`<file>#<pointer> = <value>`) carries `true`,
+/// `false` or a JSON string — never a bare word or path, never a container — so
+/// `tui::model::split_link` reads it without guessing.
+#[test]
+fn every_link_value_in_the_fixture_is_a_boolean_or_a_json_string() {
+    let f = fixture();
+    let memory = with_link_values(&f);
+    let t = resolve(&f, None);
+    // What the scan covers: hooks off, plugins, memory, permission lists, the output style and
+    // the advisor tool.
+    for kind in [
+        Kind::Hook,
+        Kind::Plugin,
+        Kind::Memory,
+        Kind::PermissionRule,
+        Kind::OutputStyle,
+    ] {
+        assert!(!of_kind(&t, kind).is_empty(), "{kind}");
+    }
+    let mut values = Vec::new();
+    for item in model::walk(&t) {
+        for why in &item.origin.why {
+            // Links only: other steps are prose.
+            let Some((_, rest)) = why.split_once('#') else {
+                continue;
+            };
+            let (_, tail) = harn::tui::model::split_link(rest);
+            if let Some(value) = tail.strip_prefix("= ") {
+                assert!(
+                    value == "true"
+                        || value == "false"
+                        || serde_json::from_str::<String>(value).is_ok(),
+                    "{}: {why}",
+                    item.id
+                );
+                values.push(value.to_string());
+            }
+        }
+    }
+    // The two skill visibility values, as the producer writes them (not through split_link).
+    let local = local_settings(&f);
+    for (skill, value) in [
+        ("user-one", "user-invocable-only"),
+        ("user-two", "name-only"),
+    ] {
+        let want = format!("{}#/skillOverrides/{skill} = \"{value}\"", local.display());
+        let item = find(&t, Kind::Skill, skill);
+        assert!(
+            item.origin.why.contains(&want),
+            "{skill}: {:#?}",
+            item.origin.why
+        );
+    }
+    for want in [
+        serde_json::to_string(&memory.display().to_string()).unwrap(),
+        "\"My Style (x)\"".to_string(),
+        "\"opus (fast)\"".to_string(),
+        "true".to_string(),
+    ] {
+        assert!(values.contains(&want), "{want}: {values:#?}");
+    }
+}
+
+/// The fixture's links read the way `tui::model::split_link` expects: a link with no tail ends
+/// in a fixed key or a list index; a user-chosen key (a plugin id, a server name, a skill name)
+/// as the last token always carries a tail. A server named `srv (x)` keeps its name.
+#[test]
+fn pointer_only_links_end_in_a_fixed_key_or_an_index() {
+    let f = fixture();
+    with_link_values(&f);
+    let mcp = f.project.join(".mcp.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+    json["mcpServers"]["srv (x)"] =
+        serde_json::json!({ "type": "http", "url": "http://localhost:1/mcp" });
+    std::fs::write(&mcp, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let mut local: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+    local["enabledMcpjsonServers"] = serde_json::json!(["project-server", "srv (x)"]);
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    let t = resolve(&f, None);
+
+    // A JSON pointer token, unescaped.
+    let token = |pointer: &str| -> (String, String) {
+        let unescape = |s: &str| s.replace("~1", "/").replace("~0", "~");
+        let mut parts = pointer.rsplit('/');
+        let last = unescape(parts.next().unwrap_or_default());
+        let parent = unescape(parts.next().unwrap_or_default());
+        (parent, last)
+    };
+    let fixed = |key: &str| {
+        !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    };
+    let (mut bare, mut named) = (0, 0);
+    for item in model::walk(&t) {
+        for why in &item.origin.why {
+            let Some((_, rest)) = why.split_once('#') else {
+                continue;
+            };
+            let (pointer, tail) = harn::tui::model::split_link(rest);
+            let (parent, last) = token(pointer);
+            if tail.is_empty() {
+                assert!(
+                    fixed(&last),
+                    "{}: a link ending in {last:?}: {why}",
+                    item.id
+                );
+                bare += 1;
+            }
+            // A name the user chose (an index under a list is no name).
+            let user_key = matches!(
+                parent.as_str(),
+                "mcpServers" | "enabledPlugins" | "skillOverrides" | "deniedMcpServers"
+            ) && !last.chars().all(|c| c.is_ascii_digit());
+            if user_key {
+                assert!(
+                    !tail.is_empty(),
+                    "{}: {last:?} with no tail: {why}",
+                    item.id
+                );
+                named += 1;
+            }
+        }
+    }
+    assert!(bare > 0 && named > 0, "{bare} bare, {named} named");
+
+    // The server whose name has ` (x)`: its link keeps the name, its transport is the note.
+    let server = find(&t, Kind::McpServer, "srv (x)");
+    let link = server
+        .origin
+        .why
+        .iter()
+        .find(|w| w.contains("#/mcpServers/"))
+        .unwrap();
+    let (pointer, tail) = harn::tui::model::split_link(link.split_once('#').unwrap().1);
+    assert_eq!(token(pointer).1, "srv (x)", "{link}");
+    assert_eq!(tail, "(http)", "{link}");
+    // A plugin id with `@` is a named key with its value.
+    let alpha = find(&t, Kind::Plugin, "alpha@market-one");
+    assert!(alpha.origin.why[0].ends_with("#/enabledPlugins/alpha@market-one = true"));
 }
 
 #[test]

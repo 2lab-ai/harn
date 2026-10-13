@@ -18,7 +18,7 @@
 use super::frontmatter;
 use super::fs::{esc, file_name};
 use super::plugins::Plugin;
-use super::{cost_na, env_knob, new_item, setting_knob, Ctx};
+use super::{cost_na, env_knob, json_string, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -174,9 +174,12 @@ fn entry_item(
             item.mode = Mode::OnDemand;
             item.cost = cost_na(Some(bytes));
             item.origin.setting = Some(origin.clone());
-            item.origin.why.push(format!(
-                "{origin} = user-invocable-only → not in the listing"
-            ));
+            item.origin
+                .why
+                .push(format!("{origin} = {}", json_string("user-invocable-only")));
+            item.origin
+                .why
+                .push("user-invocable-only: not in the listing".to_string());
         }
         Some("name-only") => {
             let (_, origin) = ovr.clone().unwrap_or_default();
@@ -190,7 +193,10 @@ fn entry_item(
             item.origin.setting = Some(origin.clone());
             item.origin
                 .why
-                .push(format!("{origin} = name-only → name without description"));
+                .push(format!("{origin} = {}", json_string("name-only")));
+            item.origin
+                .why
+                .push("name-only: name without description".to_string());
         }
         _ if dmi => {
             item.mode = Mode::OnDemand;
