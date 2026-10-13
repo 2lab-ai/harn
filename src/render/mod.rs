@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub use brief::brief;
 pub use html::html;
 pub use table::{header, table};
-pub use text::{history, plan, verify_report};
+pub use text::{history, plan, plan_footer, verify_report};
 pub use why::why;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

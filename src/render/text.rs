@@ -1,4 +1,4 @@
-//! Plain-text reports: `harn verify`, `harn off`/`apply` plans, `harn history`.
+//! Plain-text reports: `harn verify`, `harn off`/`apply`/`trim` plans, `harn history`.
 
 use super::common::{exact, freed_value, kb, knob_full, UNICODE};
 use crate::journal::JournalEntry;
@@ -118,6 +118,17 @@ pub fn plan(plan: &ActionPlan) -> String {
         out.push(diff.to_string());
     }
     out.join("\n")
+}
+
+/// The line after a printed [`plan`]: the journal id of the applied entry, or the dry-run line.
+pub fn plan_footer(entry: Option<&JournalEntry>) -> String {
+    match entry {
+        Some(entry) => format!(
+            "applied: journal {} {} takes effect on the next session",
+            entry.id, UNICODE.dot
+        ),
+        None => "dry run: nothing written".to_string(),
+    }
 }
 
 fn push_list(out: &mut Vec<String>, title: &str, items: &[String]) {

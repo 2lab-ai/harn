@@ -10,6 +10,8 @@ journaled and reversible. Never edit the agent's settings files by hand — only
 
 ## Loop
 
+From a shell, `harn trim` runs this whole loop; inside Claude Code, follow the steps below.
+
 1. **Facts first.** Run `harn brief` in the target directory. It prints, per agent, the totals,
    the signals (tool search state, over-cap listings), every effective item with its id, origin,
    mode, cost, freed and default knob, the open unknowns, and the exact plan format.
