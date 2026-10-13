@@ -1,0 +1,254 @@
+name: Preview
+
+# Publishes a prerelease `preview-<YYYY-MM-DD-HHMM>-<sha12>` with 4 binaries
+# + SHA256SUMS on every push to main (and on demand). The tap derives the
+# harn-preview brew version (YYYY.MM.DD.HHMM) from this tag, so the tag format
+# is load-bearing.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-publish
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build_id: ${{ steps.plan.outputs.build_id }}
+      tag: ${{ steps.plan.outputs.tag }}
+      commit: ${{ steps.plan.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compute build identity
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          stamp="$(date -u +%Y-%m-%d-%H%M)"
+          build_id="$stamp-$short_sha"
+          {
+            echo "commit=$commit"
+            echo "build_id=$build_id"
+            echo "tag=preview-$build_id"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: preflight
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: harn-macos-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: harn-macos-x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: harn-linux-x86_64
+          # Native arm64 runner (free for public repos) — no cross/zigbuild needed.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            name: harn-linux-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # `harn --version` = `harn <ver> (<channel> <rev12>) …` (src/lib.rs version_line).
+      # HARN_BUILD_ID is a revision (first 12 chars kept), so it gets the commit
+      # sha, not the build_id: the build_id leads with the timestamp.
+      HARN_BUILD_CHANNEL: preview
+      HARN_BUILD_ID: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: preview-${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "target/${{ matrix.target }}/release/harn" "${{ matrix.name }}"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sha256sum "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}
+            ${{ matrix.name }}.sha256
+
+  # The tap bump script is regression-tested before the release is created — a
+  # broken bump script blocks the publish instead of shipping a prerelease the
+  # tap can never point at. Hermetic: mocked `gh`, local git remote.
+  tap-bump-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Regression-test the tap bump script
+        run: .github/scripts/tests/bump-tap-preview.test.sh
+
+  publish:
+    needs: [preflight, build, tap-bump-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for asset in harn-macos-aarch64 harn-macos-x86_64 harn-linux-x86_64 harn-linux-aarch64; do
+            cp "artifacts/$asset/$asset" "release/$asset"
+          done
+          (cd release && sha256sum harn-* > SHA256SUMS)
+          cat release/SHA256SUMS
+          {
+            echo "Preview build \`${{ needs.preflight.outputs.build_id }}\` from ${{ needs.preflight.outputs.commit }}."
+            echo
+            echo "Install: \`brew install 2lab-ai/tap/harn-preview\`"
+            echo
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } > PREVIEW_NOTES.md
+
+      - name: Create preview prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: Preview build ${{ needs.preflight.outputs.build_id }}
+          body_path: PREVIEW_NOTES.md
+          prerelease: true
+          make_latest: false
+          target_commitish: ${{ needs.preflight.outputs.commit }}
+          files: |
+            release/harn-macos-aarch64
+            release/harn-macos-x86_64
+            release/harn-linux-x86_64
+            release/harn-linux-aarch64
+            release/SHA256SUMS
+
+      - name: Prune old preview prereleases (keep 15)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isPrerelease,createdAt > preview-releases.json
+          python3 - <<'PY' > old-preview-tags.txt
+          import json
+          with open("preview-releases.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+          releases = [
+              release for release in data
+              if release.get("isPrerelease") and str(release.get("tagName", "")).startswith("preview-")
+          ]
+          releases.sort(key=lambda release: str(release.get("createdAt", "")), reverse=True)
+          for release in releases[15:]:
+              print(release["tagName"])
+          PY
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done < old-preview-tags.txt
+
+  # The tap credential is used only in this job, and only by the bump step: the
+  # publish (prerelease + prune) never sees the secret or depends on it.
+  tap-bump:
+    needs: [preflight, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      # Presence only, at job level: a step's own `env` is not visible to its
+      # `if:`, and `secrets` cannot appear in `if:` at all. The token itself is
+      # injected on the bump step alone. 'false' while the repo has no
+      # TAP_DISPATCH_TOKEN.
+      HAS_TAP_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The same build artifacts the publish job uploaded to the prerelease, so
+      # the rendered sha256s are the ones brew will download.
+      - name: Download the published binaries
+        if: env.HAS_TAP_TOKEN == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: harn-*
+          merge-multiple: true
+          path: release
+
+      - name: Tap bump skipped (no TAP_DISPATCH_TOKEN)
+        if: env.HAS_TAP_TOKEN == 'false'
+        run: echo "::notice::TAP_DISPATCH_TOKEN is not set; 2lab-ai/homebrew-tap was not bumped to ${{ needs.preflight.outputs.tag }}"
+
+      - name: Bump Homebrew tap to this preview
+        # Event-driven tap update: render Formula/harn-preview.rb from the
+        # assets just published (same sha256s brew will download) and push it
+        # to the tap, so `brew upgrade harn-preview` sees this build without
+        # waiting on the tap's cron. Runs only when the credential exists; once
+        # it does, the script is fail-closed (a failed bump fails the job).
+        # Logic + its regression test live in .github/scripts/ (see the
+        # tap-bump-test job).
+        if: env.HAS_TAP_TOKEN == 'true'
+        env:
+          # Consumed by `gh auth setup-git`, never placed in a remote URL.
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          BUILD_ID: ${{ needs.preflight.outputs.build_id }}
+          RELEASE_DIR: release
+        run: .github/scripts/bump-tap-preview.sh
