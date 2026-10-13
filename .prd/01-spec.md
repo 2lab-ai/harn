@@ -4,10 +4,12 @@
 — every instruction file, memory, hook, skill, subagent, MCP server, plugin and built-in the agent
 will pick up — as one tree per agent, each row with where it came from, whether it costs bytes in
 the first model request (and how many), and the agent's official switch that turns it off. It
-turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
-second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
+turns items off, edits them, and undoes both, through a journal. Its operator is an AI agent:
+harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`apply`); the human
+reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
+and Linux; CLI only — no TUI; a GUI only as a read-only view.
 
-Status: **planned** — v2.9, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v3.0, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -133,8 +135,14 @@ request**. Details and URLs: `research/03`.
    observations and replace `predicted` with `observed` without failing. Only
    observed rows and regions are promoted; a Codex verify promotes instructions, skills and blocks
    and says that tools and hook output are outside Codex's dump.
-6. **Same model everywhere.** `harn <dir> --json` (schema `harn/1`), the TUI, `harn why`, `harn
-   path`, `harn off/on/edit/undo/history/verify` read and write one data model.
+6. **The operator is an AI; the human reads.** The user's direction (2026-10-13, `ssot.md`): the
+   analysis of what to keep and what to turn off is itself AI work, so harn's primary consumer is
+   an agent (Claude Code or Codex running in the same directory). `harn --json` (schema `harn/1`)
+   and `harn brief` (a compact, LLM-oriented text of the same facts) are the inputs; `harn apply
+   <plan.json>` executes an AI-authored plan after validating every op against the item's
+   supported knobs, with the same snapshot, diff and journal as `off`; `harn report --html` writes
+   a read-only visualization for the human. `why`, `path`, `off/on/edit/undo/history/verify` read
+   and write the same model. There is no TUI; a GUI never hosts a decision.
 7. **Runs on macOS (arm64, x86_64) and Linux (x86_64, arm64), including CachyOS**, with no runtime
    dependency beyond the agents it inspects. `harn --version` prints the agent versions the
    resolver's rules were verified against; a newer installed agent puts a drift warning in every
@@ -142,8 +150,10 @@ request**. Details and URLs: `research/03`.
 
 ## Non-goals
 
-- A GUI. The user said "TUI 혹은 GUI (필요시)"; nothing in the research makes a GUI necessary, and
-  migsilva89/loadout already occupies that niche. Revisit only on evidence.
+- A TUI, and a GUI that takes decisions. The user's direction after seeing migsilva89/loadout: a
+  GUI for choosing what to add or remove is a mistake, because the analysis belongs to an AI; CLI
+  only. A GUI is acceptable solely as a read-only visualization of the current loadout
+  (`harn report --html`).
 - An in-tool editor. Content editing is `harn edit` = snapshot → `$EDITOR` on the real path → diff
   → journal; `harn path <item>` prints the resolved path for anything else (`grep`, `rm`, your own
   tools). harn does not delete files itself.
@@ -259,6 +269,9 @@ selects one agent (default: all, one table each).
 | `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; a JSON/TOML/frontmatter file that no longer parses is journaled and warned about, not reverted; refused for `builtin`/`managed` items | diff + journal id |
 | `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted` / `content-mismatch`; exit 1 on any presence diff or content-conformance mismatch within the projection |
 | `harn verify --run` | runs the agent once under its official capture after printing what it will execute; refused under `--readonly` | same |
+| `harn brief [DIR]` | the same facts as `--json`, rendered as compact text for an LLM: header totals and signals, rows with id · origin · mode · cost · freed · default knob, open unknowns, and the exact `apply` plan format | text |
+| `harn apply <plan.json> [--dry-run]` | validate an AI-authored plan (`{"schema":"harn-plan/1","target_dir","ops":[{"selector","scope"?,"knob"?,"reason"}]}`): every selector resolves uniquely, every knob is one the item supports, scope never widens silently; then build one `ActionPlan`, print the diff + freed + side effects + each op's reason, apply, journal | plan + journal id |
+| `harn report [DIR] --html <out>` | a read-only visualization of the current loadout for the human (one page, both agents, the same rows and signals, no write controls) | file |
 | `harn completions <shell>` | clap completions | — |
 
 Item selectors: a full id or any unique suffix (`plugin:slack`, `rules/DEV.md`); an ambiguous
@@ -267,12 +280,15 @@ every active verify), `--no-unicode`, `--color`.
 
 ### P0.5 — Codex resolver (same commands; acceptance A7–A8)
 
-### P1 — TUI (`harn tui [DIR]` or `harn -i`; `harn [DIR]` always prints the table)
+### P1 — the AI operator loop
 
-One screen per agent as tabs, the same table, a detail/why pane, a staged-plan pane with the diff
-and freed delta, `?` key overlay and a context key bar; disable = stage + apply through the same
-`ActionPlan`; `--readonly` greys every write key. Key choices follow `research/03` §B (ncdu, yazi,
-lazygit, k9s) and are fixed in the P1 drive, not here.
+The intended use: inside the project, an agent runs `harn brief`, reasons over it (usage from
+session logs, which skills matter for this repo, which plugins are unused here), writes
+`plan.json` with a reason per op, runs `harn apply plan.json`, then `harn verify --run` to confirm
+the next session's request shrank and the signals cleared. A Claude Code skill shipped in this
+repo (`.claude/skills/harn-trim/SKILL.md`) packages that loop so `/harn-trim` does it in one turn;
+the skill is text, the contract is the CLI. The human looks at `harn report --html` before and
+after. No TUI is planned; the former TUI section was removed on the user's direction.
 
 ### First screen — zbrain on the author's machine
 
@@ -387,7 +403,7 @@ ignore trust entirely), and `-c plugins."x@y".enabled=false` being silently igno
 ## Acceptance scenarios
 
 Each row: run → what must be observed. "Both machines" = the author's macOS and `cachy-z13`.
-**P0 gate = A1–A6, A9–A11 on both machines. P0.5 = A7–A8. P1 (TUI) has its own rows in its drive.**
+**P0 gate = A1–A6, A9–A13 on both machines. P0.5 = A7–A8.**
 
 | # | run | observed |
 |---|---|---|
@@ -403,6 +419,8 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A9 | same binary on `cachy-z13` (`harn --version`, A1, A2) | identical columns and semantics; Linux paths (`/etc/claude-code/CLAUDE.md`, XDG state dir) resolved |
 | A10 | `harn --readonly off anything` · `harn --readonly verify --run` | both exit non-zero without writing or running |
 | A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target |
+| A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
+| A13 | `harn report --dir ~/2lab.ai/zbrain --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
 
 ## Tensions
 
@@ -455,6 +473,11 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v3.0 (2026-10-13, user direction after seeing migsilva89/loadout)** — the operator is an AI:
+  `harn brief` (LLM-oriented facts), `harn apply <plan.json>` (validated AI-authored plan through
+  the same snapshot/diff/journal), `harn report --html` (read-only human visualization); the TUI
+  removed entirely and the GUI confined to a read-only view; P1 = the AI operator loop with a
+  shipped `/harn-trim` skill; A12–A13 added to the P0 gate.
 - **v2.9 (2026-10-13, trinity round 4, last item)** — caption names the listing among the
   bundled rows and states that a plugin row's `+Δ?` and the listing row's `Δ?` are one unknown.
 - **v2.8 (2026-10-13, trinity round 4, nits)** — `Δ?` added to the model vocabulary; status

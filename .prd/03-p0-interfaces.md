@@ -84,11 +84,15 @@ later shows overflow (resolver leaves `signal` None; verify fills it). `tool_sea
 ## plan.rs / writers.rs / journal.rs (WU-E owns)
 
 ```rust
-pub struct PlannedOp { pub item_id: String, pub knob: Knob, pub file: Option<PathBuf>, pub hash_before: Option<String> }
+pub struct PlannedOp { pub item_id: String, pub knob: Knob, pub file: Option<PathBuf>, pub hash_before: Option<String>, pub reason: Option<String> }
 pub struct ActionPlan { pub target_dir: PathBuf, pub agent: Agent, pub ops: Vec<PlannedOp>,
     pub predicted_before: u64, pub predicted_after: u64, pub freed: Freed,
     pub side_effects: Vec<String>, pub warnings: Vec<String>, pub diff: String /* unified, all files */ }
 pub fn build_plan(resolver: &dyn Resolver, target: &Target, tree: &Tree, item_id: &str, scope: Option<Scope>) -> anyhow::Result<ActionPlan>;
+/// AI-authored plan (schema "harn-plan/1"): {"schema","target_dir","ops":[{"selector","scope"?:"local|project|user","knob"?:usize,"reason"}]}
+pub struct PlanRequest { pub schema: String, pub target_dir: PathBuf, pub ops: Vec<PlanOp> }
+pub struct PlanOp { pub selector: String, pub scope: Option<Scope>, pub knob: Option<usize>, pub reason: String }
+pub fn build_plan_from_request(resolver: &dyn Resolver, target: &Target, tree: &Tree, req: &PlanRequest) -> anyhow::Result<ActionPlan>;  // every selector unique (else Err listing candidates), knob index within item.knobs and not Knob::None, scope never wider than requested; reasons kept in PlannedOp.reason
 pub fn annotate_freed(resolver: &dyn Resolver, target: &Target, tree: &mut Tree) -> anyhow::Result<()>;  // fills Item.freed for knobs[0] via overlay re-resolve
 // writers: atomic replace (temp + fsync + rename); JSON via serde_json with preserve_order, 2-space
 pub fn apply(plan: &ActionPlan, journal: &mut Journal) -> anyhow::Result<JournalEntry>;
@@ -125,13 +129,16 @@ pub fn table(tree: &Tree, opts: &RenderOpts) -> String;   // header lines (total
 pub fn why(tree: &Tree, item: &Item, plans: &[ActionPlan]) -> String;
 pub fn json(doc: &Document) -> String;
 pub fn verify_report(report: &VerifyReport) -> String;
+pub fn brief(doc: &Document) -> String;        // LLM-oriented; ends with the harn-plan/1 format and an example op
+pub fn html(doc: &Document) -> String;         // one self-contained read-only page, inline CSS, no writing script, works at 400 px
 ```
 
 ## main.rs (WU-A owns; wires everything; later WUs do not edit it)
 
 `harn [DIR] [--dir D] [--agent A] [--json] [--readonly] [--no-unicode] [--color auto|always|never]`;
 subcommands `why <sel>`, `path <sel>`, `off <sel> [--scope] [--dry-run]`, `on <sel>`, `edit <sel>`,
-`undo [N]`, `history [--prune AGE]`, `verify [--capture P | --run] [--agent]`, `completions <shell>`.
+`undo [N]`, `history [--prune AGE]`, `verify [--capture P | --run] [--agent]`, `brief [DIR]`,
+`apply <plan.json> [--dry-run]`, `report [DIR] --html <out>`, `completions <shell>`. No `tui`.
 `DIR` and `--dir` together = clap conflict error. Exit codes: 0 ok · 1 verify diff · 2 ambiguous
 selector · 3 refused (readonly / builtin / no knob) · 4 stale journal. `harn --version` prints
 `harn <ver> (<channel> <rev12>) rules: claude-code <VERIFIED_AGAINST>`.

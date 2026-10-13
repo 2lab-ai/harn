@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **planned** — v1.3, 2026-10-13 (revised on trinity rounds 1–4). Boundaries for the first
+Status: **planned** — v1.4, 2026-10-13 (revised on trinity rounds 1–4; user direction: no TUI, AI operator). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 
@@ -11,8 +11,8 @@ and this file is fixed.
   edits), `walkdir`, `dirs`, `similar` (unified diffs). JSON settings files are rewritten through
   `preserve_order` + 2-space serialization and the diff is always printed before the write
   (`serde_json` does not preserve formatting; the diff is the user's check).
-- The TUI (`ratatui` 0.30 + `crossterm` 0.29, the llmux precedent) sits behind a cargo feature
-  `tui`, enabled in release builds from the P1 drive on; P0 binaries ship without it.
+- No TUI (user direction 2026-10-13); no `ratatui`/`crossterm`. The human-facing view is
+  `render/html.rs`: one self-contained HTML file, inline CSS, no script that writes anything.
 - Deliberately absent: a Trash crate (harn deletes nothing), tokenizers (all costs are bytes;
   `~tok` is a later optional feature), `clap_mangen` (`--help` covers eight subcommands).
 - Tests: `cargo test` unit tests on fixture directories (a miniature `~/.claude`, `~/.codex`, and
@@ -30,7 +30,8 @@ and this file is fixed.
 ```
 src/
   main.rs            clap entry: harn [DIR] (= --dir) | why | path | off | on | edit | undo |
-                     history | verify | tui (feature) | completions; DIR and --dir together = usage error
+                     history | verify | brief | apply | report | completions; DIR and --dir together
+                     = usage error
   model.rs           Agent, Item, Kind, Mode, Origin, Cost{source,predicted,observed}, Knob,
                      ActionPlan, RunContext (serde; schema "harn/1"); item selector resolution
                      (full id or unique suffix; ambiguous → candidates, exit 2)
@@ -83,7 +84,11 @@ src/
     table.rs         one table per agent (ncdu-style bars, eighth-block + ASCII fallback),
                      header with cost tag, attributed/framing split, tool-search state, drift warning
     json.rs          schema harn/1
-  tui/  (feature)    ratatui app over the same Tree + ActionPlan
+    brief.rs         LLM-oriented text: totals, signals, rows (id · origin · mode · cost · freed ·
+                     default knob), unknowns, and the harn-plan/1 format the agent must emit
+    html.rs          read-only visualization (one file, inline CSS, both agents, same rows/signals)
+  plan.rs (cont.)    PlanRequest (schema harn-plan/1) → validation (unique selectors, supported
+                     knobs, no silent scope widening) → one ActionPlan; reasons carried into the journal
 ```
 
 Data flow: `resolve` → `Tree` (pure, no writes, no spawned processes) → `plan` (freed via a
