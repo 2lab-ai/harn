@@ -1,7 +1,15 @@
 # loop — P0 drive
 
-Status: done (2026-10-13; R1–R5 in `loop.done.md`; `main` 54bc8d7, 275 tests; installed = `brew install 2lab-ai/tap/harn-preview` → 2026.10.13.0905)
+Status: in-progress (2026-10-13; R1–R5 closed in `loop.done.md`; R6 = the TUI as a screen, not a boxed table)
 
-Next start point: P0.5 — the Codex resolver (`01-spec.md` §P0.5, A7–A8) as its own workstream; P1 carry-overs in `01-spec.md` §P1 (usage evidence in the brief, `harn trim --agent codex`, report before/after, pointer-level undo, hook stdout join).
+## R6 — TUI information design (open)
 
-User gates left: first `v*` release tag (stable formula renders from it); `TAP_DISPATCH_TOKEN` on 2lab-ai/harn if the tap should follow each preview immediately (today the first formula of each preview is rendered by hand or by the 6-hourly schedule).
+User verdict on the R4 frames (verbatim in `prd-rewrite/ssot.md` 원문 7): unreadable; "the old thing with a UI stuck on". My frame review: zbrain `workflow/2lab-ai/harn/receipts-2026-10-13/tui-readability-review.md` (16 defects). Spec: `04-tui-design.md`.
+
+| WU | files owned | agent | state |
+|---|---|---|---|
+| WU-Q | `src/tui/model.rs` (view-model: groups by kind, human names, plugin facets folded, own bytes), `src/tui/view.rs` (2-line header, group list with bars, detail panel, cards), `src/tui/app.rs` (d → card → Enter; w/i/? cards), tests/tui.rs (rendered-frame assertions + negative test for raw ids/paths/hashes) | opus-coder (bg) | in `.worktrees/wu-q-tui-design` (branch `wu/q-tui-design`) |
+
+Gate for this round (A16): the dispatcher reads every captured frame (80×24, 120×40: first screen, Plugins opened, detail on slack, d card, after Enter, after u, w card, ? card, notes) and finds no raw id / absolute path / hash / `Δ?` / `mode` / `knob` / `ops (` / `rows shown of` / mid-word wrap, and can state the five biggest things from the first screen alone. Then external review (ui-ux reading + gpt6-reviewer), merge, preview, tap, brew upgrade, re-read the installed binary's frames.
+
+Next: WU-Q report → I read the frames → fixes until A16 holds → review → merge → publish.

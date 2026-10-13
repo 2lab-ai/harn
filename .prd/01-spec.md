@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; a CLI whose bare command is an interactive terminal view (TUI) for the human, `harn trim` for the AI; a GUI only as a read-only view.
 
-Status: **shipped (P0, Claude Code chain, incl. the TUI and `harn trim`)** — v3.7, 2026-10-13 (A1–A6, A9–A15 observed; P0.5 Codex and P1 remain planned; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **in-progress** — v3.8, 2026-10-13 (A1–A6, A9–A13, A15 observed; the TUI's A14 is VOID after the user read the frames — the screen is redesigned in [`04-tui-design.md`](04-tui-design.md), acceptance A16 there; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -497,6 +497,11 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.8 (2026-10-13, user verdict on the TUI frames)** — A14's readability clause was never
+  checked by a human; the shipped TUI was the CLI table, `why` text and `apply` dump inside boxes.
+  The screen is respecified in `04-tui-design.md` (groups by kind, human names, one row per thing,
+  own bytes per child, a sentence-level detail panel, one-card actions); A16 there replaces A14's
+  readability claim. Status back to in-progress until A16 is read green by the dispatcher.
 - **v3.7 (2026-10-13, R4 shipped)** — A14 (TUI) and A15 (`harn trim`) observed on zbrain: tmux
   frames at 80×24/120×40 with stage/apply/undo byte-identical, two real `claude -p` trim runs with
   nothing written; preview 2026.10.13.0840 installed through the tap. One hardening item open in
