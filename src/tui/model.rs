@@ -1365,7 +1365,10 @@ impl Builder<'_> {
                         self.d_clause_on("on an entry", "turns that one off")
                     )
                 } else {
-                    "Open it (→); o on an entry turns it back on.".to_string()
+                    format!(
+                        "Open it (→); {}",
+                        self.key_clause("o", "on an entry", "turns it back on")
+                    )
                 },
                 ..Detail::default()
             },
@@ -1939,13 +1942,19 @@ impl Builder<'_> {
 
     /// [`Self::d_clause`] with words between `d` and the verb (`d on an entry turns …`).
     fn d_clause_on(&self, on: &str, does: &str) -> String {
+        self.key_clause("d", on, does)
+    }
+
+    /// A sentence for a write key (`d`, `o`): `<key> <on> <does>.`; under `--readonly`
+    /// `<key> <on> would <do>.`.
+    fn key_clause(&self, key: &str, on: &str, does: &str) -> String {
         let on = if on.is_empty() {
             String::new()
         } else {
             format!(" {on}")
         };
         if !self.read_only {
-            return format!("d{on} {does}.");
+            return format!("{key}{on} {does}.");
         }
         let (verb, rest) = does.split_once(' ').unwrap_or((does, ""));
         let verb = verb.strip_suffix('s').unwrap_or(verb);
@@ -1954,7 +1963,7 @@ impl Builder<'_> {
         } else {
             format!(" {rest}")
         };
-        format!("d{on} would {verb}{rest}.")
+        format!("{key}{on} would {verb}{rest}.")
     }
 
     /// `turns it off`, `turns off the whole slack plugin`, `turns off every hook`.
@@ -2379,12 +2388,18 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
 
 /// The JSON pointer of an origin link's `#…` part and what follows it. A pointer keeps the
 /// spaces, parentheses and ` = ` of the directory names in it (only `/` and `~` are escaped), so
-/// the tail is read from the right, its form decided first. harn writes two: `<pointer> =
-/// <value>` and `<pointer> (<note>)`. A value that is a JSON string (the text ends in an
-/// unescaped `"`) is read back to its opening quote, and the ` = ` right before it is the
-/// separator, whatever the string holds. Else a note — the text ends in `)` and what follows
-/// its last ` (` has no `=` and no `/` (a JSON value never ends in an unquoted `)`) — and then
-/// the last ` = `. Anything else is all pointer.
+/// the tail is read from the right, its form decided first.
+///
+/// The grammar is what the resolver writes (`src/resolve`): `<pointer>`, `<pointer> (<note>)`,
+/// or `<pointer> = <scalar>` — `true`/`false`, a bare model, style or path, or a JSON string
+/// `"…"`. A container value (`= [...]`, `= {...}`) is out of contract: no producer writes one
+/// (`no_origin_link_carries_a_container_value` in `tests/resolve_claude.rs` fails if one does),
+/// and a ` = ` inside it would be taken for the separator.
+///
+/// A JSON string tail (the text ends in an unescaped `"`) is read back to its opening quote,
+/// and the ` = ` right before it is the separator, whatever the string holds. Else a note — the
+/// text ends in `)` and what follows its last ` (` has no `=` and no `/` (a scalar never ends in
+/// an unquoted `)`) — and then the last ` = `. Anything else is all pointer.
 pub fn split_link(rest: &str) -> (&str, &str) {
     if let Some(open) = string_tail(rest) {
         if let Some(at) = rest[..open].strip_suffix(" = ").map(str::len) {
@@ -3709,6 +3724,33 @@ mod tests {
             .groups
             .iter()
             .all(|g| g.kind != GroupKind::AgentListing));
+    }
+
+    #[test]
+    fn a_read_only_listing_of_off_entries_says_what_o_would_do() {
+        let tree = without_listings();
+        let off = [OffItem {
+            item_id: "claude-code/skill/user/mine".to_string(),
+            entry_id: "e1".to_string(),
+            pointer: None,
+        }];
+        let detail = |read_only: bool| {
+            build_with(&tree, &off, &HashMap::new(), Sort::Size, read_only)
+                .groups
+                .into_iter()
+                .find(|g| g.kind == GroupKind::SkillListing)
+                .unwrap()
+                .detail
+                .action
+        };
+        assert_eq!(
+            detail(false),
+            "Open it (→); o on an entry turns it back on."
+        );
+        assert_eq!(
+            detail(true),
+            "Open it (→); o on an entry would turn it back on."
+        );
     }
 
     #[test]

@@ -552,6 +552,38 @@ fn items_after_is_the_count_at_start_once_the_plan_is_applied() {
 }
 
 #[test]
+fn no_origin_link_carries_a_container_value() {
+    // The links `split_link` reads end in a scalar (`= true`, `= <model>`, `= <path>`,
+    // `= "<string>"`) or a `(note)`; a container would be cut at a ` = ` inside it.
+    let f = fixture();
+    let mut local: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap()).unwrap();
+    local["disableAllHooks"] = serde_json::json!(true);
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    let t = resolve(&f, None);
+    // What the scan covers: hooks off, plugins, memory, permission lists.
+    for kind in [Kind::Hook, Kind::Plugin, Kind::Memory, Kind::PermissionRule] {
+        assert!(!of_kind(&t, kind).is_empty(), "{kind}");
+    }
+    let mut tails = 0;
+    for item in model::walk(&t) {
+        for why in &item.origin.why {
+            assert!(
+                !why.contains(" = [") && !why.contains(" = {"),
+                "{}: {why}",
+                item.id
+            );
+            tails += usize::from(why.contains(" = "));
+        }
+    }
+    assert!(tails > 0, "some link ends in a value");
+}
+
+#[test]
 fn overlay_plugin_off_removes_every_contribution() {
     let f = fixture();
     let before = resolve(&f, None);
