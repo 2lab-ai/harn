@@ -1,0 +1,21 @@
+# Test fixtures
+
+One directory per fixture, `tests/fixtures/<name>/`, laid out as in
+[`.prd/03-p0-interfaces.md`](../../.prd/03-p0-interfaces.md) §Fixtures. No fixtures yet; WU-B and
+WU-D add theirs here.
+
+| path | owner | holds |
+|---|---|---|
+| `<name>/home/` | WU-B | a fake `~`: `.claude/settings.json`, `.claude.json`, `.claude/CLAUDE.md`, `.claude/skills/*`, `.claude/agents/*`, `.claude/plugins/{installed_plugins.json,cache/...}`, `.claude/projects/<slug>/memory/MEMORY.md` |
+| `<name>/project/` | WU-B | the target dir: `CLAUDE.md`, `rules/`, `.claude/{settings.json,settings.local.json,skills,agents}`, `.mcp.json` |
+| `<name>/expected/tree.json` | WU-B | the resolver's expected `Tree` (schema `harn/1`) |
+| `<name>/capture/` | WU-D | `*.request.json` (raw request body), `index.jsonl`, `stream.jsonl` (`system/init` event) |
+
+Tests resolve a fixture with `Target { dir: <name>/project, home: <name>/home, env: {} }`: the
+real `$HOME` and process environment never leak in.
+
+`freed` fixtures (acceptance A3b) define **both** renderings, before and after the action, so the
+assertion is the fixture's own byte difference, never a rule such as "at cap → 0": a
+token-budgeted listing (`Δ?` statically; the exact delta when the after-listing is supplied), a
+plugin whose skills leave with it, an item shared by two origins (counted once), and an excluded
+`CLAUDE.md` taking its `@imports` along.

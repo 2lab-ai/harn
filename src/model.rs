@@ -191,6 +191,7 @@ pub enum Knob {
     Env {
         name: String,
         value: String,
+        scope: Scope,
         note: Option<String>,
     },
     Quarantine {
@@ -351,7 +352,11 @@ pub struct Stale {
 
 impl fmt::Display for Stale {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "stale: {} file(s) changed since harn wrote them, nothing written:", self.files.len())?;
+        write!(
+            f,
+            "stale: {} file(s) changed since harn wrote them, nothing written:",
+            self.files.len()
+        )?;
         for file in &self.files {
             write!(f, "\n  {}", file.display())?;
         }
@@ -488,7 +493,10 @@ mod tests {
         // `short` is also a suffix of `long`; the exact stage must decide before the suffix stage.
         let short = "claude-code/skill/user/x";
         let long = "claude-code/skill/user/claude-code/skill/user/x";
-        let t = tree(vec![item(long, "a", Vec::new()), item(short, "b", Vec::new())]);
+        let t = tree(vec![
+            item(long, "a", Vec::new()),
+            item(short, "b", Vec::new()),
+        ]);
         assert_eq!(select(&t, short).unwrap().id, short);
     }
 
@@ -570,11 +578,21 @@ mod tests {
     #[test]
     fn item_id_follows_the_id_grammar() {
         assert_eq!(
-            item_id(Agent::ClaudeCode, Kind::McpServer, Layer::Plugin, "plugin:slack:slack"),
+            item_id(
+                Agent::ClaudeCode,
+                Kind::McpServer,
+                Layer::Plugin,
+                "plugin:slack:slack"
+            ),
             SLACK
         );
         assert_eq!(
-            item_id(Agent::ClaudeCode, Kind::Instruction, Layer::Project, "/repo/CLAUDE.md"),
+            item_id(
+                Agent::ClaudeCode,
+                Kind::Instruction,
+                Layer::Project,
+                "/repo/CLAUDE.md"
+            ),
             PROJECT_MD
         );
     }

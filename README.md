@@ -5,9 +5,16 @@
 loaded or only advertised, and the official switch that turns it off — and lets you turn items
 off reversibly. Claude Code first, Codex CLI second. One binary for macOS and Linux.
 
-Status: **spec only** (2026-10-13). The product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md);
-the implementation boundaries in [`.prd/02-architecture.md`](.prd/02-architecture.md); the research it
-rests on in [`.prd/research/`](.prd/research/). No code yet.
+Status: **scaffold, P0 in progress** (2026-10-13). The CLI parses every P0 command and the data
+model is in place; the resolver, renderers, oracle, planner and journal are stubs that say so. The
+product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md); the implementation boundaries in
+[`.prd/02-architecture.md`](.prd/02-architecture.md); the module contract in
+[`.prd/03-p0-interfaces.md`](.prd/03-p0-interfaces.md); the research it rests on in
+[`.prd/research/`](.prd/research/).
+
+Development gate: `just check` — `cargo fmt --check`,
+`cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, the same three steps
+CI runs on macOS and Ubuntu.
 
 Why: a fresh Claude Code session in one real working directory sends a 332 KB first request before
 reading the user's 30-byte instruction. Nothing shows that list for a directory without starting a

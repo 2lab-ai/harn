@@ -150,3 +150,31 @@ selector · 3 refused (readonly / builtin / no knob) · 4 stale journal. `harn -
 `project/` (the target dir: `CLAUDE.md`, `rules/`, `.claude/{settings.json,settings.local.json,skills,agents}`, `.mcp.json`),
 `expected/tree.json` (WU-B), `capture/` (WU-D: `*.request.json`, `index.jsonl`, `stream.jsonl`).
 Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
+
+## Amendments after WU-A (2026-10-13) — the contract as compiled
+
+- `model.rs` additionally has: `item_id(agent, kind, layer, name) -> String` (everyone builds ids
+  with it), `now_iso8601()`, `SelectError { Ambiguous(Vec<String>), NotFound(String) }`,
+  `Refused(String)` (→ exit 3) and `Stale { files }` (→ exit 4) error types that library code
+  returns inside `anyhow` and `main` finds anywhere in the chain; `as_str()`/`Display`/`ALL` on
+  the enums. Serialization: `Layer::ClaudeAi` = `"claudeai"` (the init-event provenance value),
+  `Kind::SubAgent` = `"sub-agent"`, `Knob` tagged `{"type": …}`, `OverlayOp` tagged `{"op": …}`.
+- `Knob::Env` has `scope: Scope` (the settings file whose `env` map receives it).
+- `plan::annotate_freed` is an `Ok(())` no-op until WU-E lands (`freed: None` is honest), so
+  A1/A2 run end-to-end once WU-B and WU-C exist. `plan::PLAN_SCHEMA = "harn-plan/1"`;
+  `PlanRequest`/`PlanOp` reject unknown keys.
+- `journal`: `Journal::state_dir() -> anyhow::Result<PathBuf>`; `JournalEntry.diff: Option<String>`
+  (unified diff of every changed file; `off`/`apply`/`edit` print it); new `on(journal, target,
+  selector)` (matches journaled ids, since an item that is off is no longer in the tree) and
+  `prune(journal, Duration) -> Vec<JournalEntry>`.
+- `oracle`: `read_capture(path, target)` decides OTEL dir / llmux line / trace bundle (WU-D owns
+  the policy); `Region { name, bytes }`; `InitEvent { tools, mcp_servers: Vec<InitMcpServer{name,
+  status, source}>, skills, agents, plugins: Vec<InitPlugin{name,path,source,version}>,
+  memory_paths: BTreeMap<String,String>, claude_code_version, model }`. `claude.rs` = `run_claude`,
+  `parse_request_body`, `parse_init_event`; `capture.rs` = the readers; all re-exported.
+- `render`: also `plan(&ActionPlan) -> String` and `history(&[JournalEntry]) -> String`; `main`
+  does no formatting.
+- `resolve::default_agents()` = `[ClaudeCode]` in P0; `for_agent(Codex)` is a stub.
+- Deferred to WU-F (integration): selector 4th tier (unique substring, so `plugin:slack` matches
+  `…/plugin:slack:slack`), `--assume-bytes-per-token`, exit-code collision notes (clap usage = 2 =
+  ambiguous selector; generic error = 1 = verify diff).
