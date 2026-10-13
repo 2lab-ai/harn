@@ -11,9 +11,11 @@ Status: **planned** — v2.9, 2026-10-13. Rewritten from scratch on [`research/`
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
-[`prd-rewrite/ssot.md`](prd-rewrite/ssot.md). This document is a target, not a description of
-shipped behavior; it moves to **shipped** only when [§Acceptance](#acceptance-scenarios) P0 is green
-on both machines.
+[`prd-rewrite/ssot.md`](prd-rewrite/ssot.md). Reviewed by the three-engine panel (grok-4.7,
+gpt-6-astra, fable): unanimous APPROVE on this text at round 5 of 5, 2026-10-13, no blocking
+items; round-by-round changes are in the [§Revision log](#revision-log). This document is a
+target, not a description of shipped behavior; it moves to **shipped** only when
+[§Acceptance](#acceptance-scenarios) P0 is green on both machines.
 
 ## Problem
 
