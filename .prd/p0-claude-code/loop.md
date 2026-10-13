@@ -7,13 +7,13 @@ Status: in-progress (2026-10-13; spec v3.0 — no TUI, AI operator: brief/apply/
 | WU | files owned | agent | state |
 |---|---|---|---|
 | WU-A | `Cargo.toml`, `justfile`, `src/lib.rs`, `src/main.rs`, `src/model.rs`, module stubs, `tests/fixtures/README.md`, `.github/workflows/ci.yml` | opus-coder (bg) | done — ceacd63 (31 tests), interface amendments recorded in 03 |
-| WU-B | `src/resolve/mod.rs`, `src/resolve/claude/**`, `tests/resolve_claude.rs`, `tests/fixtures/zbrain-like/**` | opus-coder (bg) | dispatched 2026-10-13 13:5x in `.worktrees/wu-b-resolve` (branch `wu/b-resolve`) |
+| WU-B | `src/resolve/mod.rs`, `src/resolve/claude/**`, `tests/resolve_claude.rs`, `tests/fixtures/zbrain-like/**` | opus-coder (bg) | merged 0a094db (73 tests; zbrain tree = init event set-for-set; 57/57 listing entries + 26/26 roster lines byte-exact vs capture) |
 | WU-C | `src/render/**` (table, json, brief, html), `tests/render.rs` | opus-coder (bg) | merged 8ee7e9f + 697b159 (63 tests; JournalEntry literal fixed at merge) |
 | WU-D | `src/oracle/**`, `src/verify.rs`, `tests/verify.rs`, `tests/fixtures/capture-*/**` | opus-coder (bg) | merged 8d8317f (59 tests; real capture sums to 332,548; one live run bound) |
 | WU-E | `src/plan.rs` (incl. PlanRequest harn-plan/1), `src/writers.rs`, `src/journal.rs`, `tests/plan_journal.rs` | opus-coder (bg) | merged ab69a44 + 7eacabb (74 tests; fixture settings.local.json needed a .gitignore negation) |
-| WU-F | integration: differential tests, `.claude/skills/harn-trim/SKILL.md`, A-row receipts A1–A6 + A9–A13 on macOS + cachy-z13 | dispatcher + devops | after B–E |
+| WU-F | integration (verify join by name, selector substring, A2 < 1 s, brief < 40 KB, G1/G2/G5, differential test, receipts) | opus-coder (bg) | dispatched in `.worktrees/wu-f-integration` (branch `wu/f-integration`) |
 
-Build facts: cargo 1.98.0 (macOS), 1.96.1 (cachy-z13); `just` 1.56.0 (macOS).
+Build facts: cargo 1.98.0 (macOS), 1.96.1 (cachy-z13, no `just`, no `bc`); `just` 1.56.0 (macOS). main = 176 tests. First e2e on zbrain (release, macOS): 343 items, 1.46 s, json 548 KB, brief 99 KB, html 284 KB (0 script), verify --run 6.2 s promoted 267 / 24 pred-not-seen / 29 seen-not-pred (layer-id mismatch, → WU-F). cachy-z13: builds, 176 tests pass, listing runs with drift warning (2.1.287 vs rules 2.1.296), tool search ON there → receipt `harn-receipts/A9-cachy-z13-r0.txt` (scratchpad).
 
 Open gaps (from WU reports, for WU-F):
 - G1 `main` `why` loop builds the local plan twice (local + project) when an item has local+user knobs → dedupe by knob (WU-E note).
