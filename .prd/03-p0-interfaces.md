@@ -210,13 +210,17 @@ Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
 
 ## Amendments after R3 (user correction 2026-10-13, 원문 3)
 
-- `Cmd::Trim { dir, dry_run: bool, yes: bool, agent_cmd: Option<String> }` — `src/trim.rs`
-  `pub fn trim(resolver, target, tree, opts: TrimOpts) -> Result<TrimOutcome>` where `TrimOpts`
-  carries `agent_cmd: Vec<String>` (default `["claude", "-p", "--output-format", "json"]`; the
-  prompt is appended as the last argument or fed on stdin when the command ends with `-`),
-  `dry_run`, `yes`, and a `confirm: Box<dyn FnMut(&ActionPlan) -> bool>`; `TrimOutcome::{DryRun(ActionPlan),
-  Declined(ActionPlan), Applied(JournalEntry)}`. Exit codes: 3 for a rejected plan (same as
-  `apply`), 1 for a missing agent binary or a reply without a plan.
+- `Cmd::Trim { dir_pos, dry_run: bool, yes: bool, agent_cmd: Option<String> }` — `src/trim.rs` as built:
+  `DEFAULT_AGENT_CMD = ["claude","-p","--output-format","json","-"]` (a trailing `-` = prompt on
+  stdin; otherwise the prompt is the last argument), `TrimOpts { agent_cmd: Vec<String>, dry_run,
+  yes }`, `trim(resolver, target, tree, &opts, confirm: &mut dyn FnMut(&ActionPlan) -> bool,
+  out: &mut dyn Write) -> Result<TrimOutcome>` with `TrimOutcome::{DryRun, Declined, Applied,
+  Nothing}` (`Nothing` = the agent returned `ops: []`, exit 0). The agent runs in a fresh temp
+  directory (so the target's CLAUDE.md/hooks/MCP do not load into the planning request), its
+  reply is unwrapped from Claude's json `result`, and the first balanced JSON object whose
+  `schema` is `harn-plan/1` is validated by `plan::build_plan_from_request`. `apply` and `trim`
+  share `render::plan` + `render::plan_footer`. Exit codes: 3 rejected plan or `--readonly`
+  (dry-run included — running an agent is active), 1 missing agent / agent failure / no plan.
 - `render::overview(tree, opts) -> String`; `RenderOpts.width` is the detected terminal width
   (`terminal_size` on a TTY, `COLUMNS` > 0 otherwise, else 120). `harn --all` = `render::table`.
 - `src/tui/`: `App::new(target, trees, opts) -> App`, `App::handle_key(&mut self, KeyEvent)`, `App::draw(&self, &mut Frame)`, `tui::run(target, trees, opts) -> Result<()>` (raw mode + alternate screen, restored on every exit path incl. panic). Bare `harn` dispatches to `tui::run` when stdout is a terminal and neither `--json` nor `--table` is set.
