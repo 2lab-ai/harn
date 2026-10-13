@@ -7,7 +7,7 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Its operator is an AI agent:
 harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`apply`); the human
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
-and Linux; CLI only — no TUI; a GUI only as a read-only view.
+and Linux; a CLI whose bare command is an interactive terminal view (TUI) for the human, `harn trim` for the AI; a GUI only as a read-only view.
 
 Status: **in-progress** — v3.6, 2026-10-13 (P0 rows A1–A13 shipped; A14 TUI + A15 `harn trim` in the R4 drive after the user's first-install corrections; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
@@ -142,7 +142,7 @@ request**. Details and URLs: `research/03`.
    <plan.json>` executes an AI-authored plan after validating every op against the item's
    supported knobs, with the same snapshot, diff and journal as `off`; `harn report --html` writes
    a read-only visualization for the human. `why`, `path`, `off/on/edit/undo/history/verify` read
-   and write the same model. There is no TUI; a GUI never hosts a decision.
+   and write the same model. The TUI acts only through that model (ActionPlan + journal); a GUI never hosts a decision.
 7. **Runs on macOS (arm64, x86_64) and Linux (x86_64, arm64), including CachyOS**, with no runtime
    dependency beyond the agents it inspects. `harn --version` prints the agent versions the
    resolver's rules were verified against; a newer installed agent puts a drift warning in every
