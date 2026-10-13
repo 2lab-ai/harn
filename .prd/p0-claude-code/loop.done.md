@@ -61,3 +61,23 @@ Four defects surfaced by running A4 for real, fixed per-unit in worktrees and me
 Noted, not changed: `tests/cli.rs` `edit_prints_the_diff_then_the_journal_line_and_records_the_target` cannot assert the version because the zbrain-like fixture HOME has no `versions/` dir; the verify report against the stale 02:52Z capture reads `passed: no` by capture drift (tools disallowed in that run, DEV.md/MEMORY.md changed since), not by code.
 
 External review of R2 (gpt6-reviewer, one dispatch per fix, post-merge): 4/4 no MUST-FIX (G conditionally-ready on evidence the drive holds: the later `warnings.extend` only merges format-built strings; H/I/J release-ready). The three suggested tests landed per unit: CLI edit journals the discovered version (a0b24b8), ActionPlan JSON round-trip and missing-key load (f36625b), bound capture without a skill listing still drops the cap-state warning with a mutation check (412c758). `main` 412c758 = 199 tests, CI green on each push.
+
+## R3 — closed (2026-10-13) — distribution chain
+
+The R2 close claimed "release/preview/tap assets exist"; `main` had only `ci.yml`. This round delivered 02-architecture §Distribution and measured a real install. Receipt: zbrain `workflow/2lab-ai/harn/receipts-2026-10-13/preview-r1.txt`.
+
+### Closed WUs
+
+| WU | files owned | agent | state |
+|---|---|---|---|
+| WU-K | `.github/workflows/release.yml` (v* tag = Cargo version, 4-target matrix, `harn-<os>-<arch>` + SHA256SUMS, action-gh-release), `.github/workflows/preview.yml` (prerelease `preview-<stamp>-<sha12>` per main push, prune to 15, `tap-bump` job isolated: job-level presence boolean, token on the bump step only), `.github/scripts/bump-tap-preview.sh` + hermetic test (43 cases; placeholder guard `@[A-Z0-9_]+@`, per-platform url/sha pairing, drift-digits and hash-swap mutations caught) | opus-coder (bg) | review MUST-FIX 1 (digit-less placeholder guard — inherited from llmux, filed 2lab-ai/llmux#205) → fixed → re-review release-ready → merged 79b3279 (actionlint 0, `just check` 199) |
+| WU-L | 2lab-ai/homebrew-tap: `Formula/harn.rb.tmpl`, `Formula/harn-preview.rb.tmpl`, scheduled `bump-harn` + `bump-harn-preview`, README rows | opus-coder (bg) | review release-ready → tap master 6839b4a |
+
+### Measured
+
+- Preview run 38358998618 on 79b3279: preflight, 4 builds, tap-bump-test, publish, tap-bump all green; prerelease `preview-2026-10-13-0650-79b3279e5c63` with 4 binaries (3.6–4.3 MB) + SHA256SUMS. Without `TAP_DISPATCH_TOKEN` the tap-bump job printed the notice and skipped the bump (HAS_TAP_TOKEN=false), as designed.
+- macOS arm64: asset sha equals SHA256SUMS; `harn 0.1.0 (preview 79b3279e5c63) rules: claude-code 2.1.296`.
+- cachy-z13 (Linux x86_64): `sha256sum -c` ok, installed to `~/.local/bin/harn`, same version line, zbrain listing in 40 ms.
+- Tap: `Formula/harn-preview.rb` rendered from the tag with the bump job's commands (version 2026.10.13.0650) → tap master d41c203. `brew install 2lab-ai/tap/harn-preview` → Cellar 2026.10.13.0650; `/opt/homebrew/bin/harn --version` = the preview line; listing from PATH ~1 s.
+
+User-held pieces left: `TAP_DISPATCH_TOKEN` on 2lab-ai/harn (immediate tap bump instead of the 6-hourly schedule) and the first `v*` tag (stable formula). Neither blocks preview installs.

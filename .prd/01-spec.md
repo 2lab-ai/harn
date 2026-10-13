@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; CLI only — no TUI; a GUI only as a read-only view.
 
-Status: **shipped (P0, Claude Code chain)** — v3.3, 2026-10-13 (P0.5 Codex resolver and P1 remain planned; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **shipped (P0, Claude Code chain)** — v3.4, 2026-10-13 (P0.5 Codex resolver and P1 remain planned; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -474,6 +474,10 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.4 (2026-10-13, distribution live)** — release/preview workflows and the tap formulae landed
+  (02 §Distribution as written); first prerelease `preview-2026-10-13-0650-79b3279e5c63` built on
+  4 targets and installed through `brew install 2lab-ai/tap/harn-preview`; `harn --version` prints
+  `preview <sha12>`. Stable formula waits for the first `v*` tag.
 - **v3.3 (2026-10-13, P0 shipped)** — Status flipped to shipped for the Claude Code chain: P0 gate
   rows A1–A6, A9–A13 observed (A4 run for real on zbrain: one knob, fresh `init` without the
   plugin, `undo` byte-identical); P1 carry-overs G3/G7 recorded; A3's observed header and the
