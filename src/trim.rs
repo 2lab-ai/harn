@@ -17,14 +17,25 @@ use anyhow::{anyhow, bail, Context};
 use serde_json::Value;
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `claude -p --output-format json` with the prompt piped on stdin (the trailing `-`, see
-/// [`TrimOpts::agent_cmd`]; no single-argument size limit): one model request, the answer in
-/// `result`.
-pub const DEFAULT_AGENT_CMD: &[&str] = &["claude", "-p", "--output-format", "json", "-"];
+/// `claude -p --output-format json --tools "" --max-turns 1` with the prompt piped on stdin (the
+/// trailing `-`, see [`TrimOpts::agent_cmd`]; no single-argument size limit): no tools at all and
+/// one turn by construction, one model request, the answer in `result`. `--agent-cmd` replaces
+/// it as given (the user's own, trusted command).
+pub const DEFAULT_AGENT_CMD: &[&str] = &[
+    "claude",
+    "-p",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--max-turns",
+    "1",
+    "-",
+];
 
 /// Read last by the agent, after the brief; `{dir}` = the target dir.
 const INSTRUCTIONS: &str = "TASK: you are the operator of this directory's harness ({dir}). \
@@ -88,10 +99,10 @@ pub fn trim(
     writeln!(
         out,
         "asking {} for a plan (one model request)…",
-        opts.agent_cmd.join(" ")
+        display_command(&opts.agent_cmd)
     )?;
     out.flush()?;
-    let stdout = run_agent(&opts.agent_cmd, &prompt)?;
+    let stdout = run_agent(&opts.agent_cmd, &prompt, &target.dir)?;
     let text = reply_text(&stdout);
     let Some(value) = extract_plan(&text) else {
         bail!(
@@ -158,6 +169,23 @@ pub fn split_command(text: &str) -> anyhow::Result<Vec<String>> {
     Ok(words)
 }
 
+/// `cmd` as a shell would read it back: a word that is empty or holds whitespace or a quote is
+/// single-quoted (so `--tools ""` shows as `--tools ''`, not as a double space).
+fn display_command(cmd: &[String]) -> String {
+    cmd.iter()
+        .map(|word| {
+            if !word.is_empty()
+                && !word.contains(|c: char| c.is_whitespace() || "'\"\\".contains(c))
+            {
+                word.clone()
+            } else {
+                format!("'{}'", word.replace('\'', r"'\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn unterminated() -> anyhow::Error {
     anyhow!("--agent-cmd: unterminated quote or trailing \\")
 }
@@ -184,12 +212,14 @@ fn prompt(brief: &str, target: &Target) -> String {
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
-    fn new() -> anyhow::Result<ScratchDir> {
+    /// Under [`scratch_base`] of `std::env::temp_dir()`, else `/tmp`.
+    fn new(target_dir: &Path) -> anyhow::Result<ScratchDir> {
+        let base = scratch_base(target_dir, &[std::env::temp_dir(), PathBuf::from("/tmp")])?;
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("harn-trim-{}-{nanos}", std::process::id()));
+        let dir = base.join(format!("harn-trim-{}-{nanos}", std::process::id()));
         // `create`, not `create_all`: an existing path (planted or not) is an error.
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -197,6 +227,22 @@ impl ScratchDir {
             .with_context(|| format!("create {}", dir.display()))?;
         Ok(ScratchDir(dir))
     }
+}
+
+/// The first candidate (canonicalized) that is not inside `target_dir`: the agent's cwd and its
+/// ancestors must not be the target or under it, or the agent would load the target's own
+/// CLAUDE.md, hooks and MCP servers into the planning request.
+fn scratch_base(target_dir: &Path, candidates: &[PathBuf]) -> anyhow::Result<PathBuf> {
+    candidates
+        .iter()
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .find(|dir| !dir.starts_with(target_dir))
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot find a scratch directory outside {}",
+                target_dir.display()
+            )
+        })
 }
 
 impl Drop for ScratchDir {
@@ -209,7 +255,7 @@ impl Drop for ScratchDir {
 /// Runs the agent once, in a [`ScratchDir`], and returns its stdout. Not found → the
 /// `/harn-trim` hint; a failing exit → the first lines of its stderr (of its stdout when stderr
 /// is empty: Claude Code's json output reports errors there).
-fn run_agent(cmd: &[String], prompt: &str) -> anyhow::Result<String> {
+fn run_agent(cmd: &[String], prompt: &str, target_dir: &Path) -> anyhow::Result<String> {
     let (program, args) = cmd
         .split_first()
         .ok_or_else(|| anyhow!("--agent-cmd is empty"))?;
@@ -218,7 +264,7 @@ fn run_agent(cmd: &[String], prompt: &str) -> anyhow::Result<String> {
         Some((last, rest)) if last == "-" => (rest, true),
         _ => (args, false),
     };
-    let cwd = ScratchDir::new()?;
+    let cwd = ScratchDir::new(target_dir)?;
     let mut command = Command::new(program);
     command
         .current_dir(&cwd.0)
@@ -284,15 +330,13 @@ fn reply_text(stdout: &str) -> String {
     .unwrap_or_else(|| stdout.to_string())
 }
 
-/// The first balanced `{…}` of `text` that parses as a JSON object whose `schema` is
-/// [`PLAN_SCHEMA`]. Every `{` is a candidate start, so an inner object is still found when an
-/// outer one is prose or a wrapper (`{"plan": {…}}`).
+/// The first balanced `{…}` of `text` that parses as a JSON object whose decoded `schema` is
+/// [`PLAN_SCHEMA`] (so `harn-plan\/1` and `harn-plan\u002f1` count). Every `{` is a candidate
+/// start, so an inner object is still found when an outer one is prose or a wrapper
+/// (`{"plan": {…}}`).
 fn extract_plan(text: &str) -> Option<Value> {
     text.match_indices('{').find_map(|(start, _)| {
         let candidate = &text[start..start + balanced_len(&text.as_bytes()[start..])?];
-        if !candidate.contains(PLAN_SCHEMA) {
-            return None;
-        }
         let value: Value = serde_json::from_str(candidate).ok()?;
         (value.get("schema").and_then(Value::as_str) == Some(PLAN_SCHEMA)).then_some(value)
     })
@@ -393,6 +437,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_plan_decodes_the_schema_instead_of_matching_its_text() {
+        for schema in [
+            r#""harn-plan\/1""#,
+            r#""harn-plan\u002f1""#,
+            r#""harn-plan\u002F1""#,
+        ] {
+            let text = format!(r#"plan: {{"schema":{schema},"target_dir":"/x","ops":[]}} done"#);
+            let found = extract_plan(&text).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(found["schema"], PLAN_SCHEMA, "{text}");
+            assert_eq!(found["ops"], serde_json::json!([]), "{text}");
+        }
+    }
+
+    #[test]
     fn extract_plan_skips_wrappers_and_other_schemas() {
         let text = r#"{"plan": {"schema": "harn-plan/1", "target_dir": "/x", "ops": []}}"#;
         assert_eq!(extract_plan(text).unwrap()["target_dir"], "/x");
@@ -430,7 +488,8 @@ mod tests {
     #[test]
     fn split_command_splits_on_whitespace_and_groups_quotes() {
         assert_eq!(
-            split_command("  claude -p   --output-format json - ").unwrap(),
+            split_command("  claude -p   --output-format json --tools '' --max-turns 1 - ")
+                .unwrap(),
             DEFAULT_AGENT_CMD
         );
         assert_eq!(
@@ -440,6 +499,55 @@ mod tests {
         assert!(split_command("   ").is_err());
         assert!(split_command("agent 'open").is_err());
         assert!(split_command("agent \\").is_err());
+    }
+
+    #[test]
+    fn display_command_quotes_empty_and_spaced_words_only() {
+        let default: Vec<String> = DEFAULT_AGENT_CMD.iter().map(|s| s.to_string()).collect();
+        let shown = display_command(&default);
+        assert_eq!(
+            shown,
+            "claude -p --output-format json --tools '' --max-turns 1 -"
+        );
+        assert_eq!(split_command(&shown).unwrap(), default);
+        let odd = [
+            "/a b/agent".to_string(),
+            "it's".to_string(),
+            "x".to_string(),
+        ];
+        assert_eq!(display_command(&odd), r"'/a b/agent' 'it'\''s' x");
+    }
+
+    #[test]
+    fn scratch_base_is_never_inside_the_target() {
+        let root = std::env::temp_dir().join(format!("harn-trim-unit-{}", std::process::id()));
+        let target = root.join("project");
+        let inside = target.join("tmp");
+        let outside = root.join("elsewhere");
+        for dir in [&inside, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let target = std::fs::canonicalize(&target).unwrap();
+        let outside = std::fs::canonicalize(&outside).unwrap();
+        // The first candidate is inside the target: the next one is used.
+        assert_eq!(
+            scratch_base(&target, &[inside.clone(), outside.clone()]).unwrap(),
+            outside
+        );
+        // The target itself counts as inside; a missing candidate is skipped.
+        let err = scratch_base(&target, &[target.clone(), inside, root.join("missing")])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            format!(
+                "cannot find a scratch directory outside {}",
+                target.display()
+            )
+        );
+        // A target that contains everything leaves no candidate.
+        assert!(scratch_base(Path::new("/"), &[outside]).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

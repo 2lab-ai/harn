@@ -123,9 +123,9 @@ enum Cmd {
         /// Apply without asking (required when stdin is not a terminal)
         #[arg(long)]
         yes: bool,
-        /// Agent command, run in an empty temp dir; a trailing `-` means: pipe the prompt on
-        /// stdin instead of passing it as the last argument (default: claude -p --output-format
-        /// json -)
+        /// Agent command, run as given in an empty temp dir; a trailing `-` means: pipe the
+        /// prompt on stdin instead of passing it as the last argument (default: claude -p
+        /// --output-format json --tools '' --max-turns 1 -)
         #[arg(long, value_name = "CMD")]
         agent_cmd: Option<String>,
     },

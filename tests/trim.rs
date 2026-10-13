@@ -8,7 +8,9 @@ use common::{fixture, Fixture};
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// The plugin row of the fixture: one local `enabledPlugins` knob; its skills, MCP server and
 /// hook leave with it.
@@ -17,8 +19,12 @@ const PLUGIN_ID: &str = "claude-code/plugin/plugin/alpha@market-one";
 const REASON: &str = "alpha is not used in this project";
 
 fn harn(f: &Fixture, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_harn"))
-        .env("HOME", &f.home)
+    harn_cmd(f, &[], args).output().expect("run harn")
+}
+
+fn harn_cmd(f: &Fixture, envs: &[(&str, &Path)], args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_harn"));
+    cmd.env("HOME", &f.home)
         .env("XDG_STATE_HOME", f.root.join("state"))
         .env_remove("NO_COLOR")
         // Tool search is decided from these; the caller's shell must not leak in.
@@ -27,9 +33,34 @@ fn harn(f: &Fixture, args: &[&str]) -> Output {
         .env_remove("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
         .arg("--dir")
         .arg(&f.project)
-        .args(args)
-        .output()
-        .expect("run harn")
+        .args(args);
+    for (name, value) in envs {
+        cmd.env(name, value);
+    }
+    cmd
+}
+
+/// `cmd` run to completion within 30 s, else killed and the test fails: a pipe deadlock between
+/// harn and its agent shows up as this timeout, not as a hung test run.
+fn bounded(mut cmd: Command) -> Output {
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run harn");
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(out) => out.expect("wait for harn"),
+        Err(_) => {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            panic!("harn did not finish within 30 s (pipe deadlock?)");
+        }
+    }
 }
 
 fn stdout(out: &Output) -> String {
@@ -66,8 +97,6 @@ fn agent_cwd(f: &Fixture) -> PathBuf {
 /// [`prompt_file`], then runs `body`.
 fn script(f: &Fixture, body: &str) -> PathBuf {
     let dir = f.root.join("agent");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("agent.sh");
     let text = format!(
         "#!/bin/sh\nprintf '%s' \"$#\" > '{dir}/argc.txt'\npwd > '{dir}/pwd.txt'\n\
          for last; do :; done\ncat > '{dir}/stdin.txt'\n\
@@ -76,9 +105,30 @@ fn script(f: &Fixture, body: &str) -> PathBuf {
         dir = dir.display(),
         p = prompt_file(f).display()
     );
+    write_agent(f, &text)
+}
+
+/// `text` as the executable fake agent `agent/agent.sh`.
+fn write_agent(f: &Fixture, text: &str) -> PathBuf {
+    let dir = f.root.join("agent");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("agent.sh");
     std::fs::write(&path, text).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
+}
+
+/// 300 rule files with 200-byte names: every one is a top-level brief row, so the prompt
+/// outgrows a pipe buffer (64 KiB) on any temp path. Returns the brief's size.
+fn inflate_brief(f: &Fixture) -> usize {
+    let rules = f.project.join(".claude/rules");
+    for i in 0..300 {
+        let name = format!("{i:03}-{}.md", "r".repeat(196));
+        std::fs::write(rules.join(name), "# rule\nkeep lines short.\n").unwrap();
+    }
+    let out = harn(f, &["brief"]);
+    assert!(out.status.success(), "{out:?}");
+    out.stdout.len()
 }
 
 /// A fake agent that prints `reply` verbatim.
@@ -435,4 +485,119 @@ fn trim_with_an_empty_plan_reports_nothing_to_turn_off() {
     assert!(!text.contains("plan for "), "{text}");
     assert_eq!(settings(&f), before);
     assert_eq!(history(&f), json!([]));
+}
+
+#[test]
+fn trim_keeps_the_agent_out_of_the_target_when_tmpdir_is_inside_it() {
+    let f = fixture();
+    let cmd = agent(&f, &claude_reply(&turn_off_plugin(&f)));
+    let tmpdir = f.project.join("tmp");
+    std::fs::create_dir(&tmpdir).unwrap();
+
+    let out = harn_cmd(
+        &f,
+        &[("TMPDIR", &tmpdir)],
+        &["trim", "--dry-run", "--agent-cmd", &cmd],
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let cwd = agent_cwd(&f);
+    assert!(!cwd.starts_with(&f.project), "{}", cwd.display());
+    assert!(
+        cwd.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("harn-trim-"),
+        "{}",
+        cwd.display()
+    );
+    assert!(!cwd.exists(), "{} left behind", cwd.display());
+    assert_eq!(std::fs::read_dir(&tmpdir).unwrap().count(), 0);
+}
+
+#[test]
+fn trim_decodes_an_escaped_schema_and_an_empty_plan_is_nothing() {
+    let f = fixture();
+    // Raw stdout, the slash escaped: the text never contains `harn-plan/1` literally.
+    let reply = format!(
+        r#"{{"schema":"harn-plan\/1","target_dir":"{}","ops":[]}}"#,
+        f.project.display()
+    );
+    let cmd = agent(&f, &reply);
+    let before = settings(&f);
+
+    let out = harn(&f, &["trim", "--yes", "--agent-cmd", &cmd]);
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    assert_eq!(
+        text.lines().last(),
+        Some("the agent found nothing to turn off"),
+        "{text}"
+    );
+    assert_eq!(settings(&f), before);
+}
+
+#[test]
+fn trim_survives_an_agent_that_writes_a_large_reply_before_reading_stdin() {
+    let f = fixture();
+    assert!(inflate_brief(&f) > 64 * 1024);
+    let dir = f.root.join("agent");
+    // 200,000 bytes of prose (> 128 KiB) and the plan on stdout before stdin is read: harn must
+    // drain stdout while it is still writing the prompt.
+    let text = format!(
+        "#!/bin/sh\nyes x | head -c 200000\nprintf '\\n'\ncat <<'HARN_REPLY'\n{}\nHARN_REPLY\n\
+         cat > '{}/stdin.txt'\n",
+        turn_off_plugin(&f),
+        dir.display()
+    );
+    let path = write_agent(&f, &text);
+
+    let out = bounded(harn_cmd(
+        &f,
+        &[],
+        &[
+            "trim",
+            "--dry-run",
+            "--agent-cmd",
+            &format!("{} -", path.display()),
+        ],
+    ));
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).contains(&format!("  [1] {PLUGIN_ID}")),
+        "{out:?}"
+    );
+    let prompt = std::fs::read_to_string(dir.join("stdin.txt")).unwrap();
+    assert!(prompt.len() > 64 * 1024, "{}", prompt.len());
+    assert!(prompt.ends_with("no prose, no code fence."));
+}
+
+#[test]
+fn trim_survives_an_agent_that_exits_without_reading_stdin() {
+    let f = fixture();
+    assert!(inflate_brief(&f) > 64 * 1024);
+    // The prompt fills the pipe and the agent never reads it: harn's write fails with a broken
+    // pipe once the agent exits, and the reply still counts.
+    let text = format!(
+        "#!/bin/sh\ncat <<'HARN_REPLY'\n{}\nHARN_REPLY\nexit 0\n",
+        turn_off_plugin(&f)
+    );
+    let path = write_agent(&f, &text);
+
+    let out = bounded(harn_cmd(
+        &f,
+        &[],
+        &[
+            "trim",
+            "--dry-run",
+            "--agent-cmd",
+            &format!("{} -", path.display()),
+        ],
+    ));
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).contains(&format!("  [1] {PLUGIN_ID}")),
+        "{out:?}"
+    );
 }
