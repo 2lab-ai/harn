@@ -119,7 +119,7 @@ OTEL_LOG_RAW_API_BODIES=file:<dir> claude -p hi --output-format stream-json --ve
    (`plugin:slack:slack` connected/plugin, `plugin:atlassian:atlassian` connected/plugin,
    `plugin:context7:context7` **disabled**/plugin), `skills` (213 names), `slash_commands` (259),
    `agents` (31), `plugins[{name,path,source,version}]` (13, with the cache path of each enabled
-   version), `memory_paths` = `{"auto": "/Users/zhugehyuk/.claude/projects/-Users-zhugehyuk-2lab-ai-zbrain/memory/"}`, `output_style`, `model`, `permissionMode`,
+   version), `memory_paths` = `{"auto": "~/.claude/projects/-Users-zhugehyuk-2lab-ai-zbrain/memory/"}`, `output_style`, `model`, `permissionMode`,
    `claude_code_version`. This is the authoritative "what is enabled, from where" list; it costs
    one model request because it is emitted by a real session.
 
