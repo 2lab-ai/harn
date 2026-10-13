@@ -1,17 +1,15 @@
 # loop — P0 drive
 
-Status: in-progress (2026-10-13; R1–R3 closed in `loop.done.md`; R4 = the user's first-install corrections, 원문 3–6: bare `harn` = TUI, `harn trim` = the AI default)
+Status: in-progress (2026-10-13; R1–R4 closed in `loop.done.md`; one hardening unit open)
 
-## R4 — human view + AI default (open)
+## R5 — startup must not wait on a terminal reply (open)
 
 | WU | files owned | agent | state |
 |---|---|---|---|
-| WU-M | terminal width detection (`terminal_size`), `--table` flag (also the non-TTY default), `--help` Getting started, `[AI operator]` labels, README usage order | opus-coder (bg) | in `.worktrees/wu-m-first-screen` (branch `wu/m-first-screen`); scope cut from an "overview" screen to this after 원문 5 |
-| WU-N | `src/trim.rs`, `Cmd::Trim`, shared plan printing with `apply`, tests/trim.rs, README `harn trim`, skill header line | opus-coder (bg) | in `.worktrees/wu-n-trim` (branch `wu/n-trim`) |
-| WU-O | `src/tui/` (ratatui 0.30 + crossterm 0.29, terminal-free `App`), bare-command dispatch on a TTY, tests/tui.rs (TestBackend), README first line | opus-coder (bg) | in `.worktrees/wu-o-tui` (branch `wu/o-tui`) |
+| WU-P | `src/tui/mod.rs` (no cursor-position query at startup; Fullscreen/Fixed viewport sized by ioctl, resize kept) | opus-coder (bg) | in `.worktrees/wu-p-no-dsr` (branch `wu/p-no-dsr`); oracle = the pty probe script (expect `header=True … exit=0`) |
 
-Merge order: M → N → O (each adds a main.rs arm; resolve by hand), review per unit before merge (gpt6-reviewer), `just check` after each, one push at the end → preview publish → tap render → `brew upgrade harn-preview` → A14 receipt = tmux captures at 80×24 and 120×40 on fable-m5max + cachy-z13; A15 receipt = fake-agent run + one real `claude -p` run.
+Found by the cachy-z13 pty probe (and reproduced on macOS): under a pty whose other side does not answer `ESC[6n`, harn enters the alternate screen, waits for the cursor position, then exits 1 with the terminal restored. Real terminals answer, so the brew-installed TUI works, but startup must not depend on the reply.
 
-Open gaps: G3 (pointer-level undo, P1), G7 (hook stdout join, P1); `TAP_DISPATCH_TOKEN` and the first `v*` tag stay user gates.
+Next: WU-P → review → merge → gate → push → preview → tap → `brew upgrade` → re-run the pty probe on cachy-z13 and macOS → close R5 → Status done.
 
-Next: agents report → review → merge → gate → push → measure → close R4 → Status done.
+User gates left: first `v*` tag; `TAP_DISPATCH_TOKEN` (optional).

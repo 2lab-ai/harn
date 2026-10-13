@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; a CLI whose bare command is an interactive terminal view (TUI) for the human, `harn trim` for the AI; a GUI only as a read-only view.
 
-Status: **in-progress** — v3.6, 2026-10-13 (P0 rows A1–A13 shipped; A14 TUI + A15 `harn trim` in the R4 drive after the user's first-install corrections; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **shipped (P0, Claude Code chain, incl. the TUI and `harn trim`)** — v3.7, 2026-10-13 (A1–A6, A9–A15 observed; P0.5 Codex and P1 remain planned; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -496,6 +496,10 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.7 (2026-10-13, R4 shipped)** — A14 (TUI) and A15 (`harn trim`) observed on zbrain: tmux
+  frames at 80×24/120×40 with stage/apply/undo byte-identical, two real `claude -p` trim runs with
+  nothing written; preview 2026.10.13.0840 installed through the tap. One hardening item open in
+  the drive (startup must not wait on a cursor-position reply).
 - **v3.6 (2026-10-13, user correction, 원문 4–6)** — the TUI is back as the human's view and the
   bare `harn` on a terminal: the harness is hundreds of rows, so it is folded and searched, not
   summarized; writes still go through ActionPlan + journal. `--table` for the table (also the

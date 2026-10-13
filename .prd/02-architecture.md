@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **in-progress** — v1.6, 2026-10-13 (modules as built on `main` + the `trim` module from the R4 drive; P0.5 Codex resolver still planned). Boundaries for the first
+Status: **shipped (P0)** — v1.6, 2026-10-13 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5 Codex resolver still planned). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 

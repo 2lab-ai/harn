@@ -81,3 +81,22 @@ The R2 close claimed "release/preview/tap assets exist"; `main` had only `ci.yml
 - Tap: `Formula/harn-preview.rb` rendered from the tag with the bump job's commands (version 2026.10.13.0650) → tap master d41c203. `brew install 2lab-ai/tap/harn-preview` → Cellar 2026.10.13.0650; `/opt/homebrew/bin/harn --version` = the preview line; listing from PATH ~1 s.
 
 User-held pieces left: `TAP_DISPATCH_TOKEN` on 2lab-ai/harn (immediate tap bump instead of the 6-hourly schedule) and the first `v*` tag (stable formula). Neither blocks preview installs.
+
+## R4 — closed (2026-10-13) — the human's view and the AI default, after the user's first-install corrections (원문 3–6)
+
+`main` 3f68443 (272 tests). Receipts: zbrain `workflow/2lab-ai/harn/receipts-2026-10-13/` (A14-tui-macos.txt + tui-80x24/ + tui-120x40/ frames, A14-tui-cachy.txt, A15-trim-live.txt + two full outputs, preview-r2.txt).
+
+### Closed WUs
+
+| WU | files owned | agent | state |
+|---|---|---|---|
+| WU-M | terminal width detection (`terminal_size`; `COLUMNS=0` = unset), `--table`, clap `wrap_help` + Getting started + `[AI operator]` labels, README install/use | opus-coder (bg) | review release-ready → merged 0e06125 (206 tests); its tip line was dropped at the TUI merge |
+| WU-N | `src/trim.rs` + `Cmd::Trim`, shared `render::plan_footer`, tests/trim.rs (18), README trim paragraph, skill header line | opus-coder (bg) | review: MUST-FIX 3 (tool-less default planner; scratch cwd outside the target AND its enclosing git repo; decoded-schema extractor) → fixed abd8da5 + ac695b4 → release-ready → merged 3f68443 |
+| WU-O | `src/tui/{mod,app,rows,view}.rs` (ratatui 0.30 + crossterm 0.29 + signal-hook), bare-command dispatch (TUI only when stdin+stdout are terminals), tests/tui.rs (27), README | opus-coder (bg) | 4 review units: app (MUST-FIX undo bound to the confirmed entry → `journal::undo_entry`), wiring (MUST-FIX signal exit through the guard), view (MUST-FIX ×7 over three rounds: tiny-frame underflow, ASCII completeness without rewriting user text, width-aware wrap and list cells, fold marker reserved, answer line fits, off-row gutter panic), tests (MUST-FIX rendered-frame assertions) → all release-ready → merged e04441a (244 tests) |
+
+### Measured
+
+- A14 macOS (release, zbrain, tmux 80×24 and 120×40): TUI opens with header + folded tree (345 items, skill listing `▸ 229`), j/k, `l` unfolds the listing, `h` folds, `/slack@` filters keeping the hierarchy, `w` why pane, `d` stages the slack plugin with its skills as side effects, `a`+`y` applies (journal a3c5a0d9 / 0c065c36), `u`+`y` restores — settings.local.json byte-identical after each size; `q` → EXIT=0, `stty` shows cooked mode back; every frame fits its width (display columns); item labels cut from the left with the tail kept, full id in `w`.
+- A14 cachy-z13 (Linux): TUI test suite 27/27 on Linux (frames via TestBackend); `--table` and piped output 82 rows; no tmux there, so no live frames. The pty probe (no emulator answering queries) exposed a startup cursor-position query (ESC[6n) that times out and exits 1 with the terminal restored → WU-P opened (below).
+- A15: `harn trim ~/2lab.ai/zbrain --dry-run` with the real `claude -p --output-format json --tools '' --max-turns 1` (prompt on stdin, fresh scratch cwd outside the repo): run 1 (branch) 69 s, 2 ops with reasons, nothing written; run 2 (merged main) 52 s, 2 ops (zworkflow 32 KB, cowork-plugin-management), `predicted 149,609 B → 116,848 B`, nothing written, 0 scratch dirs left. Fake-agent rows: 18 tests incl. rejected knob exit 3, missing binary → `/harn-trim` hint, readonly exit 3, non-TTY without `--yes`, TMPDIR-inside-target and sibling-in-repo isolation, > 64 KiB prompt no-deadlock.
+- Distribution: previews `preview-2026-10-13-0834-e04441a02be6` and `…-0840-3f6844340e4a`; tap `Formula/harn-preview.rb` rendered → tap master 08c57c5; `brew upgrade harn-preview` → 2026.10.13.0840; `/opt/homebrew/bin/harn --version` = `harn 0.1.0 (preview 3f6844340e4a)`, `harn --help` lists `trim`; the installed binary opened the TUI on zbrain in tmux and quit with EXIT=0.
