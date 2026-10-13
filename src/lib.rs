@@ -8,6 +8,7 @@ pub mod oracle;
 pub mod plan;
 pub mod render;
 pub mod resolve;
+pub mod tui;
 pub mod verify;
 pub mod writers;
 

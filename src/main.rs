@@ -49,6 +49,11 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Print the table instead of opening the interactive view (the default when stdout is not
+    /// a terminal)
+    #[arg(long, conflicts_with = "json")]
+    table: bool,
+
     /// Refuse every write and every active verify (exit 3)
     #[arg(long, global = true)]
     readonly: bool,
@@ -212,6 +217,12 @@ where
             "the positional [DIR] is for the listing; give a subcommand its target with --dir",
         ));
     }
+    if cli.table && cli.command.is_some() {
+        return Err(command.error(
+            ErrorKind::ArgumentConflict,
+            "--table is for the listing (`harn --table [DIR]`)",
+        ));
+    }
     // `--dir` before the subcommand is set on the parent, which clap's per-level conflict check
     // does not see against the subcommand's own positional DIR.
     if let Some(
@@ -285,6 +296,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         width: std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()),
     };
     match &cli.command {
+        None if !cli.json && !cli.table && std::io::stdout().is_terminal() => {
+            return tui_cmd(cli, &opts);
+        }
         None => {
             let doc = document(cli, cli.dir_pos.as_deref())?;
             if cli.json {
@@ -428,6 +442,28 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             clap_complete::generate(*shell, &mut Cli::command(), "harn", &mut std::io::stdout());
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The interactive view: every requested agent resolved and freed-annotated, as for the table.
+fn tui_cmd(cli: &Cli, opts: &RenderOpts) -> Result<ExitCode> {
+    let target = target(cli, cli.dir_pos.as_deref())?;
+    let mut tabs = Vec::new();
+    for resolved in resolve_trees(cli, &target)? {
+        let mut tree = resolved.tree;
+        plan::annotate_freed(resolved.resolver.as_ref(), &target, &mut tree)
+            .with_context(|| tree.agent.to_string())?;
+        tabs.push((resolved.resolver, tree));
+    }
+    harn::tui::run(
+        target,
+        tabs,
+        harn::tui::Opts {
+            unicode: opts.unicode,
+            color: opts.color,
+            readonly: cli.readonly,
+        },
+    )?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -732,6 +768,26 @@ mod tests {
         let cli = parse(&["off", "x", "--readonly", "--agent", "claude-code"]).unwrap();
         assert!(cli.readonly);
         assert!(matches!(cli.agent, Some(AgentArg::ClaudeCode)));
+    }
+
+    #[test]
+    fn table_flag_is_for_the_listing_only() {
+        let cli = parse(&["--table", "/tmp"]).unwrap();
+        assert!(cli.table && cli.dir_pos.is_some());
+        assert_eq!(
+            parse(&["--table", "--json"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse(&["--table", "why", "x"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+        // `verify --table` stays verify's own flag.
+        assert!(
+            !parse(&["verify", "--capture", "x", "--table"])
+                .unwrap()
+                .table
+        );
     }
 
     #[test]

@@ -5,6 +5,18 @@
 loaded or only advertised, and the official switch that turns it off — and lets you turn items
 off reversibly. Claude Code first, Codex CLI second. One binary for macOS and Linux.
 
+## Usage
+
+- `harn [DIR]` on a terminal — the interactive view: one tab per agent, the tree sorted by freed
+  bytes, children folded under their parent (`▸ N`). `j`/`k` move · `h`/`l` fold · `/` filter ·
+  `s` sort (freed, cost, name; again reverses) · `w` why · `d` stage off (shows the plan) · `a` apply
+  · `o` back on · `u` undo · `e` edit in `$EDITOR` · `r` refresh · `t` AI trim · `?` every key · `q`
+  quit. `--readonly` greys and refuses the keys that write.
+- `harn trim` — the AI decides what to turn off (`/harn-trim` inside Claude Code).
+- `harn report --html <OUT>` — a self-contained, read-only HTML report.
+- `harn --table [DIR]` — the table on stdout; also what `harn` prints when stdout is not a terminal.
+- `harn --json [DIR]` — the same model as JSON (schema `harn/1`).
+
 Status: **scaffold, P0 in progress** (2026-10-13). The CLI parses every P0 command and the data
 model is in place; the resolver, renderers, oracle, planner and journal are stubs that say so. The
 product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md); the implementation boundaries in

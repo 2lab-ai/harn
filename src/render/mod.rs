@@ -2,7 +2,7 @@
 //! Pure: no clock, no environment, no filesystem; the same input renders the same bytes.
 
 mod brief;
-mod common;
+pub(crate) mod common;
 mod html;
 mod table;
 mod text;
@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 pub use brief::brief;
 pub use html::html;
+pub(crate) use table::bar as share_bar;
 pub use table::{header, table};
 pub use text::{history, plan, verify_report};
 pub use why::why;
