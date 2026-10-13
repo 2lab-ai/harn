@@ -1541,6 +1541,50 @@ fn history_is_newest_first_with_context_and_reasons() {
 }
 
 #[test]
+fn history_marks_undone_entries_on_their_line_only() {
+    let entry = |id: &str, at: &str, undone_at: Option<&str>| JournalEntry {
+        id: id.to_string(),
+        context: context(),
+        ops: vec![PlannedOp {
+            item_id: slack().id,
+            knob: plugin_off(SLACK_PLUGIN, Scope::Local),
+            file: None,
+            hash_before: None,
+            reason: None,
+        }],
+        snapshots: vec![],
+        applied_at: at.to_string(),
+        warnings: vec![],
+        undone_at: undone_at.map(str::to_string),
+        diff: None,
+    };
+    let out = render::history(&[
+        entry("1-live", "2026-10-12T00:00:00Z", None),
+        entry(
+            "2-undone",
+            "2026-10-13T00:00:00Z",
+            Some("2026-10-13T00:01:00Z"),
+        ),
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert_eq!(
+        lines[0],
+        format!(
+            "2-undone  2026-10-13T00:00:00Z  claude-code 2.1.296 · {DIR}  1 op: {}  undone 2026-10-13T00:01:00Z",
+            slack().id
+        )
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "1-live  2026-10-12T00:00:00Z  claude-code 2.1.296 · {DIR}  1 op: {}",
+            slack().id
+        )
+    );
+}
+
+#[test]
 fn renderers_end_without_a_newline() {
     let t = tree();
     let d = doc(vec![t.clone()]);
