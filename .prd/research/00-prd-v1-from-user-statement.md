@@ -18,7 +18,7 @@ item is, where it came from, or how to remove it. Optimizing the harness today m
 One system tool, run as
 
 ```
-loadout ~/2lab.ai/zbrain
+harn ~/2lab.ai/zbrain
 ```
 
 that lists every harness item an AI agent loads when started in that directory and lets the
@@ -57,7 +57,7 @@ layer list is to be established by research).
 
 | # | run | expected observation |
 |---|---|---|
-| A1 | `loadout ~/2lab.ai/zbrain` on macOS | a list of every harness item Claude Code loads for that directory |
+| A1 | `harn ~/2lab.ai/zbrain` on macOS | a list of every harness item Claude Code loads for that directory |
 | A2 | same on cachy-z13 | same list shape and the items that exist on that machine |
 | A3 | pick an item and remove/disable it | the next Claude Code session in that directory no longer loads it |
 | A4 | the same for Codex | the Codex-side list and edits |
