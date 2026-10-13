@@ -52,8 +52,9 @@ Rules that produce it:
   Project files, Hooks (if any outside plugins), MCP servers (if any outside plugins), Built-in
   (always last, greyed, no `d`). A group row shows: marker, human name, count (and the one fact
   that matters — for the skill listing, how many descriptions the cap cuts), size, a bar, share.
-  Share = of the predicted total. Bars are relative to the largest row on screen (ncdu), drawn in
-  eighth-blocks, `#` under `--no-unicode`.
+  Share = of the predicted total. Bars are relative to the largest line in the list (ncdu: the
+  listing, not the viewport, so bars do not rescale while scrolling), drawn in eighth-blocks, `#`
+  under `--no-unicode`.
 - **One row per thing.** A plugin is one row; its MCP server, hook, skills, commands and agents are
   its children, each with its own size (the skill's listing bytes, the hook's stdout bytes or `?`,
   the MCP server's schema bytes or `?`). The old screen showed `plugin:slack:slack` and
