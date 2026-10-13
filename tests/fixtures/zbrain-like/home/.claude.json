@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "user-server": { "command": "user-mcp-server", "args": [] }
+  },
+  "projects": {
+    "@PROJECT@": {
+      "disabledMcpServers": ["user-server"]
+    }
+  }
+}

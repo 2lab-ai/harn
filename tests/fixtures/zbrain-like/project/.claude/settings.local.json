@@ -1,0 +1,9 @@
+{
+  "enabledPlugins": {
+    "gamma@market-two": false
+  },
+  "enabledMcpjsonServers": ["project-server"],
+  "permissions": {
+    "allow": ["Bash(ls:*)", "Read"]
+  }
+}
