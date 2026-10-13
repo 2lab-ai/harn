@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **planned** — v1.2, 2026-10-13 (revised on trinity rounds 1–2). Boundaries for the first
+Status: **planned** — v1.3, 2026-10-13 (revised on trinity rounds 1–4). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 

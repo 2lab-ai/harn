@@ -7,9 +7,9 @@ the first model request (and how many), and the agent's official switch that tur
 turns items off, edits them, and undoes both, through a journal. Claude Code first, Codex CLI
 second. One Rust binary for macOS and Linux; CLI with `--json` at the base, a TUI on the same model.
 
-Status: **planned** — v2.7, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v2.8, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
-art and UX, 04 = local measurements), then revised on trinity round 1 (see [§Revision
+art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
 [`prd-rewrite/ssot.md`](prd-rewrite/ssot.md). This document is a target, not a description of
 shipped behavior; it moves to **shipped** only when [§Acceptance](#acceptance-scenarios) P0 is green
@@ -178,6 +178,8 @@ origin    layer ∈ managed | user | project | local | plugin@marketplace | dyna
 cost      source: bytes on disk | predicted: bytes in the first request after caps | ~: predicted
           through a modelled cap or a declared ratio, shown with its assumption | observed: bytes
           in a bound capture | ? (unknown until a capture) | — (no first-request cost)
+freed     known part + named unknowns; Δ? = the delta of a token-budgeted re-render that no
+          before-only capture can give (observed from a before/after pair, ~ under a declared ratio)
 knob      {file, key, value, scope}  the official off switch, narrowest scope that wins
           | quarantine {from, to}     only when no knob exists
           | none {reason}             built-in / undocumented
@@ -450,6 +452,8 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v2.8 (2026-10-13, trinity round 4, nits)** — `Δ?` added to the model vocabulary; status
+  lines name rounds 1–4.
 - **v2.7 (2026-10-13, trinity round 4)** — the over-cap default action corrected: no bulk
   "prune the N least-used" (unsupported for plugin skills, and N is a dropped-description count,
   not an amount to change); it is now "show candidates" with each item's supported knob, user
