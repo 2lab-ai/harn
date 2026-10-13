@@ -11,7 +11,7 @@ use harn::model::{self, Agent, Document, Item, Layer, Refused, Scope, SelectErro
 use harn::plan::{self, PlanRequest, PLAN_SCHEMA};
 use harn::render::{self, RenderOpts};
 use harn::resolve::{self, Resolver};
-use harn::{oracle, verify, writers};
+use harn::{oracle, trim, verify, writers};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -132,6 +132,23 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Ask the coding agent for a trimming plan (one model request), print it, apply on y
+    Trim {
+        /// Target directory, same as --dir (default: cwd)
+        #[arg(value_name = "DIR", conflicts_with = "dir")]
+        dir_pos: Option<PathBuf>,
+        /// Print the agent's validated plan, write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply without asking (required when stdin is not a terminal)
+        #[arg(long)]
+        yes: bool,
+        /// Agent command, run as given in an empty temp dir; a trailing `-` means: pipe the
+        /// prompt on stdin instead of passing it as the last argument (default: claude -p
+        /// --output-format json --tools '' --max-turns 1 -)
+        #[arg(long, value_name = "CMD")]
+        agent_cmd: Option<String>,
+    },
     /// Write a self-contained read-only HTML report
     Report {
         /// Target directory, same as --dir (default: cwd)
@@ -244,6 +261,9 @@ where
         Cmd::Brief { dir_pos: Some(_) }
         | Cmd::Report {
             dir_pos: Some(_), ..
+        }
+        | Cmd::Trim {
+            dir_pos: Some(_), ..
         },
     ) = &cli.command
     {
@@ -279,6 +299,7 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
 }
 
 /// The subcommand's name when it would write or run the agent; `--readonly` refuses these.
+/// `trim` runs the agent even with `--dry-run`, like `verify --run`.
 fn write_command(cmd: &Cmd) -> Option<&'static str> {
     match cmd {
         Cmd::Off { .. } => Some("off"),
@@ -286,6 +307,7 @@ fn write_command(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Edit { .. } => Some("edit"),
         Cmd::Undo { .. } => Some("undo"),
         Cmd::Apply { .. } => Some("apply"),
+        Cmd::Trim { .. } => Some("trim"),
         Cmd::History { prune: Some(_) } => Some("history --prune"),
         Cmd::Verify(VerifyArgs {
             source: VerifySource { run: true, .. },
@@ -413,6 +435,40 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 .with_context(|| agent.to_string())?;
             let plan = plan::build_plan_from_request(resolver.as_ref(), &target, &tree, &req)?;
             apply_plan(cli, &plan, *dry_run)?;
+        }
+        Some(Cmd::Trim {
+            dir_pos,
+            dry_run,
+            yes,
+            agent_cmd,
+        }) => {
+            // Before the model request: a plan nobody can confirm is not worth one.
+            if !dry_run && !yes && !std::io::stdin().is_terminal() {
+                bail!("not a terminal: pass --yes to apply");
+            }
+            let target = target(cli, dir_pos.as_deref())?;
+            let agent = single_agent(cli, "trim")?;
+            let resolver = resolve::for_agent(agent);
+            let tree = resolver
+                .resolve(&target, None)
+                .with_context(|| agent.to_string())?;
+            let mut opts = trim::TrimOpts {
+                dry_run: *dry_run,
+                yes: *yes,
+                unicode: !cli.no_unicode,
+                ..trim::TrimOpts::default()
+            };
+            if let Some(cmd) = agent_cmd {
+                opts.agent_cmd = trim::split_command(cmd)?;
+            }
+            trim::trim(
+                resolver.as_ref(),
+                &target,
+                &tree,
+                &opts,
+                &mut confirm_on_tty,
+                &mut std::io::stdout(),
+            )?;
         }
         Some(Cmd::On { selector }) => {
             let target = target(cli, None)?;
@@ -556,14 +612,16 @@ fn apply_plan(cli: &Cli, plan: &plan::ActionPlan, dry_run: bool) -> Result<()> {
         return print_json(&serde_json::json!({ "plan": plan, "entry": entry }));
     }
     println!("{}", render::plan(plan, !cli.no_unicode));
-    match entry {
-        Some(entry) => println!(
-            "applied: journal {} · takes effect on the next session",
-            entry.id
-        ),
-        None => println!("dry run: nothing written"),
-    }
+    println!("{}", render::plan_footer(entry.as_ref()));
     Ok(())
+}
+
+/// `apply? [y/N]` on stderr, the answer from stdin; anything but y/yes declines.
+fn confirm_on_tty(_: &plan::ActionPlan) -> bool {
+    eprint!("apply? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 fn read_plan_request(path: &Path) -> Result<PlanRequest> {
@@ -796,6 +854,13 @@ mod tests {
                 .kind(),
             ErrorKind::ArgumentConflict
         );
+        assert_eq!(
+            parse(&["--dir", "/tmp", "trim", "/tmp"])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(parse(&["trim", "/tmp", "--dry-run"]).is_ok());
     }
 
     #[test]
@@ -968,6 +1033,15 @@ mod tests {
             &["--readonly", "edit", "x"],
             &["--readonly", "undo"],
             &["--readonly", "apply", "/dev/null"],
+            &["--readonly", "trim"],
+            &["--readonly", "trim", "--dry-run"],
+            &[
+                "--readonly",
+                "trim",
+                "--yes",
+                "--agent-cmd",
+                "/nonexistent/agent",
+            ],
             &["--readonly", "history", "--prune", "30d"],
             &["--readonly", "verify", "--run"],
             // A target that does not exist proves nothing past the gate ran.

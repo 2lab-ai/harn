@@ -28,6 +28,19 @@ terminal); `harn --json [DIR]` prints the same model as JSON (schema `harn/1`). 
 `[AI operator]` in `harn --help` (`why`, `path`, `off`, `on`, `edit`, `brief`, `apply`) are what the
 AI runs on your behalf; you never type an item name.
 
+`harn trim [DIR]` — the default way to trim; you never type an item name. It builds the brief (`harn
+brief`), asks your coding agent for a plan in one headless request (`claude -p --output-format json
+--tools "" --max-turns 1`: no tools, one turn, the prompt piped on stdin; announced before it runs),
+validates the reply exactly as `harn apply` does, and prints the plan: each op with the agent's
+reason, the bytes freed, the side effects (a plugin takes its skills, agents and hooks with it) and
+the diff of every settings file it touches. On a terminal it then asks `apply? [y/N]`; `--dry-run`
+stops before asking, `--yes` applies without asking (required when stdin is not a terminal). Applied
+changes are journaled with their reasons (`harn history`), and `harn undo` puts every file back byte
+for byte. `--agent-cmd "<cmd>"` replaces the agent command and runs as given (yours, trusted: harn
+adds no flags); a trailing `-` means: pipe the prompt on stdin instead of passing it as the last
+argument. Without `claude` on PATH, run `/harn-trim` inside Claude Code instead — the same loop,
+step by step.
+
 Status: P0 for the Claude Code chain is on main; preview builds install via the tap.
 
 The product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md); the implementation
