@@ -95,7 +95,7 @@ directory.
     `claude doctor`, `claude mcp list`, hook firing and `claude --debug`, without making any API
     call.
   - It also found that Claude Code keys trust on the **git root**, not on the `.claude` directory.
-    This is the kind of trap loadout's resolver also faces.
+    This is the kind of trap harn's resolver also faces.
 - **MCP Server Selector**
   - Take: atomic writes, automatic backups, file locking, explicit consent for global changes, and a
     warning when changes only apply after a session restart.
@@ -117,7 +117,7 @@ the first message (#23787). A `--no-mcp` flag was requested (#20873). Until then
 `disabledMcpServers` (#14490). Another: schemas are still counted after every connector was
 disabled (#92255). Tool Search deferral has since changed the math.
 
-The lesson for loadout: the cost of each item depends on the **mode** (eager vs. deferred), so
+The lesson for harn: the cost of each item depends on the **mode** (eager vs. deferred), so
 showing a size without the mode misleads.
 
 https://github.com/anthropics/claude-code/issues/13717 ·
@@ -174,7 +174,7 @@ https://github.com/2lab-ai/xfx
 
 ## C. Disabling without destroying: conventions
 
-| Mechanism | Example (primary source) | Note for loadout |
+| Mechanism | Example (primary source) | Note for harn |
 |---|---|---|
 | Official enable flag | Claude Code `enabledPlugins` ("Turn individual plugins on or off per scope"), `disabledMcpjsonServers`, `skillOverrides` ("Hide or collapse a skill without editing its SKILL.md"), `claudeMdExcludes`, `disableBundledSkills`, `disableAllHooks`. Source: https://code.claude.com/docs/en/settings-reference . Codex: `mcp_servers.<id>.enabled`, `mcp_servers.<id>.enabled_tools` / `disabled_tools`, `plugins.<plugin>.enabled`, `skills.config` (the key exists, but what it controls is `[미확인]`). Source: https://learn.chatgpt.com/docs/config-file/config-reference | Best option: the agent itself honours it, and other tools understand it |
 | Interactive toggles that write the flag | `/mcp disable <server>` and `/plugin disable`. The choice is "saved per project in ~/.claude.json" (https://loadout.migsilva.dev/guides/disable-mcp-server-claude-code/) | If we write the same knob, our state and the agent's own UI stay in step |
@@ -184,7 +184,7 @@ https://github.com/2lab-ai/xfx
 | Symlink farm | GNU Stow (https://www.gnu.org/software/stow/manual/stow.html); dotagents `~/.agents` | Resolve realpath. Disabling one link must never delete the shared copy (migsilva89 already enforces this) |
 | Trash with restore | trash-cli `trash-put`/`trash-list`/`trash-restore` (https://github.com/andreafrancia/trash-cli), following the FreeDesktop Trash spec (https://specifications.freedesktop.org/trash/latest/). macOS `/usr/bin/trash`: its `man trash` page says "First appeared in macOS 15.0" (checked locally on 26.6.2) | Use for `D` (remove), never `rm` |
 | Plan then apply | `terraform plan -out=FILE` writes a saved plan that `terraform apply` executes (https://developer.hashicorp.com/terraform/cli/commands/plan); chezmoi `diff` prints the difference between target and destination (https://github.com/twpayne/chezmoi); `git add -p` (https://git-scm.com/docs/git-add) | Every batch of changes is shown as a diff before it is written |
-| Generations and rollback | `nix-env --rollback` (https://nix.dev/manual/nix/latest/command-ref/nix-env/rollback) | `loadout undo` / `loadout history` |
+| Generations and rollback | `nix-env --rollback` (https://nix.dev/manual/nix/latest/command-ref/nix-env/rollback) | `harn undo` / `harn history` |
 | Backups and revert | ruler `.bak` + `ruler revert` (https://github.com/intellectronica/ruler); migsilva89 snapshots to `backups/<ISO-8601>/` before every write and refuses the write if the backup fails | A snapshot is required before every write |
 
 **Recommended model: a journal of reversible operations, plan before apply.**
@@ -194,15 +194,15 @@ https://github.com/2lab-ai/xfx
    (`.claude/settings.local.json`, `~/.claude.json#projects[cwd]`, project `.codex/config.toml`)
    over user scope, so that we never edit a git-tracked team file without saying so.
    (b) If there is no knob, move the item to a quarantine folder next to its owner
-   (`<root>/.loadout-off/…`), with a manifest entry.
+   (`<root>/.harn-off/…`), with a manifest entry.
    (c) Never `rm`. `D` goes to the OS Trash.
 2. Ops are staged in the TUI and shown as a unified diff with the token delta (terraform-plan
    style). `a` applies them atomically: write to a temp file, fsync, rename, and lock against a
    running agent.
-3. Before each write, take a snapshot into `$XDG_STATE_HOME/loadout/journal/<ts>/`. On macOS use
+3. Before each write, take a snapshot into `$XDG_STATE_HOME/harn/journal/<ts>/`. On macOS use
    `~/Library/Application Support/loadout/`. Never write inside `~/.claude`; migsilva89 gives the
    reason: whoever wipes `.claude` loses the app's data.
-4. `loadout undo [N]` and `loadout history` replay the journal backwards. A *stale* op (the target
+4. `harn undo [N]` and `harn history` replay the journal backwards. A *stale* op (the target
    changed since we wrote it, so the hash differs) is reported, not forced. This is ccmcp's `[?]`.
 5. If the file is under git, show "tracked by git: this edit will show in `git status`".
    migsilva89 says this once for project skills (AC3.12).
@@ -240,7 +240,7 @@ For counting:
 - Every number carries a provenance tag: `bytes` (exact), `~tok est` (offline ratio, with the model
   named), `tok api` (count_tokens) or `tok wire` (seen in a captured request).
 - The header always says which tag the total uses.
-- `loadout verify` runs the agent once behind the capture proxy, diffs the captured request against
+- `harn verify` runs the agent once behind the capture proxy, diffs the captured request against
   the static tree, and lists every item that was predicted but not seen, or seen but not predicted.
 
 ## E. Distribution for a Rust system CLI (2026)
@@ -262,24 +262,24 @@ For counting:
 - **AUR, for the user's CachyOS machine.** The AUR rule: "Packages that use prebuilt deliverables,
   when the sources are available, must use the `-bin` suffix"
   (https://wiki.archlinux.org/title/AUR_submission_guidelines). The usual setup is two packages.
-  - `loadout-bin` repackages the release tarball for x86_64 and aarch64, plus completions and the
+  - `harn-bin` repackages the release tarball for x86_64 and aarch64, plus completions and the
     licence.
-  - `harn` (or `loadout-git`) builds from source, following the Rust guidelines:
+  - `harn` (or `harn-git`) builds from source, following the Rust guidelines:
     `cargo fetch --locked` in `prepare()` and `cargo build --frozen --release` in `build()`
     (https://manual.archlinux.page/package-guidelines/rust/).
   - Ship the release as a `.tar.gz` holding the binary, `completions/` and the man page, not as a
     bare binary, so that `-bin` packages and formulas install them without running the binary. This
     is a deliberate difference from llmux's bare-binary assets.
 - **Completions and man page:** clap + `clap_complete` (https://docs.rs/clap_complete/latest/clap_complete/),
-  exposed as `loadout completions <shell>`. ccmcp ships the same command, including dynamic
+  exposed as `harn completions <shell>`. ccmcp ships the same command, including dynamic
   completion of live names.
 - **`--json`** on every read command: ccusage, mcpick, ccmcp `status --json` and `codex mcp list --json`
-  all do this. Make it a versioned schema (`"schema": "loadout/1"`), so that scripts and
-  `loadout verify` share one model.
+  all do this. Make it a versioned schema (`"schema": "harn/1"`), so that scripts and
+  `harn verify` share one model.
 
 ## UX recommendation (the single best interaction model)
 
-1. Run `loadout [dir]` and get a **read-only effective view** by default (as ccmcp does). Show one
+1. Run `harn [dir]` and get a **read-only effective view** by default (as ccmcp does). Show one
    tree per agent (Claude Code | Codex as tabs), sorted by size descending (ncdu).
 2. Top-level nodes are the load classes **always / advertised / deferred / on-demand** (cclint).
    Under them come origins: managed / user / project / local / plugin@marketplace / MCP server.
@@ -293,15 +293,15 @@ For counting:
 6. `space` stages a disable using the official knob. Fallback order: knob, then quarantine, then
    never rm. `D` stages a remove into the Trash; you type the item name to confirm it.
 7. Staged ops show in a bottom diff panel with the token delta. `a` applies them atomically after a
-   snapshot. `u` / `loadout undo` reverts them. `--readonly` turns all of this off.
+   snapshot. `u` / `harn undo` reverts them. `--readonly` turns all of this off.
 8. If the target file is tracked by git or shared with a team, show a warning before apply. If an
    agent session is running, warn that the change takes effect on the next start.
-9. `loadout verify` captures one real request through a local proxy, or through
+9. `harn verify` captures one real request through a local proxy, or through
    `codex debug prompt-input`. Afterwards each row shows ✓ (seen on the wire), ✗ (predicted, not
    seen) or ? (seen, not predicted).
 10. `?` opens an overlay with every key, with a context key bar at the bottom (lazygit). `/`
     filters while keeping the hierarchy (broot).
-11. `loadout --json` and `loadout plan|apply|undo|history` give the same model without the TUI.
+11. `harn --json` and `harn plan|apply|undo|history` give the same model without the TUI.
 
 Strongest references: **ncdu** (size-sorted tree, `d` with confirmation by default, `-r`,
 JSON snapshots); **ccmcp** (effective view as default, origin badges, per-project undoable

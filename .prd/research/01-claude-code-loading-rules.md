@@ -1,10 +1,10 @@
 ---
 title: Claude Code 2.1.x — what gets loaded into the model request, and how to turn each piece off
 type: research
-tags: [loadout, claude-code, prd, context, harness]
+tags: [harn, claude-code, prd, context, harness]
 ---
 
-# 01 — Claude Code loading rules (for `loadout`)
+# 01 — Claude Code loading rules (for `harn`)
 
 Scope: Claude Code native install, installed version `2.1.296`. Docs fetched 2026-10-13 from `code.claude.com/docs/en/*`.
 `docs.anthropic.com/en/docs/claude-code/*` now returns 301 to that host. Every row cites its source. `[미확인]` = not confirmed
@@ -23,7 +23,7 @@ of the system prompt itself"* ([mem-trouble][mem-tr]).
 |---|---|---|
 | `SP` | Core prompt (not published), environment info (cwd, platform, shell, OS, git-repo flag), auto-memory *location*, `--append-system-prompt` text. A custom output style also removes the SE-instructions section here. | [settings: "system prompt isn't published"][set-chg] · [ctx-window][cw] · [cli `--exclude-dynamic-system-prompt-sections`][cli] · [output-styles][os] |
 | `T` | Built-in tools (Bash description carries git commit/PR instructions), then MCP tools. MCP tools are sent upfront, or as `defer_loading` stubs when tool search is on | [includeGitInstructions][sr-git] · [env `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` names `defer_loading`][env] · [tool search][mcp-ts] |
-| `R0` | CLAUDE.md chain + rules + imports + MEMORY.md · git status snapshot · userEmail/currentDate · attribution text · the prompt | [sdk reminders][sdk-rem] · [#81138][i81138] (userEmail, community) |
+| `R0` | CLAUDE.md chain + rules + imports + MEMORY.md · git status snapshot · userEmail · attribution text · the prompt. `currentDate` is `[미확인]`: #81138's builder groups it with userEmail, but this session shows `Today's date is …` inside `SP` | [sdk reminders][sdk-rem] · [#81138][i81138] (community) · [local] |
 | `R1` | SessionStart hook output · available-subagents roster · MCP server instructions · skill listing (+ deferred-tool name list when tool search is on) | [sdk reminders][sdk-rem] · [hooks additionalContext][hk-ctx] · [mcp-ts][mcp-ts] |
 
 ## 1. Instruction files
@@ -139,7 +139,7 @@ The 2026-10-02 capture places SessionStart output (3.4 KB) in `R1`.
 | Source (provenance `source`) | Path / mechanism | Precedence (same server) | Lands | Disable one server without deleting | Evidence |
 |---|---|---|---|---|---|
 | `managedMcpServers` (`managed`) | managed settings, http/sse only | above everything | T | admin only | [scope-prec][mcp-prec] · [sr][sr-mcp] |
-| `managed-mcp.json` (`enterprise` `[미확인 mapping]`) | `/Library/Application Support/ClaudeCode/managed-mcp.json` | exclusive control. Suppresses connectors unless `allowAllClaudeAiMcps` | T | admin only | [mg-del][mg-del] · [sr-aacm][sr-mcp] |
+| `managed-mcp.json` (`enterprise` `[미확인 mapping]`) | `/Library/Application Support/ClaudeCode/managed-mcp.json` | exclusive control. Suppresses connectors unless `allowAllClaudeAiMcps` | T | admin only | [mg-del][mg-del] · [sr-aacm][sr-aacm] |
 | local (`local`) | `~/.claude.json` → `projects[<path>].mcpServers` | 1 | T | `/mcp` toggle → `projects[<path>].disabledMcpServers` · `/mcp disable <s>` | [scopes][mcp-scope] · [disable][mcp-dis] |
 | project (`project`) | `.mcp.json` at the project root | 2. Needs approval | T | `disabledMcpjsonServers` (wins over the enable keys) | [sr-mcp][sr-mcp] |
 | user (`user`) | `~/.claude.json` → `mcpServers` | 3 | T | `/mcp` toggle | [scopes][mcp-scope] |
@@ -154,6 +154,7 @@ The 2026-10-02 capture places SessionStart output (3.4 KB) in `R1`.
 - Tool search is **turned off automatically when `ANTHROPIC_BASE_URL` is a non-first-party host**, which loads every MCP tool upfront. `ENABLE_TOOL_SEARCH=true|auto[:N]|false` overrides this, and CHANGELOG 2.1.72 confirms the override works behind a base URL ([configure][mcp-cfg], [CHANGELOG][cl]).
 - Each tool description and each server's instructions are truncated at 2,048 chars per the docs (`CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`). See Tensions for the newer CHANGELOG value ([authors][mcp-auth]).
 - `/context` counts server instructions as their own row since 2.1.283 ([CHANGELOG][cl]).
+- [local] Where instructions land: this session received a `# MCP Server Instructions` block (plugin:atlassian) as a separate system-role message. That matches `R1` in the 10-02 capture.
 - Two **unrelated** list pairs: `disabledMcpServers`/`enabledMcpServers` (per project in `~/.claude.json`, written by the `/mcp` toggle) vs `disabledMcpjsonServers`/`enabledMcpjsonServers` (settings files, `.mcp.json` approval) ([disable][mcp-dis]).
 - `claude mcp remove <name>` deletes the entry ([managing][mcp-man]).
 - [local] zbrain has `disabledMcpServers: ["plugin:context7:context7"]`; `~/.claude.json` user scope is empty.
@@ -190,7 +191,7 @@ The 2026-10-02 capture places SessionStart output (3.4 KB) in `R1`.
 | Skill list, file-change notes, todo nudges | `CLAUDE_CODE_DISABLE_ATTACHMENTS=1` (as of 2.1.290 project/local settings can't set it) | [sdk-off][sdk-off] · [CHANGELOG][cl] |
 | Chrome SP section | `CLAUDE_CODE_DISABLE_CFC_PROMPT=1` | [env][env] |
 | Pre-release betas | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` strips `defer_loading` and keeps tool search off | [env][env] |
-| userEmail / currentDate | **Undocumented.** Community decompile: read from `~/.claude.json` `oauthAccount.emailAddress`, skipped when `ANTHROPIC_UNIX_SOCKET` is set. No official switch `[미확인]`. [local] this session shows a `# userEmail` block | [#81138][i81138] |
+| userEmail / currentDate | **Undocumented.** Community decompile: read from `~/.claude.json` `oauthAccount.emailAddress`, skipped when `ANTHROPIC_UNIX_SOCKET` is set. No official switch `[미확인]`. [local] this session: `# userEmail` + `# gitStatus` arrive in a reminder, and the date sits in `SP` | [#81138][i81138] |
 | Environment section | No documented switch `[미확인]` | [cw][cw] |
 
 ## 11. Inspection surfaces already in Claude Code
@@ -212,7 +213,7 @@ The 2026-10-02 capture places SessionStart output (3.4 KB) in `R1`.
 
 | Measured | Docs say | Verdict | Evidence |
 |---|---|---|---|
-| tools 109 KB, 61 tools, 36 `blender` sent upfront | Default is deferred, but tool search turns off when `ANTHROPIC_BASE_URL` is non-first-party | **Consistent.** [local] `claude` is aliased to `llmux run`, and the live claude process env has `ANTHROPIC_BASE_URL=http://localhost:3456` | [mcp-cfg][mcp-cfg] · `ps -E` |
+| tools 109 KB, 61 tools, 36 `blender` sent upfront | Default is deferred, but tool search turns off when `ANTHROPIC_BASE_URL` is non-first-party | **Consistent on mechanism.** [local] `claude` is aliased to `llmux run`, and the live claude process env has `ANTHROPIC_BASE_URL=http://localhost:3456`. Caveat: with tool search off, *every connected* server loads upfront. 61 − 36 = 25 is about the built-in set alone, so chrome/computer-use/slack/atlassian/context7 were apparently not connected for that first request `[추정]` | [mcp-cfg][mcp-cfg] · `ps -E` |
 | messages[0] CLAUDE.md+MEMORY 45.9 KB | MEMORY.md is cut at 200 lines/25 KB | **Consistent.** [local] MEMORY.md is 150 lines / 22,924 B, so it loads whole. CLAUDE.md chain: 6,728 + `@rules/DEV.md` 8,608 + `@rules/PRINCIPLES.md` 4,440 + `~/.claude/CLAUDE.md` 634 = 20,410 B. Total ≈ 43.3 KB + wrappers. Sizes are from 10-13, not 10-02 | `wc -c` |
 | userEmail/gitStatus 3.5 KB | git snapshot documented. userEmail not documented | partial | [sr-git][sr-git] · [#81138][i81138] |
 | attribution 0.6 KB | documented reminder | consistent | [sdk-rem][sdk-rem] |
@@ -230,17 +231,17 @@ The 2026-10-02 capture places SessionStart output (3.4 KB) in `R1`.
 - All of these checks postdate the last connection. **Absence now does not prove absence at measurement time.**
 
 Candidates, most likely first:
-1. A user/local-scope entry in `~/.claude.json` removed after 07:08Z `[가설]`.
-2. `--mcp-config` or SDK `mcpServers` from a wrapper or harness (`dynamic`). [local] current `llmux run` children pass only `--settings` with `modelPicker`.
+1. A user/local-scope entry in `~/.claude.json`, or an untracked zbrain `.mcp.json`, removed after 07:08Z `[가설]` ([mcp-scope][mcp-scope]). Weakening fact: zbrain `.claude/settings.local.json` has no `enabledMcpjsonServers` entry for blender.
+2. `--mcp-config` or SDK `mcpServers` from a wrapper or harness (`dynamic`) ([cli][cli], [sdk-prov][sdk-prov]). [local] current `llmux run` children pass only `--settings` with `modelPicker`.
 3. An agent file run as the main session via `--agent`/`agent` setting with inline `mcpServers` (`agent`) ([sa-mcp][sa-mcp]).
 4. `managed-mcp.json` / MDM plist (`enterprise`/`managed`) ([mg-del][mg-del]).
-5. `.mcp.json` in an ancestor directory. Walk-up is undocumented `[미확인]`.
+5. `.mcp.json` in an ancestor directory. The docs only say "project root"; walk-up is `[미확인]` ([mcp-scope][mcp-scope]).
 
 Ruled out:
-- claude.ai connector: those arrive via claude.ai with a `claudeai` source, and the prefix and transport don't match `[추정 on prefix]`.
+- claude.ai connector: those arrive via claude.ai with a `claudeai` source, and the prefix and transport don't match `[추정 on prefix]`. [local] The llmux child env has no `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN`, so the claude.ai-login path is active. Connector fetch and skill sync are therefore eligible even behind llmux ([mcp-ai][mcp-ai], [sk-sync][sk-sync]).
 - plugin: the prefix and log-dir naming don't match.
 
-**The definitive mechanism for `loadout`:** read `system/init.mcp_servers[].source`, or run `claude mcp get <name>`. Do not grep config files.
+**The definitive mechanism for `harn`:** read `system/init.mcp_servers[].source`, or run `claude mcp get <name>`. Do not grep config files.
 
 ## Tensions
 
@@ -265,9 +266,9 @@ Ruled out:
 
 [gl]: https://code.claude.com/docs/en/glossary#system-reminder
 [mem-tr]: https://code.claude.com/docs/en/memory#troubleshoot-memory-issues
-[mem-ht]: https://code.claude.com/docs/en/memory#my-claudemd-is-too-large
-[mem-loc]: https://code.claude.com/docs/en/memory#choose-where-to-put-claudemd-files
-[mem-mg]: https://code.claude.com/docs/en/memory#deploy-organization-wide-claudemd
+[mem-ht]: https://code.claude.com/docs/en/memory#my-claude-md-is-too-large
+[mem-loc]: https://code.claude.com/docs/en/memory#choose-where-to-put-claude-md-files
+[mem-mg]: https://code.claude.com/docs/en/memory#deploy-organization-wide-claude-md
 [mem-ur]: https://code.claude.com/docs/en/memory#user-level-rules
 [mem-hl]: https://code.claude.com/docs/en/memory#how-claude-md-files-load
 [mem-cf]: https://code.claude.com/docs/en/memory#choose-which-instruction-files-load
@@ -292,6 +293,7 @@ Ruled out:
 [sr-git]: https://code.claude.com/docs/en/settings-reference#includegitinstructions
 [sr-skills]: https://code.claude.com/docs/en/settings-reference#skilloverrides
 [sr-mcp]: https://code.claude.com/docs/en/settings-reference#disabledmcpjsonservers
+[sr-aacm]: https://code.claude.com/docs/en/settings-reference#allowallclaudeaimcps
 [sr-sync-pl]: https://code.claude.com/docs/en/settings-reference#syncclaudeaiplugins
 [sr-adv]: https://code.claude.com/docs/en/settings-reference#advisormodel
 [env]: https://code.claude.com/docs/en/env-vars
