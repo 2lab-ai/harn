@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; CLI only — no TUI; a GUI only as a read-only view.
 
-Status: **planned** — v3.0, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
+Status: **planned** — v3.1, 2026-10-13. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -37,10 +37,10 @@ The measured composition of that request (text bytes of each region, 2026-10-13,
 | region | bytes | what |
 |---|---|---|
 | `tools` (compact JSON, as on the wire) | 210,679 | 26 built-in tools 68,411 · MCP `plugin:slack` 27 tools 77,536 · MCP `plugin:atlassian` 21 tools 64,732 |
-| `messages[1]` system text | 57,202 | SessionStart hook stdout 3,444 · Environment 841 · agent roster (31) 17,050 · MCP instructions 2,596 · skill list (216 entries, 70 with descriptions) 31,212 · date 29 · Advisor 2,018 |
-| `messages[0]` block 0 | 44,936 | `~/.claude/CLAUDE.md` 738 · `zbrain/CLAUDE.md` 6,835 · `@rules/DEV.md` 9,443 · `@rules/PRINCIPLES.md` 4,261 · auto-memory `MEMORY.md` 23,447 |
+| `messages[1]` system text | 57,202 | SessionStart hook stdout 3,456 · Environment 841 · agent roster (31) 17,050 · MCP instructions 2,596 · skill list (216 entries, 70 with descriptions) 31,212 · date 29 · Advisor 2,018 |
+| `messages[0]` block 0 | 44,936 | reminder wrapper 230 · `~/.claude/CLAUDE.md` 738 · `zbrain/CLAUDE.md` 6,835 · `@rules/DEV.md` 9,443 · `@rules/PRINCIPLES.md` 4,261 (4,557 on disk; frontmatter stripped) · auto-memory `MEMORY.md` 23,429 |
 | `system` | 6,137 | billing header 74 · identity 62 · harness rules 6,001 |
-| `messages[0]` block 1 | 3,549 | userEmail + gitStatus |
+| `messages[0]` block 1 | 3,549 | reminder wrapper 107 · userEmail 276 · gitStatus 3,166 |
 | `messages[0]` block 2 | 2 | the instruction (`hi`) |
 | `messages[1]` `tool_addition` | 122 | the Advisor tool reference |
 | attributed sum | 322,627 | |
@@ -241,9 +241,10 @@ until a bound capture turns it into `observed`.
   record only when its `RunContext` matches the target (same canonical cwd, agent version, model);
   it refuses with the mismatch otherwise. "The newest llmux session" is never a selection rule.
   For a record that carries no context of its own (an llmux line), the `RunContext` is derived from
-  the request body itself — the `gitStatus` block's cwd line, the `Contents of <path>` headers of
-  the instruction files, the `cc_version` billing header, `model` — and the record is refused when
-  those are absent.
+  the request body itself — the Environment section's "Primary working directory" line, else the
+  init event's `cwd`, else the deepest project `CLAUDE.md` directory (the `gitStatus` block carries
+  no cwd); the `cc_version` billing header; `model` — and the record is refused when those are
+  absent.
 - **Trade-off, stated once:** static is fast, session-free and drifts; oracles are ground truth and
   cost one request (Claude Code) or a process spawn with side effects (Codex). The spec keeps both
   and labels which one produced every number.
@@ -473,6 +474,10 @@ revision and the agent versions the rules were verified against. Mechanics:
   first-party deferral and the `Agent(x)` roster effect; the 6,262-byte framing remainder
   attributed; P0 / P0.5 / P1 acceptance split; token counts moved out of the first release;
   distribution matched to llmux exactly; drift warning added.
+- **v3.1 (2026-10-13, WU-D parser reproduces the capture to the byte)** — §Problem rows corrected
+  to bytes (hook stdout 3,456; MEMORY.md 23,429 with the reminder wrappers shown separately;
+  block 1 split into wrapper/userEmail/gitStatus; PRINCIPLES.md embedded without its frontmatter);
+  llmux cwd evidence corrected (Environment line, init cwd, CLAUDE.md dir — not gitStatus).
 - **v3.0 (2026-10-13, user direction after seeing migsilva89/loadout)** — the operator is an AI:
   `harn brief` (LLM-oriented facts), `harn apply <plan.json>` (validated AI-authored plan through
   the same snapshot/diff/journal), `harn report --html` (read-only human visualization); the TUI
