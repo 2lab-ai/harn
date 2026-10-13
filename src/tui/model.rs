@@ -9,6 +9,7 @@ use crate::model::{self, Agent, Item, Kind, Knob, Layer, Mode, Scope, Tree};
 use crate::plan::{knob_scope, ActionPlan};
 use crate::render::common::{denominator, request_bytes};
 use crate::resolve::claude::CAP_STATE_UNKNOWN;
+use crate::resolve::claude::OFF_ALL_HOOKS;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,8 @@ pub struct OffItem {
 
 /// The one switch Claude Code has for hooks: every hook at once.
 pub const ALL_HOOKS: &str = "/disableAllHooks";
+/// What a hook row that switch turned off says instead of a size.
+const OFF_WITH_HOOKS: &str = "off, with every other hook";
 
 /// Row order inside a group; `s` toggles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -250,8 +253,7 @@ pub struct Group {
     pub overlap: bool,
     /// `count_line` for a narrow frame.
     pub count_short: String,
-    /// One switch turned the whole group off (every hook): no count, no size; `count_line`
-    /// says so.
+    /// One switch turned the whole group off (every hook): no size; `count_line` says so.
     pub all_off: bool,
     pub rows: Vec<Row>,
     /// `d` can act on some row inside.
@@ -262,7 +264,7 @@ pub struct Group {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     On,
-    /// Turned off here by harn (journaled, gone from the tree).
+    /// Turned off: by harn here (journaled), or with every other hook.
     Off,
     /// No switch: it cannot be turned off.
     Fixed,
@@ -1109,24 +1111,41 @@ impl Builder<'_> {
                 ),
             );
         }
-        let hooks_all_off = off.iter().any(|o| o.pointer.as_deref() == Some(ALL_HOOKS));
+        // Every hook off with Claude Code's one switch: still listed, each saying so.
+        let switched = hooks
+            .iter()
+            .filter(|h| h.signal.as_deref() == Some(OFF_ALL_HOOKS))
+            .collect::<Vec<_>>();
+        let hooks_all_off =
+            !switched.is_empty() || off.iter().any(|o| o.pointer.as_deref() == Some(ALL_HOOKS));
+        let by_harn = off.iter().any(|o| o.pointer.as_deref() == Some(ALL_HOOKS))
+            || switched.iter().any(|h| self.journaled.contains_key(&h.id));
         if !hook_rows.is_empty() && hooks_all_off {
-            // The resolver drops every hook once the switch is on: a count would be a lie.
-            let mut group = self.group(
-                GroupKind::Hooks,
-                "Hooks",
-                hook_rows,
+            let detail = if by_harn {
                 Detail {
                     what: "Hooks · all off for this project".to_string(),
                     brings: "harn turned every hook off here with Claude Code's one switch for \
                              them; none runs until it is turned back on."
                         .to_string(),
-                    action: "u undoes the change; o on the hook below does too.".to_string(),
+                    action: "u undoes the change; o on any hook below does too.".to_string(),
                     ..Detail::default()
-                },
-            );
-            group.name = "Hooks".to_string();
-            group.count_line = "all off for this project · u undoes".to_string();
+                }
+            } else {
+                Detail {
+                    what: "Hooks · all off here".to_string(),
+                    brings: "Your settings turn every hook off (disableAllHooks); none runs here."
+                        .to_string(),
+                    action: "harn did not make that change, so o and u cannot reverse it."
+                        .to_string(),
+                    ..Detail::default()
+                }
+            };
+            let mut group = self.group(GroupKind::Hooks, "Hooks", hook_rows, detail);
+            group.count_line = if by_harn {
+                "all off for this project · u undoes".to_string()
+            } else {
+                "all off here".to_string()
+            };
             group.all_off = true;
             group.absent = None;
             groups.push(group);
@@ -1361,30 +1380,29 @@ impl Builder<'_> {
         group
     }
 
-    /// `Turned off here by harn` for items in the journal; `Off` rows say it themselves.
-    fn journaled_note(&self, item: &Item) -> Option<String> {
-        self.journaled
-            .contains_key(&item.id)
-            .then(|| "harn changed it here; o reverses that change.".to_string())
+    /// The detail of a row harn turned off here that still resolves: what still shows in the
+    /// first request is what Claude Code may still load.
+    fn still_listed(&self, item: &Item, name: &str) -> Option<Detail> {
+        let loads = matches!(item.mode, Mode::Always | Mode::Advertised);
+        self.journaled.contains_key(&item.id).then(|| Detail {
+            what: format!("{name} · turned off · u undoes · takes effect next session"),
+            brings: if loads {
+                "harn turned it off here, but it still shows in what loads; whether its bytes \
+                 leave needs `harn verify --run`."
+            } else {
+                "harn turned it off here; it stays listed, and none of it loads."
+            }
+            .to_string(),
+            action: "o turns it back on (the change is reversed byte for byte).".to_string(),
+            ..Detail::default()
+        })
     }
 
     /// Source words of a non-plugin item: `project`, `~/.claude`, `claude.ai`, `Claude Code`.
     fn layer_source(&self, item: &Item) -> String {
-        match item.origin.layer {
-            Layer::Project => "project".to_string(),
-            Layer::Local => "this project".to_string(),
-            Layer::User => "~/.claude".to_string(),
-            Layer::ClaudeAi => "claude.ai".to_string(),
-            Layer::Builtin => "Claude Code".to_string(),
-            Layer::Managed => "organisation".to_string(),
-            Layer::Plugin => item
-                .origin
-                .plugin
-                .as_deref()
-                .map(market_word)
-                .unwrap_or_else(|| "plugin".to_string()),
-            Layer::Dynamic => "session".to_string(),
-            Layer::Unresolved => "unresolved".to_string(),
+        match (item.origin.layer, item.origin.plugin.as_deref()) {
+            (Layer::Plugin, Some(plugin)) => market_word(plugin),
+            (layer, _) => layer_words(layer).to_string(),
         }
     }
 
@@ -1411,6 +1429,12 @@ impl Builder<'_> {
         let bytes = subtree_bytes(item);
         let absent = if bytes.is_some() {
             None
+        } else if switched_off(item) {
+            Some(OFF_WITH_HOOKS)
+        } else if self.journaled.contains_key(&item.id) {
+            // Turned off here and still listed (a disabled MCP server): the word place_off
+            // rows say.
+            Some("off")
         } else if item.cost.not_applicable || matches!(item.mode, Mode::Runtime | Mode::None) {
             absent_word(item.mode).or(Some("not loaded"))
         } else {
@@ -1419,8 +1443,13 @@ impl Builder<'_> {
         (bytes, self.share(bytes), absent)
     }
 
+    /// Off when harn turned it off here (even if it still resolves: a denied agent stays in
+    /// the roster) or it went off with every other hook, else On with a switch, Fixed without
+    /// one.
     fn state(&self, item: &Item) -> State {
-        if any_knob(item).is_some() {
+        if self.journaled.contains_key(&item.id) || switched_off(item) {
+            State::Off
+        } else if any_knob(item).is_some() {
             State::On
         } else {
             State::Fixed
@@ -1752,10 +1781,39 @@ impl Builder<'_> {
             ..Detail::default()
         };
         self.action_sentences(item, &mut detail, listing_entry(item), "it");
-        if let Some(note) = self.journaled_note(item) {
-            detail.undo = note;
+        self.hooks_off(item, name)
+            .or_else(|| self.still_listed(item, name))
+            .unwrap_or(detail)
+    }
+
+    /// The detail of a hook that went off with every other hook.
+    fn hooks_off(&self, item: &Item, name: &str) -> Option<Detail> {
+        if !switched_off(item) {
+            return None;
         }
-        detail
+        Some(if self.journaled.contains_key(&item.id) {
+            Detail {
+                what: format!(
+                    "{name} · turned off with every other hook · u undoes · takes effect next \
+                     session"
+                ),
+                brings: "Claude Code turns hooks off all at once: harn turned every hook off \
+                         here, and none runs until they are turned back on."
+                    .to_string(),
+                action: "o turns them all back on (the change is reversed byte for byte)."
+                    .to_string(),
+                ..Detail::default()
+            }
+        } else {
+            Detail {
+                what: format!("{name} · off with every other hook"),
+                brings: "Your settings turn every hook off (disableAllHooks); it does not run \
+                         here."
+                    .to_string(),
+                action: "harn did not make that change, so o and u cannot reverse it.".to_string(),
+                ..Detail::default()
+            }
+        })
     }
 
     /// `skill of the slack plugin`, `instructions in this repository · loads every session`.
@@ -1944,11 +2002,7 @@ impl Builder<'_> {
             kind_word: kind.map(kind_word).unwrap_or("item").to_string(),
             bytes: None,
             share: None,
-            absent: Some(if all_hooks {
-                "off, with every other hook"
-            } else {
-                "off"
-            }),
+            absent: Some(if all_hooks { OFF_WITH_HOOKS } else { "off" }),
             weight: None,
             saving: None,
             children: Vec::new(),
@@ -1994,15 +2048,40 @@ impl Builder<'_> {
     }
 }
 
+/// The source column's words for a layer: `project`, `~/.claude`, `claude.ai`, `Claude Code`.
+fn layer_words(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Project => "project",
+        Layer::Local => "this project",
+        Layer::User => "~/.claude",
+        Layer::ClaudeAi => "claude.ai",
+        Layer::Builtin => "Claude Code",
+        Layer::Managed => "organisation",
+        Layer::Plugin => "plugin",
+        Layer::Dynamic => "session",
+        Layer::Unresolved => "unresolved",
+    }
+}
+
+/// A hook (or the status line) that Claude Code's one hooks switch turned off.
+fn switched_off(item: &Item) -> bool {
+    item.signal.as_deref() == Some(OFF_ALL_HOOKS)
+}
+
 /// Name and source of an item known only by its id (`<agent>/<kind>/<layer>/<name>`): a plugin
 /// without its marketplace, a file home-relative, a hook by its event, else the name's last
-/// `:` part.
+/// `:` part. The source is worded as a live row's (`~/.claude`, not `user`).
 pub fn id_name(id: &str, places: &Places) -> (String, String) {
     let mut parts = id.splitn(4, '/');
     let (_, kind, layer, name) = (parts.next(), parts.next(), parts.next(), parts.next());
+    let layer = layer.unwrap_or_default();
     let (kind, layer, name) = (
         kind.unwrap_or_default(),
-        layer.unwrap_or_default().to_string(),
+        Layer::ALL
+            .iter()
+            .find(|l| l.as_str() == layer)
+            .map_or(layer, |l| layer_words(*l))
+            .to_string(),
         name.unwrap_or(id),
     );
     match Kind::ALL.iter().copied().find(|k| k.as_str() == kind) {
@@ -2236,8 +2315,27 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
         return Some("through claude.ai".to_string());
     }
     let (file, rest) = first.split_once('#')?;
-    let pointer = rest.split([' ', '(']).next().unwrap_or_default();
+    let (pointer, _) = split_link(rest);
     Some(setting_scope(Path::new(file), pointer, places).sentence())
+}
+
+/// The JSON pointer of an origin link's `#…` part and what follows it. A pointer keeps the
+/// spaces and parentheses of the directory names in it (only `/` and `~` are escaped), so the
+/// tail is read from the right; harn writes two tail forms: `<pointer> = <value>` (the last
+/// ` = `) and `<pointer> (<note>)` (the last ` (`, a note with no `/` in it). Anything else is
+/// all pointer.
+pub fn split_link(rest: &str) -> (&str, &str) {
+    if let Some(at) = rest.rfind(" = ") {
+        return (&rest[..at], rest[at + 1..].trim_start());
+    }
+    if rest.ends_with(')') {
+        if let Some(at) = rest.rfind(" (") {
+            if !rest[at..].contains('/') {
+                return (&rest[..at], rest[at + 1..].trim_start());
+            }
+        }
+    }
+    (rest, "")
 }
 
 /// Whom a setting applies to.
@@ -2361,6 +2459,9 @@ pub struct OffCard {
     /// Each thing that leaves: `block-kit (skill)`.
     pub leave_list: Vec<String>,
     pub saves: String,
+    /// How the count of items at start moves (`2 fewer items at start`), shown after `saves`
+    /// as one phrase; empty when the plan does not say.
+    pub at_start: String,
     pub undo: String,
     pub notes: Vec<String>,
 }
@@ -2386,6 +2487,10 @@ pub fn off_card(
         .iter()
         .map(|op| writes_line(&op.knob, &places, arrow))
         .collect();
+    let all_hooks = plan
+        .ops
+        .iter()
+        .any(|op| matches!(&op.knob, Knob::Setting { pointer, .. } if pointer == ALL_HOOKS));
     let mut gone: Vec<(String, Kind)> = Vec::new();
     let mut added: Vec<String> = Vec::new();
     for effect in &plan.side_effects {
@@ -2399,6 +2504,17 @@ pub fn off_card(
             added.push(format!("{shown} ({}, appears)", kind_word(kind)));
         }
     }
+    // Skills, commands, agents, MCP servers, hooks, then the rest: the summary and the list
+    // in the same order.
+    let order = |k: &Kind| match k {
+        Kind::Skill => 0,
+        Kind::Command => 1,
+        Kind::SubAgent => 2,
+        Kind::McpServer => 3,
+        Kind::Hook => 4,
+        _ => 5,
+    };
+    gone.sort_by_key(|(_, k)| order(k));
     let leaves = if gone.is_empty() {
         format!("just this {} (next session)", kind_word(item.kind))
     } else {
@@ -2409,28 +2525,24 @@ pub fn off_card(
                 None => counts.push((*kind, 1)),
             }
         }
-        let order = |k: &Kind| match k {
-            Kind::Skill => 0,
-            Kind::Command => 1,
-            Kind::SubAgent => 2,
-            Kind::McpServer => 3,
-            Kind::Hook => 4,
-            _ => 5,
-        };
-        counts.sort_by_key(|(k, _)| order(k));
         let parts: Vec<String> = counts
             .iter()
             .map(|(k, n)| count(*n, kind_word(*k)))
             .collect();
         format!("{} (next session)", parts.join(", "))
     };
-    // `UserPromptSubmit (hook)`: the kind word once.
+    // `UserPromptSubmit (hook)`: the kind word once. The status line has no row to point at.
     let mut leave_list: Vec<String> = gone
         .iter()
         .map(|(n, k)| {
             let word = kind_word(*k);
             let n = n.strip_suffix(&format!(" {word}")).unwrap_or(n);
-            format!("{n} ({word})")
+            match k {
+                Kind::StatusLine => {
+                    format!("{n} ({word} — not a row above; it stops with the hooks)")
+                }
+                _ => format!("{n} ({word})"),
+            }
         })
         .collect();
     leave_list.extend(added);
@@ -2455,10 +2567,12 @@ pub fn off_card(
         (0, false) => "nothing in the first request".to_string(),
         (known, false) => format!("{} of the first request", size(known)),
     };
-    let all_hooks = plan
-        .ops
-        .iter()
-        .any(|op| matches!(&op.knob, Knob::Setting { pointer, .. } if pointer == ALL_HOOKS));
+    // How the header's count moves, from the plan's own re-resolve: the applied message says
+    // the same numbers.
+    let at_start = model::walk(tree)
+        .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
+        .count();
+    let at_start = fewer_at_start(at_start, plan.items_after);
     OffCard {
         title: if all_hooks {
             format!("Turn off all hooks for {}", scope_short(scope))
@@ -2472,12 +2586,24 @@ pub fn off_card(
         leaves,
         leave_list,
         saves,
+        at_start,
         undo: "u here, or `harn undo` later — the file is restored byte for byte".to_string(),
         notes: plan
             .warnings
             .iter()
             .map(|w| sentence(&places.text(w)))
             .collect(),
+    }
+}
+
+/// `6 fewer items at start`, `1 fewer item at start`, `no change in what loads at start`.
+fn fewer_at_start(before: usize, after: usize) -> String {
+    let n = before.abs_diff(after);
+    let items = if n == 1 { "item" } else { "items" };
+    match after.cmp(&before) {
+        std::cmp::Ordering::Less => format!("{n} fewer {items} at start"),
+        std::cmp::Ordering::Greater => format!("{n} more {items} at start"),
+        std::cmp::Ordering::Equal => "no change in what loads at start".to_string(),
     }
 }
 
@@ -2575,10 +2701,7 @@ fn where_link(link: &str, places: &Places) -> String {
     if let Some((head, rest)) = link.split_once("#/") {
         let start = head.find(['/', '~']).unwrap_or(0);
         let (prefix, file) = head.split_at(start);
-        let (pointer, tail) = match rest.find([' ', '(']) {
-            Some(at) => (&rest[..at], rest[at..].trim_start()),
-            None => (rest, ""),
-        };
+        let (pointer, tail) = split_link(rest);
         let words = pointer_words(pointer, places).join(" › ");
         let scope = setting_scope(Path::new(file), pointer, places).short();
         let tail = places.text(tail);
@@ -2697,6 +2820,102 @@ mod tests {
         assert_eq!(
             writes_line(&deny, &p, "->"),
             ".claude/settings.local.json -> permissions.deny += Bash"
+        );
+    }
+
+    fn places_in(dir: &str) -> Places {
+        Places {
+            dir: PathBuf::from(dir),
+            home: Some(PathBuf::from("/home/me")),
+        }
+    }
+
+    #[test]
+    fn the_count_at_start_is_worded_by_how_it_moves() {
+        assert_eq!(fewer_at_start(83, 77), "6 fewer items at start");
+        assert_eq!(fewer_at_start(83, 82), "1 fewer item at start");
+        assert_eq!(fewer_at_start(83, 83), "no change in what loads at start");
+        assert_eq!(fewer_at_start(83, 85), "2 more items at start");
+    }
+
+    #[test]
+    fn a_link_splits_its_tail_from_the_right() {
+        assert_eq!(
+            split_link("/enabledPlugins/slack@x = true"),
+            ("/enabledPlugins/slack@x", "= true")
+        );
+        assert_eq!(
+            split_link("/projects/~1home~1me~1my app/enabledPlugins/x = true"),
+            ("/projects/~1home~1me~1my app/enabledPlugins/x", "= true")
+        );
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo (x)/mcpServers/s (http)"),
+            ("/projects/~1home~1me~1foo (x)/mcpServers/s", "(http)")
+        );
+        // A parenthesis inside the pointer, no tail: all pointer.
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo (x)/disabledMcpServers"),
+            ("/projects/~1home~1me~1foo (x)/disabledMcpServers", "")
+        );
+        assert_eq!(split_link("/hooks/Stop/0"), ("/hooks/Stop/0", ""));
+    }
+
+    /// A plugin whose admission chain starts with `link`.
+    fn enabled_by(link: &str) -> Item {
+        let mut plugin = item(SLACK, SLACK, Kind::Plugin, Some(SLACK), Layer::Plugin, None);
+        plugin.origin.why = vec![link.to_string()];
+        plugin
+    }
+
+    #[test]
+    fn a_project_key_with_spaces_or_parentheses_keeps_its_project() {
+        // (a) the target dir has a space; (b) it has ` (x)`.
+        for dir in ["/home/me/my app", "/home/me/foo (x)"] {
+            let p = places_in(dir);
+            let escaped = dir.replace('/', "~1");
+            let link = format!("/home/me/.claude.json#/projects/{escaped}/enabledPlugins/x = true");
+            assert_eq!(
+                where_link(&link, &p),
+                "~/.claude.json › projects › this project › enabledPlugins › x = true   \
+                 (this project)",
+                "{dir}"
+            );
+            assert_eq!(
+                enabled_scope(&enabled_by(&link), &p).as_deref(),
+                Some("for this project only"),
+                "{dir}"
+            );
+            let (pointer, _) = split_link(link.split_once('#').unwrap().1);
+            assert_eq!(pointer_words(pointer, &p)[1], "this project", "{dir}");
+            // (d) the `(http)` tail form.
+            let server = format!("/home/me/.claude.json#/projects/{escaped}/mcpServers/srv (http)");
+            assert_eq!(
+                where_link(&server, &p),
+                "~/.claude.json › projects › this project › mcpServers › srv (http)   \
+                 (this project)",
+                "{dir}"
+            );
+            assert_eq!(
+                enabled_scope(&enabled_by(&server), &p).as_deref(),
+                Some("for this project only"),
+                "{dir}"
+            );
+        }
+        // (c) another project's dir with a space: that project, home-relative, never ours.
+        let p = places();
+        let link = "/home/me/.claude.json#/projects/~1home~1me~1other app/enabledPlugins/x = true";
+        assert_eq!(
+            where_link(link, &p),
+            "~/.claude.json › projects › ~/other app › enabledPlugins › x = true   (~/other app)"
+        );
+        assert_eq!(
+            enabled_scope(&enabled_by(link), &p).as_deref(),
+            Some("for ~/other app only")
+        );
+        let server = "/home/me/.claude.json#/projects/~1home~1me~1other app/mcpServers/srv (http)";
+        assert_eq!(
+            where_link(server, &p),
+            "~/.claude.json › projects › ~/other app › mcpServers › srv (http)   (~/other app)"
         );
     }
 

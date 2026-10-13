@@ -19,7 +19,6 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::Modifier;
 use ratatui::Terminal;
-use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -190,15 +189,45 @@ fn open_all(app: &mut App) {
     press(app, KeyCode::Char('g'));
 }
 
-/// The list rows of a frame: from under the header rule to the next rule, cards over it left
-/// out (their lines carry a border).
+/// A card's or the confirm's top border (`┌ title ─┐`, ASCII `+ title -+`).
+fn box_top(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('┌') || (t.starts_with('+') && t.ends_with('+') && t.len() > 1)
+}
+
+/// A card's or the confirm's bottom border (`└──┘`, ASCII `+--+`).
+fn box_bottom(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('└') || (t.starts_with("+-") && t.ends_with('+'))
+}
+
+/// The list rows of a frame, by the view's layout: the rows between the header rule and the
+/// rule over the panel (a 4-row panel, 5 from 40 rows high, fewer when short), less the rows a
+/// card or the confirm takes, from its top border to its bottom border. A row whose text holds
+/// `+` or `|` is a list row like any other.
 fn list_rows(frame: &str) -> Vec<&str> {
-    frame
-        .lines()
-        .skip(3)
-        .take_while(|l| !l.starts_with('─') && !l.starts_with('-'))
-        .filter(|l| !l.contains(['│', '┌', '└', '|', '+']))
-        .collect()
+    let lines: Vec<&str> = frame.lines().collect();
+    let h = lines.len();
+    let panel = if h >= 40 { 5 } else { 4 }
+        .min(h.saturating_sub(9))
+        .max(usize::from(h >= 8));
+    let end = h.saturating_sub(3 + panel);
+    let mut rows = Vec::new();
+    let mut in_box = false;
+    for (i, line) in lines.iter().enumerate() {
+        if !in_box && box_top(line) {
+            in_box = true;
+            continue;
+        }
+        if in_box {
+            in_box = !box_bottom(line);
+            continue;
+        }
+        if (3..end).contains(&i) {
+            rows.push(*line);
+        }
+    }
+    rows
 }
 
 /// Bytes of every file under the fixture (its project, its home, the journal).
@@ -486,7 +515,7 @@ fn first_screen_at_80x24_is_the_groups_the_panel_and_the_keys() {
             " ▸ Project files (4)                                 1.2 KB █▍               8%",
             " ▸ Skill listing  20 entries                         0.5 KB ▌                3%",
             " ▸ Agent listing  10 entries                         0.4 KB ▌                2%",
-            " ▸ Plugins (2)  0.3 KB in the listings above",
+            " ▸ Plugins (2)  0.3 KB would leave with them · counted in the listings above",
             " ▸ Hooks (2)                                     unmeasured",
             " ▸ MCP servers (2)                               unmeasured",
             " ▸ Built-in (7)  mostly cannot be turned off     unmeasured",
@@ -547,6 +576,13 @@ fn first_screen_at_120x40_has_the_version_a_wider_bar_and_a_taller_panel() {
         group.trim_end(),
         " ▾ Plugins (2)  0.3 KB would leave with them · counted in the listings above"
     );
+    // Narrower than the long form: the short one, never a cut sentence.
+    let narrow = screen(&app, 60, 24);
+    let group = narrow.iter().find(|l| l.contains("Plugins (2)")).unwrap();
+    assert_eq!(
+        group.trim_end(),
+        " ▾ Plugins (2)  0.3 KB in the listings above"
+    );
     // Under its plugin a skill shows its own listing line's bytes.
     let skill = frame.iter().find(|l| l.contains("alpha-skill")).unwrap();
     assert!(
@@ -588,7 +624,7 @@ fn plugins_opened_show_one_row_per_plugin_and_its_detail() {
     // off frees, its bar against the largest line shown, its share of the total.
     assert_eq!(
         frame[7].trim_end(),
-        " ▾ Plugins (2)  0.3 KB in the listings above"
+        " ▾ Plugins (2)  0.3 KB would leave with them · counted in the listings above"
     );
     assert_eq!(
         frame[8].trim_end(),
@@ -596,7 +632,7 @@ fn plugins_opened_show_one_row_per_plugin_and_its_detail() {
     );
     assert_eq!(
         frame[9].trim_end(),
-        "   ▸ alpha  market-one                               0.1 KB ▏                0%"
+        "   ▸ alpha  market-one                               0.1 KB ▏               <1%"
     );
     // The full saving is a sentence with both parts; every sentence whole.
     assert_eq!(
@@ -685,7 +721,7 @@ fn d_opens_one_card_enter_applies_through_the_journal_and_u_restores_the_bytes()
                 " Writes   .claude/settings.local.json → enabledPlugins.alpha = false",
                 " Leaves   2 skills, 1 MCP server, 1 hook (next session)                → list",
                 " Saves    0.1 KB: 0.1 KB of its entries in the skill listing, plus its own",
-                "          unmeasured part",
+                "          unmeasured part · 6 fewer items at start",
                 " Undo     u here, or `harn undo` later — the file is restored byte for byte",
             ],
             "{width}x{height}"
@@ -699,7 +735,14 @@ fn d_opens_one_card_enter_applies_through_the_journal_and_u_restores_the_bytes()
         "nothing yet"
     );
 
+    let count = app.screen().title.items;
+    let predicted = fewer_on_card(&card(
+        &screen(&app, 80, 24),
+        "Turn off alpha for this project",
+    ));
     press(&mut app, KeyCode::Enter);
+    // The card's prediction is the header's drop.
+    assert_eq!(count - app.screen().title.items, predicted);
     let entries = journal::history(&journal(&f)).unwrap();
     assert_eq!(entries.len(), 1);
     assert_ne!(std::fs::read(local_settings(&f)).unwrap(), before);
@@ -708,9 +751,20 @@ fn d_opens_one_card_enter_applies_through_the_journal_and_u_restores_the_bytes()
         "re-resolved"
     );
     assert_eq!(app.cursor_id().as_deref(), Some(ALPHA), "on its off row");
+    // The header's count moves by what the message says: the plugin row, its 2 skills, its
+    // server with that server's instructions, its hook.
+    assert_eq!(app.screen().title.items, count - 6);
+    assert_eq!(
+        message(&app),
+        format!(
+            "turned off alpha · 6 fewer items load at start ({count} → {}) · u undoes · takes \
+             effect next session",
+            count - 6
+        )
+    );
     let frame = screen(&app, 80, 24);
     assert_eq!(
-        panel(&frame)[0],
+        panel(&frame)[1],
         " alpha · turned off · u undoes · takes effect next session"
     );
     let buffer = draw(&app, 80, 24);
@@ -727,16 +781,16 @@ fn d_opens_one_card_enter_applies_through_the_journal_and_u_restores_the_bytes()
     );
 
     press(&mut app, KeyCode::Char('u'));
-    let confirm = text(&app, 80, 24);
-    for part in [
-        "Undo the last change?",
-        "alpha comes back on",
-        "restores .claude/settings.local.json byte for byte",
-        "y = yes · n/Esc = no",
-    ] {
-        assert!(confirm.contains(part), "{part}: {confirm}");
-    }
-    press(&mut app, KeyCode::Char('y'));
+    let inside = card(&screen(&app, 80, 24), "Undo the last change");
+    assert_eq!(
+        inside,
+        [
+            " alpha comes back on",
+            " restores .claude/settings.local.json byte for byte",
+            "                                                        Enter undo · Esc keep",
+        ]
+    );
+    press(&mut app, KeyCode::Enter);
     assert_eq!(std::fs::read(local_settings(&f)).unwrap(), before);
     assert!(journal::history(&journal(&f)).unwrap()[0]
         .undone_at
@@ -757,6 +811,12 @@ fn the_leaves_line_opens_the_list_of_what_leaves() {
     press(&mut app, KeyCode::Right);
     let mut inside = card(&screen(&app, 80, 24), "What leaves with alpha");
     assert_eq!(inside.pop().unwrap().trim(), "Esc back");
+    // In the Leaves line's order: skills, then MCP servers, then hooks.
+    let kinds: Vec<&str> = inside
+        .iter()
+        .map(|l| l.rsplit_once(" (").unwrap().1)
+        .collect();
+    assert_eq!(kinds, ["skill)", "skill)", "MCP server)", "hook)"]);
     inside.sort();
     assert_eq!(
         inside,
@@ -838,13 +898,17 @@ fn the_keys_card_has_aligned_columns_and_whole_words() {
     assert_eq!(
         frame[top + 1..top + 6],
         [
-            "│ ↑ ↓   move           →  ←   open / close group        /   search (Esc clears)│",
-            "│ g G   top / bottom   s      sort: size · name         i   notes              │",
-            "│ d     turn off       o      turn back on              u   undo last change   │",
-            "│ w     where from     e      edit the file ($EDITOR)   t   let the AI trim    │",
-            "│ ?     this card      q Esc  quit / close              r   refresh            │",
+            "│ ↑ ↓  move           →  ←   open / close group        /   search (Esc clears) │",
+            "│ g G  top / bottom   s      sort: size · name         i   notes               │",
+            "│ d    turn off       o      turn back on              u   undo last change    │",
+            "│ w    where from     e      edit the file ($EDITOR)   t   let the AI trim     │",
+            "│ ?    this card      q Esc  quit / close              r   refresh             │",
         ]
     );
+    // Every line keeps a space before the border, as on every other card.
+    for line in &frame[top + 1..top + 6] {
+        assert!(line.ends_with(" │"), "{line}");
+    }
     // Narrower than the three columns: one key per line, words whole.
     let narrow = card(&screen(&app, 50, 30), "Keys").join("\n");
     for words in [
@@ -887,7 +951,7 @@ fn ascii_mode_draws_markers_bars_and_borders_in_ascii() {
     assert!(first[3].contains("##############  85%"), "{}", first[3]);
     assert_eq!(
         first[7].trim_end(),
-        " > Plugins (2)  0.3 KB in the listings above"
+        " > Plugins (2)  0.3 KB would leave with them | counted in the listings above"
     );
     assert!(first[8].contains(" unmeasured"), "{}", first[8]);
     assert!(first[2].chars().all(|c| c == '-'));
@@ -914,7 +978,7 @@ fn ascii_mode_draws_markers_bars_and_borders_in_ascii() {
     assert!(all.contains("Enter apply | Esc"), "{all}");
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('?'));
-    assert!(text(&app, 80, 24).contains("| j k   move"));
+    assert!(text(&app, 80, 24).contains("| j k  move"));
 }
 
 /// Every string in `value` with its non-ASCII chars replaced by `-`.
@@ -1035,25 +1099,81 @@ fn clean_both(app: &App, words: &[String], what: &str) {
 
 #[test]
 fn the_bare_question_mark_guard_catches_a_size_cell_anywhere_in_a_list_row() {
+    // An 80×24 frame's layout: header, rule, 14 list rows, rule, 4 panel rows, rule, keys.
     let rule = "─".repeat(20);
-    let frame = |row: &str| format!("head\nhead\n{rule}\n{row}\n{rule}\npanel\n{rule}\n ? keys");
-    let caught = |row: &str| {
-        let frame = frame(row);
+    let frame = |list: &[&str]| {
+        let mut lines = vec!["head".to_string(), "head".to_string(), rule.clone()];
+        lines.extend(list.iter().map(|l| l.to_string()));
+        lines.resize(17, String::new());
+        lines.push(rule.clone());
+        lines.extend([
+            "panel ?".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
+        lines.push(rule.clone());
+        lines.push(" ? keys   q quit".to_string());
+        lines.join("\n")
+    };
+    let caught = |list: &[&str]| {
+        let frame = frame(list);
         std::panic::catch_unwind(|| assert_clean(&frame, &[], "probe")).is_err()
     };
-    assert!(caught(" ▸ Hooks (2)    ?   0%"), "mid-row");
+    assert!(caught(&[" ▸ Hooks (2)    ?   0%"]), "mid-row");
     assert!(
-        caught(" ▸ Hooks (2)                                              ?"),
+        caught(&[" ▸ Hooks (2)                                              ?"]),
         "row end"
     );
-    assert!(!caught(
+    // A `+` in a row's own text does not make it a card's: still checked.
+    assert!(
+        caught(&[" ▸ CLAUDE.md + 2 imports    ?   0%"]),
+        "a + in the name"
+    );
+    assert!(!caught(&[
         " ▸ Hooks (2)                                     unmeasured"
-    ));
-    // In a card over the list, in the key bar, in a question: no size.
-    assert!(!caught(
-        "│ ?     this card      q Esc  quit / close              r   refresh │"
-    ));
-    assert!(!caught(" ▸│Undo the last change?                    │%"));
+    ]));
+    // Inside a card over the list (from its top border to its bottom), in the key bar, in the
+    // panel: no size cell.
+    assert!(!caught(&[
+        "┌ Keys ──────────────┐",
+        "│ ?     this card    │",
+        "│ ▸ CLAUDE.md + 2 imports    ?   0% │",
+        "└────────────────────┘",
+    ]));
+    assert!(!caught(&[
+        "┌ Undo the last change ─────┐",
+        "│ alpha comes back on   ?   │",
+        "└───────────────────────────┘",
+    ]));
+    assert!(!caught(&[
+        "+ Keys ---------------+",
+        "| ?     this card     |",
+        "+---------------------+",
+    ]));
+    // A row below a card is a list row again.
+    assert!(caught(&[
+        "┌ Keys ──────────────┐",
+        "│ ?     this card    │",
+        "└────────────────────┘",
+        " ▸ Hooks (2)    ?   0%",
+    ]));
+}
+
+/// What `d` must do on a line, decided from the model before any key acts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// A group: `d` points into it.
+    Group,
+    /// A row with a switch for this project: `d` opens a card.
+    Actionable,
+    /// A row with no such switch, or one gathering others: `d` says why, no card.
+    Refused,
+}
+
+/// The journal's entries, newest first.
+fn entries(f: &Fixture) -> Vec<journal::JournalEntry> {
+    journal::history(&journal(f)).unwrap()
 }
 
 #[test]
@@ -1076,20 +1196,54 @@ fn no_frame_shows_a_raw_id_an_absolute_path_a_hash_or_an_internal_tag() {
         list_rows(&tall).iter().all(|l| !l.contains('▸')),
         "a folded line left:\n{tall}"
     );
-    // Every line in every state: its panel, its `w` card, its `d` card, the list of what
-    // leaves, then applied (its off row), the `o` card, the `u` confirm, and the frame after
-    // the undo. Each at 80×24 and 120×40.
-    let mut visited = BTreeSet::new();
-    let mut applied = 0;
+
+    // Every line classified from the model first (the cursor only moves).
+    let mut expect = Vec::new();
+    press(&mut app, KeyCode::Char('g'));
     for at in 0..total {
-        // Back on line `at`: a change and its undo may have moved the cursor.
+        assert_eq!(app.cursor(), at);
+        let kind = if app.rows()[at].0 == 0 {
+            Expect::Group
+        } else {
+            match app.cursor_id() {
+                None => Expect::Refused,
+                Some(id) => {
+                    let item = model::walk(app.tree())
+                        .find(|i| i.id == id)
+                        .unwrap_or_else(|| panic!("{id}: a row for no item"));
+                    let local = item
+                        .knobs
+                        .iter()
+                        .any(|k| plan::knob_scope(k) == Some(model::Scope::Local));
+                    if local {
+                        Expect::Actionable
+                    } else {
+                        Expect::Refused
+                    }
+                }
+            }
+        };
+        expect.push(kind);
+        press(&mut app, KeyCode::Char('j'));
+    }
+
+    // Then every line in every state, each frame at 80×24 and 120×40: the list, its `w` card,
+    // `d`; for an actionable line its card, the list of what leaves, the applied frame (its off
+    // row), the `w` card on the off row, the `o` card, and the frame after turning it back on
+    // (by `o` → Enter and by `u` → `y`, in turn).
+    let (mut applied, mut refusals, mut by_o, mut by_u) = (0, 0, 0, 0);
+    for (at, kind) in expect.iter().enumerate() {
         press(&mut app, KeyCode::Char('g'));
         for _ in 0..at {
             press(&mut app, KeyCode::Char('j'));
         }
         assert_eq!(app.cursor(), at);
-        visited.insert(app.cursor());
         let name = app.cursor_name().unwrap();
+        let id = app.cursor_id();
+        let source = id.as_deref().and_then(|id| {
+            let (g, path) = app.screen().find(id)?;
+            app.screen().row(g, &path).map(|r| r.source.clone())
+        });
         clean_both(&app, &words, &name);
         press(&mut app, KeyCode::Char('w'));
         clean_both(&app, &words, &format!("w {name}"));
@@ -1098,44 +1252,110 @@ fn no_frame_shows_a_raw_id_an_absolute_path_a_hash_or_an_internal_tag() {
         }
         press(&mut app, KeyCode::Char('d'));
         clean_both(&app, &words, &format!("d {name}"));
-        if app.staged().is_some() {
-            press(&mut app, KeyCode::Right);
-            clean_both(&app, &words, &format!("leaves {name}"));
-            if text(&app, 80, 24).contains("┌ What leaves with") {
-                press(&mut app, KeyCode::Esc);
+        match kind {
+            Expect::Group => {
+                assert!(!app.has_card(), "{name}");
+                assert!(message(&app).starts_with("d turns off one thing"), "{name}");
             }
-            press(&mut app, KeyCode::Enter);
-            clean_both(&app, &words, &format!("applied {name}"));
-            press(&mut app, KeyCode::Char('o'));
-            clean_both(&app, &words, &format!("o {name}"));
-            if app.has_card() {
-                press(&mut app, KeyCode::Esc);
+            Expect::Refused => {
+                assert!(!app.has_card(), "{name}: a card for a refused line");
+                let said = message(&app);
+                assert!(
+                    said.starts_with("refused: ") || said.contains("gathers several"),
+                    "{name}: {said}"
+                );
+                // The message row shows it.
+                let first = panel(&screen(&app, 80, 24))[0].clone();
+                let lead: String = said.chars().take(12).collect();
+                assert!(first.starts_with(&format!(" {lead}")), "{name}: {first}");
+                refusals += 1;
             }
-            press(&mut app, KeyCode::Char('u'));
-            clean_both(&app, &words, &format!("u {name}"));
-            if app.has_card() {
-                press(&mut app, KeyCode::Char('y'));
+            Expect::Actionable => {
+                let id = id.clone().unwrap();
+                assert!(
+                    app.staged().is_some(),
+                    "{name}: d opened no card: {}",
+                    message(&app)
+                );
+                press(&mut app, KeyCode::Right);
+                clean_both(&app, &words, &format!("leaves {name}"));
+                if text(&app, 80, 24).contains("┌ What leaves with") {
+                    press(&mut app, KeyCode::Esc);
+                }
+                let before = entries(&f).len();
+                press(&mut app, KeyCode::Enter);
+                let after = entries(&f);
+                assert_eq!(after.len(), before + 1, "{name}: one new journal entry");
+                let entry = after[0].clone();
+                assert!(entry.undone_at.is_none(), "{name}");
+                assert!(entry.ops.iter().any(|op| op.item_id == id), "{name}");
+                let (g, path) = app.screen().find(&id).expect("its row");
+                let off = app.screen().row(g, &path).unwrap();
+                assert_eq!(off.state, State::Off, "{name}: the row flips to off");
+                // Worded as live rows are: never the journal's raw scope.
+                assert!(
+                    !["user", "local", "managed", "claudeai", "builtin", "dynamic"]
+                        .contains(&off.source.as_str()),
+                    "{name}: source {:?}",
+                    off.source
+                );
+                // Still resolved (a hook the switch keeps, a denied agent): the same words.
+                if model::walk(app.tree()).any(|i| i.id == id) {
+                    assert_eq!(Some(&off.source), source.as_ref(), "{name}");
+                }
+                clean_both(&app, &words, &format!("applied {name}"));
+                press(&mut app, KeyCode::Char('w'));
+                clean_both(&app, &words, &format!("w on the off row {name}"));
+                if app.has_card() {
+                    press(&mut app, KeyCode::Esc);
+                }
+                press(&mut app, KeyCode::Char('o'));
+                assert!(
+                    app.has_card(),
+                    "{name}: o opened no card: {}",
+                    message(&app)
+                );
+                clean_both(&app, &words, &format!("o {name}"));
+                if applied % 2 == 0 {
+                    press(&mut app, KeyCode::Enter);
+                    by_o += 1;
+                } else {
+                    press(&mut app, KeyCode::Esc);
+                    press(&mut app, KeyCode::Char('u'));
+                    assert!(app.has_card(), "{name}: u asked nothing");
+                    clean_both(&app, &words, &format!("u {name}"));
+                    press(&mut app, KeyCode::Char('y'));
+                    by_u += 1;
+                }
+                clean_both(&app, &words, &format!("restored {name}"));
+                let now = entries(&f);
+                let undone = now.iter().find(|e| e.id == entry.id).unwrap();
+                assert!(undone.undone_at.is_some(), "{name}: that entry is undone");
+                assert_eq!(app.rows().len(), total, "{name}: every line is back");
                 applied += 1;
             }
-            clean_both(&app, &words, &format!("restored {name}"));
-            assert_eq!(
-                app.rows().len(),
-                total,
-                "{name}: the undo brought every line back"
-            );
         }
         assert!(
             !app.should_quit(),
             "{name}: a key meant for a card reached the list"
         );
     }
-    // Every expanded line was visited once, and most had a change applied and undone.
-    assert_eq!(visited.len(), total);
-    assert!(applied > 40, "{applied} changes applied and undone");
-    assert!(journal::history(&journal(&f))
-        .unwrap()
-        .iter()
-        .all(|e| e.undone_at.is_some()));
+    let count = |k: Expect| expect.iter().filter(|e| **e == k).count();
+    let (groups, actionable, refused) = (
+        count(Expect::Group),
+        count(Expect::Actionable),
+        count(Expect::Refused),
+    );
+    eprintln!(
+        "traversal: {total} lines · {groups} groups · {actionable} actionable · {refused} \
+         refused · {applied} applied and undone ({by_o} by o, {by_u} by u) · {refusals} \
+         refusals seen"
+    );
+    assert_eq!(applied, actionable);
+    assert_eq!(refusals, refused);
+    assert_eq!(actionable + refused, total - groups);
+    assert!(by_o > 0 && by_u > 0);
+    assert!(entries(&f).iter().all(|e| e.undone_at.is_some()));
 }
 
 // ---- lifecycle --------------------------------------------------------------------------------
@@ -1150,6 +1370,29 @@ fn snapshot(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
         .collect();
     out.sort();
     out
+}
+
+#[test]
+fn readonly_is_said_in_the_header_before_any_key() {
+    let f = fixture();
+    let app = app_with(&f, true);
+    let n = app.screen().title.items;
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        let first = screen(&app, width, height)[0].clone();
+        assert!(
+            first.starts_with(&format!(
+                " project · Claude Code · read-only · {n} items load"
+            )) || first.starts_with(&format!(" project · read-only · {n} items load")),
+            "{width}: {first}"
+        );
+    }
+    let wide = screen(&app, 120, 40)[0].clone();
+    assert!(
+        wide.starts_with(" project · Claude Code") && wide.contains(" · read-only · "),
+        "{wide}"
+    );
+    // Not when writes are allowed.
+    assert!(!screen(&app_with(&f, false), 120, 40)[0].contains("read-only"));
 }
 
 #[test]
@@ -1330,6 +1573,51 @@ fn u_undoes_only_the_entry_it_confirmed() {
 }
 
 #[test]
+fn the_o_card_words_the_files_it_restores_by_their_count() {
+    // One change writing two files: the alpha server's switch in ~/.claude.json, proj-agent's in
+    // .claude/settings.local.json.
+    let f = fixture();
+    let t = tree(&f);
+    let id = |kind: Kind, suffix: &str| {
+        model::walk(&t)
+            .find(|i| i.kind == kind && i.id.ends_with(suffix))
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (server, agent) = (
+        id(Kind::McpServer, "/plugin:alpha:alpha-server"),
+        id(Kind::SubAgent, "/proj-agent"),
+    );
+    let op = |selector: &str, knob: Option<usize>| PlanOp {
+        selector: selector.to_string(),
+        scope: None,
+        knob,
+        reason: "test".to_string(),
+    };
+    let request = PlanRequest {
+        schema: PLAN_SCHEMA.to_string(),
+        target_dir: f.project.clone(),
+        ops: vec![op(&server, Some(1)), op(&agent, None)],
+    };
+    let plan = plan::build_plan_from_request(&ClaudeCode, &target(&f), &t, &request).unwrap();
+    let entry = writers::apply(&plan, &mut journal(&f)).unwrap();
+    assert_eq!(entry.snapshots.len(), 2);
+    let mut app = app_on(&f, tree(&f), false, true);
+    assert!(app.select(&agent));
+    press(&mut app, KeyCode::Char('o'));
+    let inside = card(&screen(&app, 80, 24), "Turn proj-agent back on")
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        inside.contains("~/.claude.json, .claude/settings.local.json back as they were before"),
+        "{inside}"
+    );
+}
+
+#[test]
 fn o_on_an_off_row_opens_the_back_on_card_and_enter_turns_it_on() {
     let f = fixture();
     let before = std::fs::read(local_settings(&f)).unwrap();
@@ -1346,7 +1634,7 @@ fn o_on_an_off_row_opens_the_back_on_card_and_enter_turns_it_on() {
     assert_eq!(
         inside[..3],
         [
-            " Writes   .claude/settings.local.json back as they were before harn's change",
+            " Writes   .claude/settings.local.json back as it was before harn's change",
             " Returns  alpha (next session)",
             " Undo     d turns it off again",
         ]
@@ -1441,7 +1729,7 @@ fn filter_shows_matches_with_their_group_and_esc_restores() {
         " ▾ Agent listing  10 entries",
         "   ▾ beta ",
         "       beta-reviewer ",
-        " ▾ Plugins (2)  0.3 KB in the listings above",
+        " ▾ Plugins (2)  0.3 KB would leave with them · counted in the listings above",
         "   ▾ beta ",
         "       beta-reviewer ",
     ];
@@ -1530,8 +1818,8 @@ fn tiny_frames_draw_without_panic() {
     press(&mut app, KeyCode::Char('d'));
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('u'));
-    // A confirm taller than the frame is not drawn: the message row says what it needs and
-    // `y` undoes nothing the reader cannot see.
+    // A `u` card taller than the frame is not drawn: the message row says what it needs and
+    // neither Enter nor `y` undoes what the reader cannot see.
     let short = screen(&app, 80, 8);
     assert!(
         short
@@ -1540,13 +1828,15 @@ fn tiny_frames_draw_without_panic() {
         "{}",
         short.join("\n")
     );
-    assert!(!short.join("\n").contains("y = yes"));
-    press(&mut app, KeyCode::Char('y'));
-    assert!(journal::history(&journal(&f)).unwrap()[0]
-        .undone_at
-        .is_none());
-    assert!(app.has_card(), "still asking");
-    assert!(text(&app, 80, 24).contains("y = yes · n/Esc = no"));
+    assert!(!short.join("\n").contains("Enter undo"));
+    for key in [KeyCode::Enter, KeyCode::Char('y')] {
+        press(&mut app, key);
+        assert!(journal::history(&journal(&f)).unwrap()[0]
+            .undone_at
+            .is_none());
+        assert!(app.has_card(), "still asking");
+    }
+    assert!(text(&app, 80, 24).contains("Enter undo · Esc keep"));
     press(&mut app, KeyCode::Char('y'));
     assert!(journal::history(&journal(&f)).unwrap()[0]
         .undone_at
@@ -1942,12 +2232,26 @@ fn o_says_why_when_the_journal_cannot_turn_it_back_on() {
 fn turning_off_a_hook_turns_off_every_hook_and_the_screen_says_so() {
     let f = fixture();
     let mut app = app(&f);
-    let id = model::walk(app.tree())
-        .find(|i| i.label.starts_with("PreToolUse hook"))
-        .unwrap()
-        .id
-        .clone();
+    let id_of = |app: &App, label: &str| {
+        model::walk(app.tree())
+            .find(|i| i.label.starts_with(label))
+            .unwrap()
+            .id
+            .clone()
+    };
+    let id = id_of(&app, "PreToolUse hook");
     assert!(app.select(&id));
+    let hook_rows = |app: &App, width: u16, height: u16| -> Vec<String> {
+        screen(app, width, height)
+            .into_iter()
+            // List rows (indented), not the panel's sentence.
+            .filter(|l| l.starts_with("     "))
+            .filter(|l| l.contains("PreToolUse hook") || l.contains("SessionStart hook"))
+            .map(|l| l.trim_end().to_string())
+            .collect()
+    };
+    let on = [hook_rows(&app, 80, 24), hook_rows(&app, 120, 40)];
+    assert_eq!(on[0].len(), 2, "{:?}", on[0]);
     // The card names what the switch really does before what it writes.
     press(&mut app, KeyCode::Char('d'));
     let inside = card(&screen(&app, 80, 24), "Turn off all hooks for this project");
@@ -1959,44 +2263,181 @@ fn turning_off_a_hook_turns_off_every_hook_and_the_screen_says_so() {
             " Writes   .claude/settings.local.json → disableAllHooks = true",
         ]
     );
-    card(
+    let inside = card(
         &screen(&app, 120, 40),
         "Turn off all hooks for this project",
     );
-    // Applied: the resolver drops every hook, so the group gives no count, only the fact.
+    // Every hook stays in the tree once the switch is on; what leaves comes from the switch:
+    // the other hooks on it and the status line. The injecting ones make the saving unmeasured.
+    assert!(
+        inside
+            .iter()
+            .any(|l| l.starts_with(" Leaves   2 hooks, 1 status line (next session)")),
+        "{inside:#?}"
+    );
+    // The count at start is one phrase: it starts the next line rather than split.
+    assert!(
+        inside.join("\n").contains(
+            " Saves    an amount only `harn verify --run` can measure\n          · 2 fewer items at start\n"
+        ),
+        "{inside:#?}"
+    );
+    let predicted = fewer_on_card(&inside);
+    press(&mut app, KeyCode::Right);
+    let mut list = card(&screen(&app, 120, 40), "What leaves with PreToolUse hook");
+    list.pop();
+    assert_eq!(
+        list,
+        [
+            " SessionStart (hook)",
+            " UserPromptSubmit (hook)",
+            " statusLine (status line — not a row above; it stops with the hooks)",
+        ]
+    );
+    press(&mut app, KeyCode::Esc);
+    let before = app.screen().title.items;
+    // Applied: every hook stays listed, each saying it went off with the others; the group
+    // keeps its count.
     press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        message(&app),
+        format!(
+            "turned off all hooks · 2 fewer items load at start ({before} → {}) · u undoes · \
+             takes effect next session",
+            before - 2
+        ),
+        "SessionStart and the alpha plugin's UserPromptSubmit printed into the request"
+    );
+    assert_eq!(app.screen().title.items, before - 2);
+    assert_eq!(predicted, 2, "the card said what the header shows");
     for (width, height) in [(80u16, 24u16), (120, 40)] {
         let frame = screen(&app, width, height);
         let all = frame.join("\n");
         let group = frame.iter().find(|l| l.starts_with(" ▾ Hooks")).unwrap();
         assert_eq!(
             group.trim_end(),
-            " ▾ Hooks  all off for this project · u undoes",
+            " ▾ Hooks (2)  all off for this project · u undoes",
             "{all}"
         );
-        assert!(!all.contains("Hooks ("), "{all}");
-        let row = frame
-            .iter()
-            .find(|l| l.contains("PreToolUse hook  user"))
-            .unwrap();
-        assert!(row.starts_with("     PreToolUse hook  user "), "{row}");
-        assert!(
-            row.trim_end().ends_with("—  off, with every other hook"),
-            "{width}: the whole words, never cut: {row}"
-        );
+        let rows = hook_rows(&app, width, height);
+        assert_eq!(rows.len(), 2, "{all}");
+        for row in &rows {
+            // The same source words as when it was on, and the whole status, never cut.
+            assert!(row.contains("  ~/.claude "), "{row}");
+            assert!(
+                row.ends_with("—  off, with every other hook"),
+                "{width}: {row}"
+            );
+        }
     }
+    // The message row keeps whole clauses; the detail follows it.
     let detail = panel(&screen(&app, 80, 24));
     assert_eq!(
-        format!("{} {}", detail[0], detail[1].trim_start()),
+        detail[0],
+        format!(
+            " turned off all hooks · 2 fewer items load at start ({before} → {}) · u undoes",
+            before - 2
+        )
+    );
+    assert_eq!(
+        format!("{} {}", detail[1], detail[2].trim_start()),
         " PreToolUse hook · turned off with every other hook · u undoes · takes effect next session"
     );
-    // Undone: every hook is back, and the count with them.
+    // `o` on the other hook reverses the same change.
+    let other = id_of(&app, "SessionStart hook");
+    assert!(app.select(&other));
+    press(&mut app, KeyCode::Char('o'));
+    card(&screen(&app, 80, 24), "Turn all hooks back on");
+    press(&mut app, KeyCode::Esc);
+    // Undone: every hook is back with the words it had.
     press(&mut app, KeyCode::Char('u'));
-    press(&mut app, KeyCode::Char('y'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        message(&app),
+        "undone: all hooks back on · .claude/settings.local.json restored byte for byte"
+    );
     let frame = screen(&app, 80, 24);
     let group = frame.iter().find(|l| l.starts_with(" ▾ Hooks")).unwrap();
     assert!(group.starts_with(" ▾ Hooks (2) "), "{}", frame.join("\n"));
-    assert!(frame.iter().any(|l| l.contains("SessionStart hook")));
+    assert_eq!([hook_rows(&app, 80, 24), hook_rows(&app, 120, 40)], on);
+}
+
+#[test]
+fn hooks_your_own_settings_turned_off_are_listed_and_not_offered_to_o() {
+    let f = fixture();
+    let file = f.project.join(".claude/settings.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    json["disableAllHooks"] = serde_json::json!(true);
+    std::fs::write(&file, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let mut app = app(&f);
+    let id = model::walk(app.tree())
+        .find(|i| i.label.starts_with("SessionStart hook"))
+        .unwrap()
+        .id
+        .clone();
+    assert!(app.select(&id));
+    let frame = screen(&app, 80, 24);
+    let all = frame.join("\n");
+    let group = frame.iter().find(|l| l.starts_with(" ▾ Hooks")).unwrap();
+    assert_eq!(group.trim_end(), " ▾ Hooks (2)  all off here", "{all}");
+    let rows: Vec<&String> = frame
+        .iter()
+        .filter(|l| l.starts_with("     ") && l.contains(" hook "))
+        .collect();
+    assert_eq!(rows.len(), 2, "{all}");
+    assert!(rows
+        .iter()
+        .all(|r| r.trim_end().ends_with("—  off, with every other hook")));
+    // harn did not make the change: no `o` in the key bar, and the keys say why.
+    assert!(!frame[23].contains("turn back on"), "{}", frame[23]);
+    assert_eq!(
+        panel(&frame)[0],
+        " SessionStart hook · off with every other hook"
+    );
+    press(&mut app, KeyCode::Char('o'));
+    assert!(!app.has_card());
+    assert!(message(&app).contains("did not turn"), "{}", message(&app));
+    press(&mut app, KeyCode::Char('d'));
+    assert!(!app.has_card());
+    assert_eq!(
+        message(&app),
+        "SessionStart hook is already off: your settings turn every hook off (disableAllHooks)"
+    );
+}
+
+#[test]
+fn a_server_turned_off_that_stays_listed_says_off_and_why() {
+    let f = fixture();
+    let mut app = app(&f);
+    let id = model::walk(app.tree())
+        .find(|i| i.kind == model::Kind::McpServer && i.id.ends_with("/project-server"))
+        .unwrap()
+        .id
+        .clone();
+    assert!(app.select(&id));
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Enter);
+    // The resolver keeps a disabled server (mode none): its row stays, greyed, saying `off`.
+    let item = model::walk(app.tree()).find(|i| i.id == id).unwrap();
+    assert_eq!(item.mode, model::Mode::None);
+    let (g, path) = app.screen().find(&id).unwrap();
+    let row = app.screen().row(g, &path).unwrap();
+    assert_eq!(row.state, State::Off);
+    assert_eq!(row.absent, Some("off"));
+    let frame = screen(&app, 80, 24);
+    let line = frame
+        .iter()
+        .find(|l| l.starts_with("     project-server"))
+        .unwrap();
+    assert!(line.trim_end().ends_with("—  off"), "{line}");
+    assert!(
+        panel(&frame)
+            .join(" ")
+            .contains("it stays listed, and none of it loads."),
+        "{}",
+        frame.join("\n")
+    );
 }
 
 /// Rows from a box's top border to its bottom border, with whatever is drawn beside the box on
@@ -2047,15 +2488,16 @@ fn a_card_blanks_the_full_width_of_the_rows_it_takes() {
 }
 
 #[test]
-fn the_undo_confirm_blanks_its_rows_across_the_frame() {
+fn the_undo_card_blanks_its_rows_across_the_frame() {
     let f = fixture();
     let mut app = app(&f);
+    open_all(&mut app);
     assert!(app.select(ALPHA));
     press(&mut app, KeyCode::Char('d'));
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('u'));
-    // 76 columns in 80: the list's markers must not show at its edges.
-    let frame = screen(&app, 80, 24);
+    // An 80-column card in 120: the list's markers must not show beside it.
+    let frame = screen(&app, 120, 40);
     let rows = beside_box(&frame);
     assert!(rows.len() >= 5, "{}", frame.join("\n"));
     for (before, after) in rows {
@@ -2066,4 +2508,252 @@ fn the_undo_confirm_blanks_its_rows_across_the_frame() {
         );
         assert!(!before.contains(['▸', '▾']) && !after.contains(['▸', '▾']));
     }
+}
+
+#[test]
+fn an_inline_command_is_never_split_and_a_small_share_is_never_zero() {
+    let f = fixture();
+    let mut app = app(&f);
+    open_all(&mut app);
+    let total = app.rows().len();
+    press(&mut app, KeyCode::Char('g'));
+    let (mut commands, mut small) = (0, 0);
+    for _ in 0..total {
+        for (width, height) in [(80u16, 24u16), (120, 40)] {
+            let frame = screen(&app, width, height);
+            for row in panel(&frame) {
+                // A backtick span opens and closes on the same row.
+                assert_eq!(row.matches('`').count() % 2, 0, "{width}: {row}");
+                commands += row.matches("`harn verify --run`").count();
+            }
+            for row in list_rows(&frame.join("\n")) {
+                let row = row.trim_end();
+                // A size above zero never reads as 0% of the total.
+                if row.ends_with(" 0%") {
+                    assert!(
+                        row.contains(" 0 B ") || !row.contains(" KB "),
+                        "{width}: {row}"
+                    );
+                }
+                small += usize::from(row.ends_with("<1%"));
+            }
+        }
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert!(commands > 0, "some panel names `harn verify --run`");
+    assert!(small > 0, "some row is under a percent");
+}
+
+/// The left column and the width of the box whose top border holds `title`.
+fn box_at(frame: &[String], title: &str) -> (usize, usize) {
+    let top = frame
+        .iter()
+        .find(|l| l.contains(&format!("┌ {title} ")))
+        .unwrap_or_else(|| panic!("no box {title}:\n{}", frame.join("\n")));
+    let left = top.find('┌').unwrap();
+    let right = top.rfind('┐').unwrap();
+    (
+        top[..left].chars().count(),
+        top[left..right].chars().count() + 1,
+    )
+}
+
+#[test]
+fn the_undo_card_is_drawn_and_keyed_like_every_other_card() {
+    let f = fixture();
+    let mut app = app(&f);
+    assert!(app.select(ALPHA));
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        press(&mut app, KeyCode::Char('d'));
+        let off = box_at(
+            &screen(&app, width, height),
+            "Turn off alpha for this project",
+        );
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('u'));
+        let frame = screen(&app, width, height);
+        // Same column and width as the `d` card, the body indented as on it, the answer on
+        // the bottom right, the key bar in words.
+        assert_eq!(box_at(&frame, "Undo the last change"), off, "{width}");
+        let inside = card(&frame, "Undo the last change");
+        assert_eq!(inside[0], " alpha comes back on");
+        assert_eq!(inside.last().unwrap().trim(), "Enter undo · Esc keep");
+        assert!(inside.last().unwrap().starts_with("   "));
+        assert_eq!(
+            frame[usize::from(height) - 1].trim_end(),
+            " Enter undo it   Esc keep it"
+        );
+        // Other keys do nothing; `n` keeps, as Esc does; `y` undoes, as Enter does.
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.has_card());
+        press(&mut app, KeyCode::Char('n'));
+        assert!(!app.has_card());
+        assert_eq!(message(&app), "cancelled: nothing written");
+        press(&mut app, KeyCode::Char('u'));
+        press(&mut app, KeyCode::Char('y'));
+        assert!(journal::history(&journal(&f)).unwrap()[0]
+            .undone_at
+            .is_some());
+        assert!(app.select(ALPHA));
+    }
+}
+
+/// The `N` of `· N fewer item(s) at start` on a card's Saves line (wrapped lines joined).
+fn fewer_on_card(lines: &[String]) -> usize {
+    let text = lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+    let at = text
+        .find(" fewer item")
+        .unwrap_or_else(|| panic!("no count on the card: {text}"));
+    text[..at]
+        .rsplit(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no number before `fewer`: {text}"))
+}
+
+/// A card's body lines (its answer line left out).
+fn card_body(frame: &[String], title: &str) -> Vec<String> {
+    let mut lines = card(frame, title);
+    lines.pop();
+    lines
+}
+
+#[test]
+fn informational_cards_scroll_when_their_body_is_taller_than_the_frame() {
+    let f = fixture();
+    let words = forbidden(&f);
+    let mut app = app(&f);
+    // The notes at 80 columns, the keys at 60 (one key per line there): taller than a 10-row
+    // frame's card.
+    for (key, title, width) in [('i', "Notes", 80u16), ('?', "Keys", 60)] {
+        press(&mut app, KeyCode::Char(key));
+        let tall = screen(&app, width, 40);
+        let whole = card_body(&tall, title);
+        assert!(
+            !tall[39].contains("scroll"),
+            "{title}: it all fits, nothing to scroll: {}",
+            tall[39]
+        );
+        assert!(tall[39].contains("Esc close"));
+        let last = whole.last().unwrap().clone();
+        let small = screen(&app, width, 10);
+        let shown = card_body(&small, title);
+        assert!(shown.len() < whole.len(), "{title}: {shown:#?}");
+        assert_eq!(shown[..], whole[..shown.len()], "{title}: the top first");
+        assert!(!shown.contains(&last), "{title}: the last line is below");
+        assert!(small[9].contains("scroll"), "{title}: {}", small[9]);
+        assert_clean(&small.join("\n"), &words, title);
+        // ↓ reveals the last line; past the end it stays put; ↑ goes back.
+        let hidden = whole.len() - shown.len();
+        for _ in 0..hidden {
+            press(&mut app, KeyCode::Down);
+        }
+        let end = card_body(&screen(&app, width, 10), title);
+        assert_eq!(end[..], whole[hidden..], "{title}");
+        assert!(end.contains(&last));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(card_body(&screen(&app, width, 10), title), end, "clamped");
+        for _ in 0..hidden {
+            press(&mut app, KeyCode::Up);
+        }
+        let back = screen(&app, width, 10);
+        assert_eq!(card_body(&back, title), shown, "{title}: back at the top");
+        assert_clean(&back.join("\n"), &words, title);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.has_card());
+    }
+    // The keys at 80×10 fit in three columns: no scroll offered.
+    press(&mut app, KeyCode::Char('?'));
+    let frame = screen(&app, 80, 10);
+    assert_eq!(card_body(&frame, "Keys").len(), 5, "{}", frame.join("\n"));
+    assert_eq!(frame[9].trim_end(), " Esc close");
+}
+
+#[test]
+fn o_reverses_only_the_entry_its_card_showed() {
+    let f = fixture();
+    let t = target(&f);
+    // Two live entries turn alpha off: A, then B (planned from the tree before A).
+    let before_a = tree(&f);
+    let plan_a = plan::build_plan(&ClaudeCode, &t, &before_a, ALPHA, None).unwrap();
+    let a = writers::apply(&plan_a, &mut journal(&f)).unwrap().id;
+    let plan_b = plan::build_plan(&ClaudeCode, &t, &before_a, ALPHA, None).unwrap();
+    let b = writers::apply(&plan_b, &mut journal(&f)).unwrap().id;
+    let mut app = app(&f);
+    assert!(app.select(ALPHA), "the off row");
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.has_card(), "{}", message(&app));
+    // The card shows B; B is undone elsewhere before Enter.
+    journal::undo_entry(&mut journal(&f), &b).unwrap();
+    let now = files(&f);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        files(&f),
+        now,
+        "Enter reversed a change the card did not show"
+    );
+    let m = app.message().unwrap().clone();
+    assert_eq!(m.text(), "that change was already undone; r refreshes");
+    assert_eq!(m.tone, Tone::Error);
+    let live: Vec<String> = journal::history(&journal(&f))
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.undone_at.is_none())
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(live, [a], "A untouched");
+}
+
+#[test]
+fn o_refuses_an_entry_with_no_file_to_restore() {
+    let f = fixture();
+    let mut app = app(&f);
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Enter);
+    let id = journal::history(&journal(&f)).unwrap()[0].id.clone();
+    // The entry on disk lists no snapshot.
+    let dir = f.root.join("state/journal");
+    let entry = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path().join("entry.json"))
+        .find(|p| std::fs::read_to_string(p).unwrap().contains(&id))
+        .unwrap();
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&entry).unwrap()).unwrap();
+    json["snapshots"] = serde_json::json!([]);
+    std::fs::write(&entry, serde_json::to_vec(&json).unwrap()).unwrap();
+    let before = files(&f);
+    press(&mut app, KeyCode::Char('o'));
+    assert!(!app.has_card(), "no card for nothing to restore");
+    assert_eq!(
+        message(&app),
+        format!("journal entry {id} has no file to restore")
+    );
+    assert_eq!(files(&f), before);
+}
+
+#[test]
+fn library_text_shows_its_paths_home_and_project_relative() {
+    let f = fixture();
+    let words = forbidden(&f);
+    let mut app = app(&f);
+    app.report_error(format!(
+        "error: cannot open {}/.claude/CLAUDE.md: permission denied",
+        f.home.display()
+    ));
+    assert_eq!(
+        message(&app),
+        "error: cannot open ~/.claude/CLAUDE.md: permission denied"
+    );
+    clean_both(&app, &words, "a library error naming a home path");
+    app.report_error(format!(
+        "error: {}/.claude/settings.local.json is not valid JSON",
+        f.project.display()
+    ));
+    assert_eq!(
+        message(&app),
+        "error: .claude/settings.local.json is not valid JSON"
+    );
+    clean_both(&app, &words, "a library error naming a project path");
 }

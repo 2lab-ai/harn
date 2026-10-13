@@ -769,6 +769,7 @@ fn plan_for(item: &Item, knob: Knob, known: u64, warnings: Vec<String>) -> Actio
         }],
         predicted_before: 229_705,
         predicted_after: 229_705 - known,
+        items_after: 0,
         freed: Freed {
             known,
             delta_unknown: true,

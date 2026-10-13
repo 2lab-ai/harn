@@ -105,6 +105,8 @@ pub(crate) enum Card {
     On {
         item_id: String,
         name: String,
+        /// The journal entry the card shows; Enter reverses exactly this one.
+        entry_id: String,
         files: Vec<String>,
     },
     /// `w`.
@@ -121,7 +123,7 @@ pub(crate) enum Mode {
     /// Typing after `/`.
     Filter,
     Card(Box<Card>),
-    /// `u`: y/N over the list.
+    /// `u`: the card that undoes the newest live change.
     Undo {
         entry: Box<JournalEntry>,
     },
@@ -143,7 +145,7 @@ pub struct App {
     pub(crate) card_max: Cell<usize>,
     /// Lines the list showed last frame (page keys).
     pub(crate) list_height: Cell<usize>,
-    /// The last frame could not draw the open card or confirm (`view::CARD_MIN`): its keys do
+    /// The last frame could not draw the open card (`view::CARD_MIN`): its keys do
     /// nothing but close it.
     pub(crate) blocked: Cell<bool>,
     pub(crate) message: Option<Message>,
@@ -200,7 +202,7 @@ impl App {
         let err = app.read_journal();
         app.rebuild_screens();
         if let Some(err) = err {
-            app.error(err);
+            app.report_error(err);
         }
         app
     }
@@ -214,9 +216,11 @@ impl App {
         self.pending.take()
     }
 
-    /// Puts `text` over the detail panel as an error (the terminal owner's failures), as it is.
+    /// Puts `text` over the detail panel as an error (the terminal owner's failures), its
+    /// paths home- or project-relative.
     pub fn report_error(&mut self, text: String) {
-        self.error(text);
+        let text = self.said(text);
+        self.say(Tone::Error, vec![text]);
     }
 
     pub fn message(&self) -> Option<&Message> {
@@ -277,7 +281,7 @@ impl App {
         self.tab().cursor
     }
 
-    /// A card or the `u` confirm is open over the list (keys go to it).
+    /// A card (the `u` one too) is open over the list (keys go to it).
     pub fn has_card(&self) -> bool {
         matches!(self.mode, Mode::Card(_) | Mode::Undo { .. })
     }
@@ -362,7 +366,7 @@ impl App {
             KeyCode::Char('u') => self.ask_undo(),
             KeyCode::Char('e') => self.ask_edit(),
             KeyCode::Char('r') => match self.refresh() {
-                Some(err) => self.error(err),
+                Some(err) => self.report_error(err),
                 None => self.info("refreshed: every setting and file read again".to_string()),
             },
             KeyCode::Char('t') => self.info(TRIM_HINT.to_string()),
@@ -483,11 +487,17 @@ impl App {
                 }
                 _ => {}
             },
-            Card::On { item_id, name, .. } => match key.code {
+            Card::On {
+                item_id,
+                name,
+                entry_id,
+                ..
+            } => match key.code {
                 KeyCode::Enter => {
-                    let (item_id, name) = (item_id.clone(), name.clone());
+                    let (item_id, name, entry_id) =
+                        (item_id.clone(), name.clone(), entry_id.clone());
                     self.mode = Mode::Normal;
-                    self.turn_on(&item_id, &name);
+                    self.turn_on(&item_id, &name, &entry_id);
                 }
                 _ if close || key.code == KeyCode::Char('n') => {
                     self.mode = Mode::Normal;
@@ -513,15 +523,25 @@ impl App {
         }
     }
 
+    /// The `u` card: Enter (or `y`) undoes, Esc (or `n`, `q`) keeps; other keys do nothing, as
+    /// on every card.
     fn undo_key(&mut self, key: KeyEvent) {
-        if self.blocked.get() && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-            // Not drawn: `y` would undo what the reader cannot see.
+        let undo = matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y')
+        );
+        let keep = matches!(
+            key.code,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') | KeyCode::Char('N')
+        );
+        // Not drawn: Enter or `y` would undo what the reader cannot see.
+        if (self.blocked.get() && undo) || !(undo || keep) {
             return;
         }
         let Mode::Undo { entry } = std::mem::replace(&mut self.mode, Mode::Normal) else {
             return;
         };
-        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        if undo {
             self.undo(&entry);
         } else {
             self.info("cancelled: nothing written".to_string());
@@ -545,6 +565,16 @@ impl App {
 
     fn error(&mut self, text: impl Into<String>) {
         self.say(Tone::Error, vec![t(text)]);
+    }
+
+    /// Text a library worded (an error, a warning) as a part, its paths home- or
+    /// project-relative. Only paths are shortened; nothing else in it is touched.
+    fn said(&self, text: impl Into<String>) -> Part {
+        let text = text.into();
+        match self.tabs.get(self.active) {
+            Some(tab) => Part::Text(Places::of(&tab.tree).text(&text)),
+            None => Part::Text(text),
+        }
     }
 
     /// Item `id` as a message part: the name of its row, else the name its id gives.
@@ -588,9 +618,13 @@ impl App {
                 let rest = about.and_then(|id| reason.strip_prefix(id)?.strip_prefix(": "));
                 return match (about, rest) {
                     (Some(id), Some(rest)) => {
-                        vec![t("refused: "), self.item(id), t(format!(": {rest}"))]
+                        vec![
+                            t("refused: "),
+                            self.item(id),
+                            self.said(format!(": {rest}")),
+                        ]
                     }
-                    _ => vec![t(format!("refused: {reason}"))],
+                    _ => vec![self.said(format!("refused: {reason}"))],
                 };
             }
             if let Some(stale) = cause.downcast_ref::<data::Stale>() {
@@ -602,7 +636,7 @@ impl App {
                 return parts;
             }
         }
-        vec![t(format!("error: {err:#}"))]
+        vec![self.said(format!("error: {err:#}"))]
     }
 
     /// False (and the message says why) under `--readonly`.
@@ -830,7 +864,15 @@ impl App {
                 .as_deref()
                 .map(|id| vec![self.item(id)])
                 .unwrap_or_default();
-            parts.push(t(" is already off here; o turns it back on"));
+            let by_harn = row
+                .id
+                .as_ref()
+                .is_some_and(|id| self.tab().journaled.contains_key(id));
+            parts.push(t(if by_harn {
+                " is already off here; o turns it back on"
+            } else {
+                " is already off: your settings turn every hook off (disableAllHooks)"
+            }));
             self.say(Tone::Info, parts);
             return;
         }
@@ -899,34 +941,43 @@ impl App {
         let Card::Off { staged, .. } = *card else {
             return;
         };
-        // Named as the row was when the card opened.
-        let item = Part::Item {
-            id: staged.item_id.clone(),
-            name: staged.name.clone(),
+        // Named as the row was when the card opened; the hooks switch by what it does.
+        let item = if staged.plan.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+            t("all hooks")
+        } else {
+            Part::Item {
+                id: staged.item_id.clone(),
+                name: staged.name.clone(),
+            }
         };
+        let before = self.tabs[staged.tab].screen.title.items;
         match writers::apply(&staged.plan, &mut self.journal) {
             Ok(_) => {
                 let refresh = self.refresh();
                 self.select(&staged.item_id);
-                let off = self.cursor_row().is_some_and(|r| r.state == State::Off);
                 match refresh {
                     Some(err) => self.say(
                         Tone::Error,
                         vec![
                             t("turned off "),
                             item,
-                            t(format!(" · refresh failed: {err}")),
+                            self.said(format!(" · refresh failed: {err}")),
                         ],
                     ),
-                    None if !off => self.say(
-                        Tone::Info,
-                        vec![
-                            t("turned off "),
-                            item,
-                            t(" · u undoes · takes effect next session"),
-                        ],
-                    ),
-                    None => {}
+                    None => {
+                        let after = self.tabs[staged.tab].screen.title.items;
+                        self.say(
+                            Tone::Info,
+                            vec![
+                                t("turned off "),
+                                item,
+                                t(format!(
+                                    " · {} · u undoes · takes effect next session",
+                                    start_count(before, after)
+                                )),
+                            ],
+                        )
+                    }
                 }
             }
             Err(err) => {
@@ -958,7 +1009,8 @@ impl App {
         let entries = match journal::history(&self.journal) {
             Ok(entries) => entries,
             Err(err) => {
-                self.error(format!("cannot read the journal: {err:#}"));
+                let text = self.said(format!("cannot read the journal: {err:#}"));
+                self.say(Tone::Error, vec![text]);
                 return;
             }
         };
@@ -966,6 +1018,15 @@ impl App {
             let parts = vec![t("no journal entry turns "), self.item(&id), t(" back on")];
             self.say(Tone::Error, parts);
             return;
+        };
+        if entry.snapshots.is_empty() {
+            self.error(format!("journal entry {} has no file to restore", entry.id));
+            return;
+        }
+        let name = if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+            "all hooks".to_string()
+        } else {
+            row.name
         };
         let places = Places::of(&self.tab().tree);
         let files = entry
@@ -975,21 +1036,43 @@ impl App {
             .collect();
         self.open(Card::On {
             item_id: id,
-            name: row.name,
+            name,
+            entry_id,
             files,
         });
     }
 
-    fn turn_on(&mut self, item_id: &str, name: &str) {
+    /// Enter on the `o` card: reverses `entry_id`, the entry the card showed, and only while it
+    /// is still live (another harn, or `u`, may have undone it since).
+    fn turn_on(&mut self, item_id: &str, name: &str, entry_id: &str) {
         let item = Part::Item {
             id: item_id.to_string(),
             name: name.to_string(),
         };
-        match journal::on(&mut self.journal, &self.target, item_id) {
-            Ok(_) => {
-                let mut parts = vec![item, t(" is back on · takes effect next session")];
+        let live = match journal::history(&self.journal) {
+            Ok(entries) => entries
+                .iter()
+                .any(|e| e.id == entry_id && e.undone_at.is_none()),
+            Err(err) => {
+                let text = self.said(format!("cannot read the journal: {err:#}"));
+                self.say(Tone::Error, vec![text]);
+                return;
+            }
+        };
+        if !live {
+            self.error("that change was already undone; r refreshes");
+            return;
+        }
+        match journal::undo_entry(&mut self.journal, entry_id) {
+            Ok(entry) => {
+                let back = if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+                    vec![t("all hooks are back on · takes effect next session")]
+                } else {
+                    vec![item, t(" is back on · takes effect next session")]
+                };
+                let mut parts = back;
                 if let Some(err) = self.refresh() {
-                    parts.push(t(format!(" · refresh failed: {err}")));
+                    parts.push(self.said(format!(" · refresh failed: {err}")));
                 }
                 self.select(item_id);
                 self.say(Tone::Info, parts);
@@ -1008,6 +1091,7 @@ impl App {
         match self.last_live.clone() {
             Some(entry) => {
                 self.blocked.set(false);
+                self.card_scroll = 0;
                 self.mode = Mode::Undo {
                     entry: Box::new(entry),
                 }
@@ -1030,16 +1114,21 @@ impl App {
             .collect()
     }
 
-    /// The `u` confirm's lines for `entry`.
+    /// The `u` card's lines for `entry`: what comes back, the files restored, where it was made
+    /// when not here.
     pub(crate) fn undo_lines(&self, entry: &JournalEntry) -> Vec<String> {
         let places = Places::of(&self.tab().tree);
-        let mut lines = vec!["Undo the last change?".to_string()];
-        for name in self.op_names(entry) {
-            lines.push(if entry.context.capture_kind == KIND_APPLY {
-                format!("  {name} comes back on")
-            } else {
-                format!("  the edit of {name} is reversed")
-            });
+        let mut lines = Vec::new();
+        if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+            lines.push("all hooks come back on".to_string());
+        } else {
+            for name in self.op_names(entry) {
+                lines.push(if entry.context.capture_kind == KIND_APPLY {
+                    format!("{name} comes back on")
+                } else {
+                    format!("the edit of {name} is reversed")
+                });
+            }
         }
         let files: Vec<String> = entry
             .snapshots
@@ -1047,11 +1136,11 @@ impl App {
             .map(|s| places.path(&s.path))
             .collect();
         if !files.is_empty() {
-            lines.push(format!("  restores {} byte for byte", files.join(", ")));
+            lines.push(format!("restores {} byte for byte", files.join(", ")));
         }
         if entry.context.cwd != self.target.dir {
             lines.push(format!(
-                "  made in {} (not this directory)",
+                "made in {} (not this directory)",
                 places.path(&entry.context.cwd)
             ));
         }
@@ -1071,30 +1160,36 @@ impl App {
         };
         if newest.as_ref().map(|e| e.id.as_str()) != Some(expected.id.as_str()) {
             let refresh = self.refresh();
-            let mut text =
-                "the journal changed since you confirmed; press u again to see the newest change"
-                    .to_string();
+            let mut parts = vec![t(
+                "the journal changed since you confirmed; press u again to see the newest change",
+            )];
             if let Some(err) = refresh {
-                text.push_str(&format!(" · refresh failed: {err}"));
+                parts.push(self.said(format!(" · refresh failed: {err}")));
             }
-            self.error(text);
+            self.say(Tone::Error, parts);
             return;
         }
-        // Named as their rows are now, before the refresh brings them back.
+        // Named as their rows are now, before the refresh brings them back; the hooks switch
+        // brings every hook back, not only the one `d` was pressed on.
         let mut parts = vec![t("undone: ")];
-        for (i, op) in expected.ops.iter().enumerate() {
-            if i > 0 {
-                parts.push(t(", "));
+        if expected.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+            parts.push(t("all hooks back on"));
+        } else {
+            for (i, op) in expected.ops.iter().enumerate() {
+                if i > 0 {
+                    parts.push(t(", "));
+                }
+                parts.push(self.item(&op.item_id));
             }
-            parts.push(self.item(&op.item_id));
+            parts.push(t(" back"));
         }
         match journal::undo_entry(&mut self.journal, &expected.id) {
             Ok(entry) => {
-                parts.push(t(" back · "));
+                parts.push(t(" · "));
                 parts.extend(self.paths(entry.snapshots.iter().map(|s| s.path.as_path())));
                 parts.push(t(" restored byte for byte"));
                 if let Some(err) = self.refresh() {
-                    parts.push(t(format!(" · refresh failed: {err}")));
+                    parts.push(self.said(format!(" · refresh failed: {err}")));
                 }
                 self.say(Tone::Info, parts);
             }
@@ -1153,14 +1248,15 @@ impl App {
                 // The journal's own words (an editor's exit status, a file that no longer
                 // parses), as it wrote them.
                 for warning in &entry.warnings {
-                    parts.push(t(format!(" · {warning}")));
+                    parts.push(self.said(format!(" · {warning}")));
                 }
                 if let Some(err) = refresh {
-                    parts.push(t(format!(" · refresh failed: {err}")));
+                    parts.push(self.said(format!(" · refresh failed: {err}")));
                 }
                 self.say(Tone::Info, parts);
             }
-            // journal::edit has no error type for "unchanged"; its message is the only signal.
+            // journal::edit has no typed "unchanged" outcome (journal.rs is outside this unit),
+            // so its message is the only signal.
             Err(err) if format!("{err}").contains("nothing journaled") => {
                 self.say(Tone::Info, vec![named, t(": unchanged, nothing journaled")])
             }
@@ -1217,6 +1313,17 @@ impl App {
                     continue;
                 }
                 for op in &entry.ops {
+                    // The hooks switch turns every hook off (and the status line): each one is
+                    // this entry's to reverse, whichever hook `d` was pressed on.
+                    if is_all_hooks(&op.knob) {
+                        for item in data::walk(&tab.tree).filter(|i| {
+                            i.signal.as_deref() == Some(crate::resolve::claude::OFF_ALL_HOOKS)
+                        }) {
+                            tab.journaled
+                                .entry(item.id.clone())
+                                .or_insert_with(|| entry.id.clone());
+                        }
+                    }
                     if tab.journaled.contains_key(&op.item_id) {
                         continue;
                     }
@@ -1235,6 +1342,22 @@ impl App {
             }
         }
         None
+    }
+}
+
+/// The switch that turns every hook off at once.
+fn is_all_hooks(knob: &data::Knob) -> bool {
+    matches!(knob, data::Knob::Setting { pointer, .. } if pointer == model::ALL_HOOKS)
+}
+
+/// `6 fewer items load at start (83 → 77)`: how the header's count moved.
+fn start_count(before: usize, after: usize) -> String {
+    let n = before.abs_diff(after);
+    let items = if n == 1 { "item loads" } else { "items load" };
+    match after.cmp(&before) {
+        std::cmp::Ordering::Less => format!("{n} fewer {items} at start ({before} → {after})"),
+        std::cmp::Ordering::Greater => format!("{n} more {items} at start ({before} → {after})"),
+        std::cmp::Ordering::Equal => format!("still {before} items load at start"),
     }
 }
 

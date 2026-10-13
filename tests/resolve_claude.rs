@@ -6,6 +6,7 @@ mod common;
 use common::{fixture, slug, target, Fixture};
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
 use harn::plan;
+use harn::resolve::claude::OFF_ALL_HOOKS;
 use harn::resolve::{ClaudeCode, Resolver};
 use std::path::{Path, PathBuf};
 
@@ -347,6 +348,160 @@ fn disabled_mcp_server_is_present_with_mode_none() {
     };
     assert_eq!(file, &f.home.join(".claude.json"));
     assert!(pointer.ends_with("/disabledMcpServers/-"), "{pointer}");
+}
+
+#[test]
+fn every_hook_and_the_status_line_stay_with_mode_none_once_all_hooks_are_off() {
+    let f = fixture();
+    let before = resolve(&f, None);
+    let hooks = |t: &Tree| -> Vec<String> {
+        let mut ids: Vec<String> = of_kind(t, Kind::Hook)
+            .into_iter()
+            .map(|i| i.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let overlay = Overlay {
+        ops: vec![OverlayOp::SetJson {
+            file: local_settings(&f),
+            pointer: "/disableAllHooks".to_string(),
+            value: serde_json::json!(true),
+        }],
+    };
+    let after = resolve(&f, Some(&overlay));
+    // The same hooks (settings and plugin ones), each off and saying why; none is in the request.
+    assert_eq!(hooks(&after), hooks(&before));
+    assert_eq!(hooks(&after).len(), 3, "2 in settings + the alpha plugin's");
+    for hook in of_kind(&after, Kind::Hook) {
+        assert_eq!(hook.mode, Mode::None, "{}", hook.id);
+        assert!(hook.cost.not_applicable, "{}", hook.id);
+        assert_eq!(hook.signal.as_deref(), Some(OFF_ALL_HOOKS), "{}", hook.id);
+        assert!(
+            hook.knobs.iter().any(
+                |k| matches!(k, Knob::Setting { pointer, .. } if pointer == "/disableAllHooks")
+            ),
+            "{}: the switch that turned it off stays its knob",
+            hook.id
+        );
+    }
+    let status = of_kind(&after, Kind::StatusLine);
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].mode, Mode::None);
+    assert_eq!(status[0].signal.as_deref(), Some(OFF_ALL_HOOKS));
+    assert_eq!(of_kind(&before, Kind::StatusLine)[0].signal, None);
+    // Nothing that was `?` before is still counted as unknown.
+    assert_eq!(
+        before.unknown_rows - after.unknown_rows,
+        2,
+        "SessionStart and the plugin's UserPromptSubmit"
+    );
+    assert_eq!(before.predicted_known, after.predicted_known);
+}
+
+/// The side effects naming `label` (one line per item that leaves).
+fn effects_naming<'p>(plan: &'p plan::ActionPlan, label: &str) -> Vec<&'p String> {
+    plan.side_effects
+        .iter()
+        .filter(|e| e.starts_with(label))
+        .collect()
+}
+
+#[test]
+fn turning_one_hook_off_plans_every_hook_and_the_status_line_as_leaving() {
+    let f = fixture();
+    let t = target(&f);
+    let mut tree = resolve(&f, None);
+    let hook = of_kind(&tree, Kind::Hook)
+        .into_iter()
+        .find(|h| h.label.starts_with("PreToolUse hook"))
+        .unwrap()
+        .id
+        .clone();
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &hook, None).unwrap();
+    // They stay in the after tree (mode none, `off:` signal): they leave all the same.
+    let mut effects = plan.side_effects.clone();
+    effects.sort();
+    assert_eq!(effects.len(), 3, "{effects:#?}");
+    for (label, kind) in [
+        ("SessionStart hook", "(hook) leaves"),
+        ("UserPromptSubmit hook", "(hook) leaves"),
+        ("statusLine", "(status-line) leaves"),
+    ] {
+        let named = effects_naming(&plan, label);
+        assert_eq!(named.len(), 1, "{label}: {effects:#?}");
+        assert!(named[0].ends_with(kind), "{}", named[0]);
+    }
+    // Two of them printed into the request, unmeasured: what it frees is unknown.
+    assert_eq!(plan.freed.known, 0);
+    assert!(plan.freed.delta_unknown);
+    // The per-row annotation sees the same.
+    plan::annotate_freed(&ClaudeCode, &t, &mut tree).unwrap();
+    let freed = model::walk(&tree)
+        .find(|i| i.id == hook)
+        .and_then(|i| i.freed.clone())
+        .unwrap();
+    assert!(freed.delta_unknown, "{freed:?}");
+}
+
+#[test]
+fn a_plugin_hook_leaving_by_both_rules_is_one_side_effect() {
+    // One plan turning the alpha plugin off (its hook leaves the tree) and every hook off (the
+    // others stay with mode none).
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+    let hook = of_kind(&tree, Kind::Hook)
+        .into_iter()
+        .find(|h| h.label.starts_with("PreToolUse hook"))
+        .unwrap()
+        .id
+        .clone();
+    let op = |selector: &str| plan::PlanOp {
+        selector: selector.to_string(),
+        scope: None,
+        knob: None,
+        reason: "test".to_string(),
+    };
+    let req = plan::PlanRequest {
+        schema: plan::PLAN_SCHEMA.to_string(),
+        target_dir: f.project.clone(),
+        ops: vec![op("alpha@market-one"), op(&hook)],
+    };
+    let plan = plan::build_plan_from_request(&ClaudeCode, &t, &tree, &req).unwrap();
+    for label in ["UserPromptSubmit hook", "SessionStart hook", "statusLine"] {
+        assert_eq!(
+            effects_naming(&plan, label).len(),
+            1,
+            "{label}: {:#?}",
+            plan.side_effects
+        );
+    }
+
+    // Every hook already off (mode none): the plugin's hook still leaves with the plugin, once.
+    std::fs::write(
+        local_settings(&f),
+        serde_json::to_string_pretty(&{
+            let mut v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(local_settings(&f)).unwrap())
+                    .unwrap();
+            v["disableAllHooks"] = serde_json::json!(true);
+            v
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let tree = resolve(&f, None);
+    let off = find(&tree, Kind::Plugin, "alpha@market-one").id.clone();
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &off, None).unwrap();
+    assert_eq!(
+        effects_naming(&plan, "UserPromptSubmit hook").len(),
+        1,
+        "{:#?}",
+        plan.side_effects
+    );
+    assert!(effects_naming(&plan, "SessionStart hook").is_empty());
+    assert!(effects_naming(&plan, "statusLine").is_empty());
 }
 
 #[test]

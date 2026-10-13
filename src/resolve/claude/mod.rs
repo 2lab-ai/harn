@@ -32,6 +32,7 @@ use crate::model::{
     item_id, walk, Agent, Cost, Item, Kind, Knob, Layer, Mode, Origin, Overlay, Scope, Target, Tree,
 };
 use fs::{Fs, Json};
+pub use hooks::OFF_ALL_HOOKS;
 use serde_json::Value;
 use settings::Settings;
 use std::path::{Path, PathBuf};

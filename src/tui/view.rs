@@ -1,7 +1,6 @@
 //! Drawing [`App`] (`.prd/04-tui-design.md`): two header lines, the list grouped by kind with a
 //! size, a bar relative to the largest line shown and a share of the total, the detail panel of
-//! the cursor line, the key bar in words; the cards (`d`, `o`, `w`, `?`, `i`) and the `u` confirm
-//! over it. Under `--no-unicode` everything harn draws is ASCII.
+//! the cursor line, the key bar in words; the cards (`d`, `o`, `u`, `w`, `?`, `i`) over it. Under `--no-unicode` everything harn draws is ASCII.
 
 use super::app::{editable, App, Card, Mode, Tone};
 use super::model::{size, Detail, Line as ListLine, OffCard, State};
@@ -18,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 /// The widest a card is drawn.
 const CARD_MAX: u16 = 80;
-/// The smallest frame a card or the `u` confirm is drawn in. Smaller, it is not drawn, its keys
+/// The smallest frame a card (the `u` one too) is drawn in. Smaller, it is not drawn, its keys
 /// do nothing but close it, and the message row says so. An action card (`d`, `o`, `u`) also
 /// needs its whole body in view: Enter never applies what the reader cannot see.
 pub(crate) const CARD_MIN: (u16, u16) = (40, 10);
@@ -137,23 +136,27 @@ impl App {
         ])
         .areas(area);
         let width = area.width as usize;
+        // Cards take the rows above the key bar: the keys that work on them stay in view.
+        let cards = Rect {
+            height: area.height.saturating_sub(1),
+            ..area
+        };
         let blocked = self.card_blocked(area);
         self.blocked.set(blocked.is_some());
+        let scrolls = self.card_scrolls(cards);
         frame.render_widget(Paragraph::new(self.header(width)), head);
         frame.render_widget(Paragraph::new(self.rule(width, None)), rule1);
         let footer = self.draw_list(frame, list);
         frame.render_widget(Paragraph::new(self.rule(width, footer)), rule2);
         self.draw_panel(frame, panel, blocked.as_deref());
         frame.render_widget(Paragraph::new(self.rule(width, None)), rule3);
-        frame.render_widget(Paragraph::new(self.key_bar(width)), keys);
-        match &self.mode {
-            _ if blocked.is_some() => {}
-            Mode::Card(card) => self.draw_card(frame, area, card),
-            Mode::Undo { entry } => {
-                let lines: Vec<String> = self.undo_lines(entry).iter().map(|l| self.t(l)).collect();
-                confirm_box(frame, area, &lines, self.g(), self.opts.unicode);
+        frame.render_widget(Paragraph::new(self.key_bar(width, scrolls)), keys);
+        if blocked.is_none() {
+            if let Some(width) = card_width(cards) {
+                if let Some((title, body, answer)) = self.open_parts(usize::from(width - 2)) {
+                    self.draw_box(frame, cards, &title, body, &answer);
+                }
             }
-            Mode::Normal | Mode::Filter => {}
         }
     }
 
@@ -192,17 +195,24 @@ impl App {
             .as_deref()
             .map(|v| format!(" {v}"))
             .unwrap_or_default();
+        // Said before the count: no key has to be pressed to learn nothing will be written.
+        let ro = if self.opts.readonly {
+            " · read-only"
+        } else {
+            ""
+        };
         let lefts = [
             format!(
-                " {} · {}{version} · {n} items load before your first message",
+                " {} · {}{version}{ro} · {n} items load before your first message",
                 t.dir, t.agent
             ),
             format!(
-                " {} · {} · {n} items load before your first message",
+                " {} · {}{ro} · {n} items load before your first message",
                 t.dir, t.agent
             ),
-            format!(" {} · {n} items load before your first message", t.dir),
-            format!(" {} · {n} items before your first message", t.dir),
+            format!(" {}{ro} · {n} items load before your first message", t.dir),
+            format!(" {}{ro} · {n} items before your first message", t.dir),
+            format!(" {}{ro} · {n} items", t.dir),
             format!(" {} · {n} items", t.dir),
         ];
         let lefts: Vec<String> = lefts.iter().map(|l| self.t(l)).collect();
@@ -327,15 +337,24 @@ impl App {
             };
             // The Plugins group line has no size, bar or share: its rows overlap the listings.
             let overlap = row.is_none() && (group.overlap || group.all_off);
+            // A row harn turned off that still resolves keeps its size and says `off`.
+            let off = row.is_some_and(|r| r.state == State::Off);
             let right = if overlap {
-                " ".repeat(cols_fit.right())
+                String::new()
+            } else if off && bytes.is_some() {
+                self.right_cells(&cols_fit, bytes, None, Some("off"), 0)
             } else {
                 self.right_cells(&cols_fit, bytes, share, absent, max)
             };
-            // `unmeasured` is wider than the size column: the names give it the room.
-            let left_w = cols_fit
-                .left
-                .saturating_sub(cols(&right).saturating_sub(cols_fit.right()));
+            // `unmeasured` is wider than the size column: the names give it the room. A line
+            // with nothing on the right (the Plugins group, all hooks off) has the whole row.
+            let left_w = if overlap {
+                width.saturating_sub(1)
+            } else {
+                cols_fit
+                    .left
+                    .saturating_sub(cols(&right).saturating_sub(cols_fit.right()))
+            };
             let room = left_w.saturating_sub(indent + 2);
             let left = match row {
                 None => {
@@ -370,7 +389,11 @@ impl App {
             let text = format!(
                 " {}{}{right}",
                 pad_right(&left, left_w),
-                if cols_fit.right() > 0 { " " } else { "" }
+                if cols_fit.right() > 0 && !overlap {
+                    " "
+                } else {
+                    ""
+                }
             );
             let text = pad_right(&cut_right(&text, width, self.g()), width);
             let mut style = Style::new();
@@ -466,7 +489,10 @@ impl App {
         }
         if c.bar > 0 {
             let cell = match (bytes, absent) {
-                (Some(b), _) => bar(b, max, c.bar, self.opts.unicode),
+                // A size and a word: the word in the bar's place (a row turned off that still
+                // resolves).
+                (Some(_), Some(word)) => format!(" {word}"),
+                (Some(b), None) => bar(b, max, c.bar, self.opts.unicode),
                 (None, Some(word)) => format!(" {word}"),
                 (None, None) => String::new(),
             };
@@ -481,6 +507,8 @@ impl App {
         }
         if c.share {
             let cell = match (bytes, share) {
+                // Some bytes, under a percent: not nothing.
+                (Some(b), Some(0)) if b > 0 => "<1%".to_string(),
                 (Some(_), Some(p)) => format!("{p}%"),
                 _ => String::new(),
             };
@@ -586,7 +614,8 @@ impl App {
 
     /// The keys valid now, in words; the least used go first when the frame is narrow. Under
     /// `--readonly` the write keys stay listed, greyed.
-    fn key_bar(&self, width: usize) -> Line<'static> {
+    /// `scrolls` = the open card's body is taller than the card: ↑↓ move it.
+    fn key_bar(&self, width: usize, scrolls: bool) -> Line<'static> {
         let ro = self.opts.readonly;
         let u = self.opts.unicode;
         // (key, words, enabled, priority: higher stays longer)
@@ -618,7 +647,9 @@ impl App {
             }
             Mode::Card(card) => match card.as_ref() {
                 Card::Off { list: true, .. } => {
-                    push(if u { "↑↓" } else { "j/k" }, "scroll", true, 5);
+                    if scrolls {
+                        push(if u { "↑↓" } else { "j/k" }, "scroll", true, 5);
+                    }
                     push("Esc", "back", true, 9);
                 }
                 Card::Off { card, .. } => {
@@ -633,13 +664,15 @@ impl App {
                     push("Esc", "cancel", true, 9);
                 }
                 Card::Where { .. } | Card::Keys | Card::Notes => {
-                    push(if u { "↑↓" } else { "j/k" }, "scroll", true, 5);
+                    if scrolls {
+                        push(if u { "↑↓" } else { "j/k" }, "scroll", true, 5);
+                    }
                     push("Esc", "close", true, 9);
                 }
             },
             Mode::Undo { .. } => {
-                push("y", "undo it", true, 9);
-                push("n Esc", "keep it", true, 9);
+                push("Enter", "undo it", true, 9);
+                push("Esc", "keep it", true, 9);
             }
             Mode::Normal => {
                 let line = self.cursor_line().cloned();
@@ -671,11 +704,11 @@ impl App {
                 if can_off {
                     push("d", "turn off", !ro, 7);
                 }
+                // Only what harn turned off here: a hook your own settings turned off has
+                // nothing for `o` to reverse.
                 let can_on = row.is_some_and(|r| {
-                    r.state == State::Off
-                        || r.id
-                            .as_ref()
-                            .is_some_and(|id| self.tab().journaled.contains_key(id))
+                    r.id.as_ref()
+                        .is_some_and(|id| self.tab().journaled.contains_key(id))
                 });
                 if can_on {
                     push("o", "turn back on", !ro, 7);
@@ -755,14 +788,14 @@ impl App {
                 "Esc back".to_string(),
             ),
             Card::On { name, files, .. } => {
-                let files = if files.is_empty() {
-                    "the files harn changed".to_string()
-                } else {
-                    files.join(", ")
+                let (files, were) = match files.len() {
+                    0 => ("the files harn changed".to_string(), "they were"),
+                    1 => (files[0].clone(), "it was"),
+                    _ => (files.join(", "), "they were"),
                 };
                 let mut body = labelled(
                     "Writes",
-                    &self.t(&format!("{files} back as they were before harn's change")),
+                    &self.t(&format!("{files} back as {were} before harn's change")),
                     inner,
                     None,
                 );
@@ -816,41 +849,72 @@ impl App {
         }
     }
 
-    /// Why the open card or confirm cannot be drawn in `area`, as the message row says it;
+    /// Why the open card cannot be drawn in `area`, as the message row says it;
     /// None when it can.
     pub(crate) fn card_blocked(&self, area: Rect) -> Option<String> {
         let (min_w, min_h) = CARD_MIN;
-        let need_h = match &self.mode {
-            Mode::Card(card) => match card.as_ref() {
-                Card::Off { list: false, .. } | Card::On { .. } if area.width >= min_w => {
-                    let inner = usize::from(area.width.min(CARD_MAX) - 2);
-                    let (_, body, _) = self.card_parts(card, inner);
-                    u16::try_from(body.len() + 3).unwrap_or(u16::MAX).max(min_h)
-                }
-                _ => min_h,
-            },
-            Mode::Undo { entry } => {
-                let lines: Vec<String> = self.undo_lines(entry).iter().map(|l| self.t(l)).collect();
-                // The confirm with every line of the change, its blank and its answer.
-                let whole = confirm_layout(Rect::new(0, 0, area.width, u16::MAX), &lines, self.g())
-                    .map_or(min_h, |(popup, _)| popup.height);
-                whole.max(min_h)
-            }
+        let action = match &self.mode {
+            Mode::Card(card) => matches!(
+                card.as_ref(),
+                Card::Off { list: false, .. } | Card::On { .. }
+            ),
+            Mode::Undo { .. } => true,
             Mode::Normal | Mode::Filter => return None,
+        };
+        let need_h = match self.open_parts(usize::from(area.width.min(CARD_MAX).saturating_sub(2)))
+        {
+            // Borders, answer line and the key bar row below the card.
+            Some((_, body, _)) if action && area.width >= min_w => {
+                u16::try_from(body.len() + 4).unwrap_or(u16::MAX).max(min_h)
+            }
+            _ => min_h,
         };
         (area.width < min_w || area.height < need_h)
             .then(|| format!("terminal too small for this card; needs at least {min_w}×{need_h}"))
     }
 
-    fn draw_card(&self, frame: &mut Frame, area: Rect, card: &Card) {
-        let width = area.width.min(CARD_MAX);
-        if width < 8 || area.height < 3 {
-            return;
+    /// Whether the open card's body is taller than the rows it gets in `area` (it scrolls).
+    fn card_scrolls(&self, area: Rect) -> bool {
+        let Some(width) = card_width(area) else {
+            return false;
+        };
+        self.open_parts(usize::from(width - 2))
+            .is_some_and(|(_, body, _)| body.len() > card_rows(area))
+    }
+
+    /// Title, body (wrapped to `inner`) and answer of the open card or the `u` card; None when
+    /// none is open.
+    fn open_parts(&self, inner: usize) -> Option<(String, Vec<String>, String)> {
+        match &self.mode {
+            Mode::Card(card) => Some(self.card_parts(card, inner)),
+            Mode::Undo { entry } => Some((
+                "Undo the last change".to_string(),
+                self.undo_lines(entry)
+                    .iter()
+                    .flat_map(|l| indent_wrap("", &self.t(l), inner))
+                    .collect(),
+                format!("Enter undo {} Esc keep", self.g().dot),
+            )),
+            Mode::Normal | Mode::Filter => None,
         }
+    }
+
+    /// A card over `area`: `title` in its top border, `body` (scrolled), `answer` bold at the
+    /// bottom right, the rows it takes blank across the frame.
+    fn draw_box(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        body: Vec<String>,
+        answer: &str,
+    ) {
+        let Some(width) = card_width(area) else {
+            return;
+        };
         let inner = usize::from(width - 2);
-        let (title, body, answer) = self.card_parts(card, inner);
-        let title = cut_right(&self.t(&title), inner.saturating_sub(2), self.g());
-        let rows = usize::from(area.height - 2).saturating_sub(1);
+        let title = cut_right(&self.t(title), inner.saturating_sub(2), self.g());
+        let rows = card_rows(area);
         let max = body.len().saturating_sub(rows);
         self.card_max.set(max);
         let scroll = self.card_scroll.min(max);
@@ -860,7 +924,7 @@ impl App {
             .take(rows)
             .map(Line::from)
             .collect();
-        let answer = self.t(&answer);
+        let answer = self.t(answer);
         text.push(Line::styled(
             pad_left(&format!("{answer} "), inner),
             Style::new().add_modifier(Modifier::BOLD),
@@ -897,6 +961,18 @@ impl App {
         let hint = (!card.leave_list.is_empty()).then_some(list.as_str());
         body.extend(labelled("Leaves", &self.t(&card.leaves), inner, hint));
         body.extend(labelled("Saves", &self.t(&card.saves), inner, None));
+        // `· 2 fewer items at start` is one phrase: after the saving when it fits there, else
+        // on the next line.
+        if !card.at_start.is_empty() {
+            let tail = self.t(&format!("{} {}", self.g().dot, card.at_start));
+            let last = body.last_mut().expect("labelled gives a line");
+            if cols(last) + 1 + cols(&tail) < inner {
+                last.push(' ');
+                last.push_str(&tail);
+            } else {
+                body.extend(labelled("", &tail, inner, None));
+            }
+        }
         body.extend(labelled("Undo", &self.t(&card.undo), inner, None));
         for note in &card.notes {
             body.extend(labelled("Note", &self.t(note), inner, None));
@@ -946,8 +1022,9 @@ impl App {
         };
         let (k, d): (Vec<usize>, Vec<usize>) =
             (0..3).map(|c| (width(c, true), width(c, false))).unzip();
-        let gaps = [3, 2, 3];
-        let need = 1 + (0..3).map(|c| k[c] + gaps[c] + d[c]).sum::<usize>() + 3 * 2;
+        let gaps = [2, 2, 3];
+        // A space before the border, as on every card line.
+        let need = 1 + (0..3).map(|c| k[c] + gaps[c] + d[c]).sum::<usize>() + 3 * 2 + 1;
         if need <= inner {
             return rows
                 .iter()
@@ -1083,11 +1160,6 @@ const ASCII_BORDER: border::Set<'static> = border::Set {
     horizontal_bottom: "-",
 };
 
-/// The smallest frame a confirm popup is drawn in (border + the answer line).
-const CONFIRM_MIN: (u16, u16) = (8, 3);
-/// The answer line when the full one does not fit.
-const CONFIRM_SHORT: &str = "y/N";
-
 /// A bordered box: line drawing, or `+-|` under `--no-unicode`.
 fn bordered(title: &str, unicode: bool) -> Block<'static> {
     let block = Block::bordered().title(title.to_string());
@@ -1098,6 +1170,17 @@ fn bordered(title: &str, unicode: bool) -> Block<'static> {
     }
 }
 
+/// The width a card takes in `area`; None when `area` has no room for one.
+fn card_width(area: Rect) -> Option<u16> {
+    let width = area.width.min(CARD_MAX);
+    (width >= 8 && area.height >= 3).then_some(width)
+}
+
+/// Body rows a card has in `area`: its height less two borders and the answer line.
+fn card_rows(area: Rect) -> usize {
+    usize::from(area.height.saturating_sub(2)).saturating_sub(1)
+}
+
 /// The rows `popup` takes in `area`, across the full width of `area`.
 fn band(area: Rect, popup: Rect) -> Rect {
     Rect {
@@ -1106,92 +1189,6 @@ fn band(area: Rect, popup: Rect) -> Rect {
         width: area.width,
         height: popup.height,
     }
-}
-
-/// The first of `candidates` that fits `width` columns.
-fn first_fitting(candidates: Vec<String>, width: usize) -> Option<String> {
-    candidates.into_iter().find(|c| cols(c) <= width)
-}
-
-/// The confirm popup's rect (inside `area`, centred, at most 76 wide) and its lines: the body
-/// wrapped, a blank, the answer (`y = yes · n/Esc = no`, or `y/N` when narrower). When the body
-/// does not fit, its tail becomes `(+N more)` (or `(+N)`, `+N`, whichever fits); the answer line
-/// always stays. None when `area` is under [`CONFIRM_MIN`].
-pub(crate) fn confirm_layout(
-    area: Rect,
-    body: &[String],
-    g: &Glyphs,
-) -> Option<(Rect, Vec<String>)> {
-    if area.width < CONFIRM_MIN.0 || area.height < CONFIRM_MIN.1 {
-        return None;
-    }
-    let width = area.width.saturating_sub(4).clamp(CONFIRM_MIN.0, 76);
-    let inner_width = usize::from(width.saturating_sub(2)).max(1);
-    let answer = first_fitting(
-        vec![
-            format!("y = yes {} n/Esc = no", g.dot),
-            CONFIRM_SHORT.to_string(),
-        ],
-        inner_width,
-    )
-    .unwrap_or_else(|| CONFIRM_SHORT.to_string());
-    // A line's leading spaces stay its indent on every row it wraps to.
-    let body: Vec<String> = body
-        .iter()
-        .flat_map(|l| {
-            let text = l.trim_start_matches(' ');
-            let indent = (l.len() - text.len()).min(inner_width.saturating_sub(1));
-            wrap_words(text, inner_width - indent)
-                .into_iter()
-                .map(move |row| format!("{}{row}", " ".repeat(indent)))
-        })
-        .collect();
-    let rows = usize::from(area.height.saturating_sub(2));
-    let mut lines = body.clone();
-    if body.len() + 2 <= rows {
-        lines.push(String::new());
-    } else {
-        let keep = rows.saturating_sub(2).min(body.len());
-        lines.truncate(keep);
-        let n = body.len() - keep;
-        let notice = first_fitting(
-            vec![format!("(+{n} more)"), format!("(+{n})"), format!("+{n}")],
-            inner_width,
-        );
-        if let (true, Some(notice)) = (rows >= 2, notice) {
-            lines.push(notice);
-        }
-    }
-    lines.push(answer);
-    let height = u16::try_from(lines.len() + 2)
-        .unwrap_or(u16::MAX)
-        .min(area.height);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
-    Some((popup, lines))
-}
-
-/// Draws the confirm popup for `body` over `area` (nothing under [`CONFIRM_MIN`]).
-pub(crate) fn confirm_box(
-    frame: &mut Frame,
-    area: Rect,
-    body: &[String],
-    g: &Glyphs,
-    unicode: bool,
-) {
-    let Some((popup, text)) = confirm_layout(area, body, g) else {
-        return;
-    };
-    frame.render_widget(Clear, band(area, popup));
-    let text: Vec<Line> = text.into_iter().map(Line::from).collect();
-    frame.render_widget(
-        Paragraph::new(text).block(bordered(" confirm ", unicode)),
-        popup,
-    );
 }
 
 /// Terminal columns of `text`, grapheme by grapheme (the way ratatui lays out cells).
@@ -1299,6 +1296,11 @@ pub(crate) fn one_row(text: &str, width: usize) -> String {
             }
         }
     }
+    // An empty clause (` · ready` starts with one) is no sentence to keep.
+    pieces.retain(|(piece, _)| !piece.trim().is_empty());
+    if pieces.is_empty() {
+        return String::new();
+    }
     let mut kept = String::new();
     let mut between = "";
     for (piece, sep) in &pieces {
@@ -1320,9 +1322,50 @@ fn breaks_after(grapheme: &str) -> bool {
     matches!(grapheme, "/" | "›" | "." | "-" | "_" | ":" | "," | ">")
 }
 
+/// Where the word `text` starts with ends: at the first space outside a backtick span, so an
+/// inline command (`harn verify --run`) is one word (a tick with no closing one spans nothing),
+/// and not between a number and its unit (`32 KB:`, `0.8 KB;`, `5 %`).
+fn word_end(text: &str) -> usize {
+    let mut at = 0;
+    loop {
+        let space = text[at..].find(' ').map_or(text.len(), |i| at + i);
+        let open = text[..space].matches('`').count() % 2 == 1;
+        if let (Some(close), true) = (text[space..].find('`'), open) {
+            at = space + close + 1;
+            continue;
+        }
+        let word = &text[text[..space].rfind(' ').map_or(0, |i| i + 1)..space];
+        let next = text.get(space + 1..).unwrap_or("");
+        let next = &next[..next.find(' ').unwrap_or(next.len())];
+        if text[space..].starts_with(' ') && is_number(word) && is_unit(next) {
+            at = space + 1 + next.len();
+            continue;
+        }
+        return space;
+    }
+}
+
+/// `32`, `0.8`, `~15`, `1,024`: a word that is a number.
+fn is_number(word: &str) -> bool {
+    let digits = word.trim_start_matches(['~', '(', '+', '-']);
+    digits.chars().any(|c| c.is_ascii_digit())
+        && digits
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+}
+
+/// `KB`, `KB:`, `B;`, `%)`: a size or percent unit, with what punctuation follows it.
+fn is_unit(word: &str) -> bool {
+    matches!(
+        word.trim_end_matches([':', ';', ',', '.', ')']),
+        "B" | "KB" | "MB" | "GB" | "%"
+    )
+}
+
 /// `text` in rows of at most `width` columns, broken at spaces (a run of spaces inside a row is
-/// kept). A word wider than a row breaks after a `/` (or `›`, `.`, `-`, `_`, `:`), so a path
-/// wraps on its separators; only a word with none of those in reach is cut between graphemes.
+/// kept) but never inside a backtick span. A word wider than a row breaks after a `/` (or `›`,
+/// `.`, `-`, `_`, `:`), so a path wraps on its separators; only a word with none of those in
+/// reach is cut between graphemes.
 pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut rows: Vec<String> = Vec::new();
@@ -1334,7 +1377,7 @@ pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
         if trimmed.is_empty() {
             break;
         }
-        let end = trimmed.find(' ').unwrap_or(trimmed.len());
+        let end = word_end(trimmed);
         let word = &trimmed[..end];
         rest = &trimmed[end..];
         let gap = if line.is_empty() { 0 } else { spaces };
@@ -1377,9 +1420,6 @@ pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::common::UNICODE;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
 
     #[test]
     fn a_word_without_spaces_breaks_between_graphemes_and_loses_nothing() {
@@ -1439,6 +1479,52 @@ mod tests {
     }
 
     #[test]
+    fn a_number_keeps_its_unit_on_its_row() {
+        // Each width would break between the number and its unit.
+        let text = "Turning it off frees 32 KB: its entries in the listing.";
+        assert_eq!(
+            wrap_words(text, "Turning it off frees 32".len()),
+            [
+                "Turning it off frees",
+                "32 KB: its entries in",
+                "the listing."
+            ]
+        );
+        assert_eq!(
+            wrap_words("That frees 0.8 KB; the skill listing", 14),
+            ["That frees", "0.8 KB; the", "skill listing"]
+        );
+        assert_eq!(wrap_words("frees 4.0 KB.", 8), ["frees", "4.0 KB."]);
+        assert_eq!(wrap_words("is ~15 MB now", 6), ["is", "~15 MB", "now"]);
+        // A number before any other word breaks as before.
+        assert_eq!(wrap_words("frees 32 items", 8), ["frees 32", "items"]);
+    }
+
+    #[test]
+    fn an_inline_command_wraps_as_one_word() {
+        let text = "Its size is unknown until `harn verify --run` measures a session.";
+        for width in 20..=text.len() {
+            for row in wrap_words(text, width) {
+                assert_eq!(row.matches('`').count() % 2, 0, "{width}: {row:?}");
+            }
+        }
+        assert_eq!(
+            wrap_words(text, 40),
+            [
+                "Its size is unknown until",
+                "`harn verify --run` measures a session.",
+            ]
+        );
+        // Punctuation after the closing tick stays with it; a tick with no closing one spans
+        // nothing.
+        assert_eq!(
+            wrap_words("needs `harn verify --run`.", 20),
+            ["needs", "`harn verify --run`."]
+        );
+        assert_eq!(wrap_words("a `b c d", 4), ["a `b", "c d"]);
+    }
+
+    #[test]
     fn a_message_row_keeps_whole_sentences_and_cuts_a_lone_one_at_a_word() {
         let text = "undone: alpha back · .claude/settings.local.json restored byte for byte";
         assert_eq!(one_row(text, 80), text);
@@ -1452,6 +1538,9 @@ mod tests {
             "terminal too small"
         );
         assert_eq!(one_row("", 10), "");
+        // An empty leading clause does not hide what fits.
+        assert_eq!(one_row(" · ready", 5), "ready");
+        assert_eq!(one_row(" · ready · set", 12), "ready · set");
     }
 
     #[test]
@@ -1468,61 +1557,5 @@ mod tests {
     fn ascii_swaps_every_harn_glyph() {
         let text = "a · b — c → d ← e › f … ▸ ▾ ↑ ↓ ─";
         assert!(ascii(text).is_ascii(), "{}", ascii(text));
-    }
-
-    #[test]
-    fn the_confirm_popup_stays_inside_any_frame_and_keeps_the_answer_line() {
-        let body: Vec<String> = (0..30).map(|i| format!("line {i} of the plan")).collect();
-        for width in 0..=100u16 {
-            for height in 0..=40u16 {
-                let area = Rect::new(3, 2, width, height);
-                match confirm_layout(area, &body, &UNICODE) {
-                    None => assert!(width < 8 || height < 3, "{width}x{height}"),
-                    Some((popup, lines)) => {
-                        assert!(popup.x >= area.x && popup.y >= area.y, "{width}x{height}");
-                        assert!(popup.right() <= area.right(), "{width}x{height}");
-                        assert!(popup.bottom() <= area.bottom(), "{width}x{height}");
-                        let inner = usize::from(popup.width - 2);
-                        assert!(lines.iter().all(|l| cols(l) <= inner), "{width}x{height}");
-                        let answer = lines.last().unwrap();
-                        assert!(answer == "y/N" || answer.starts_with("y = yes"));
-                        assert!(lines.len() + 2 <= usize::from(popup.height).max(3));
-                    }
-                }
-            }
-        }
-        let (_, lines) = confirm_layout(Rect::new(0, 0, 80, 8), &body, &UNICODE).unwrap();
-        assert_eq!(lines.len(), 6);
-        assert_eq!(lines[3], "line 3 of the plan");
-        assert_eq!(lines[4], "(+26 more)");
-        assert_eq!(lines[5], "y = yes · n/Esc = no");
-    }
-
-    fn drawn(width: u16, height: u16, body: &[String]) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| confirm_box(frame, frame.area(), body, &UNICODE, true))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
-            .collect()
-    }
-
-    #[test]
-    fn the_answer_is_drawn_whole_at_the_smallest_popup() {
-        let body = vec!["Undo the last change?".to_string()];
-        let rows = drawn(8, 3, &body);
-        assert_eq!(rows[1], "│y/N   │", "{rows:#?}");
-        let long: Vec<String> = (0..30).map(|i| format!("l{i}")).collect();
-        let rows = drawn(12, 5, &long);
-        assert_eq!(rows[1], "  │l0    │  ", "{rows:#?}");
-        assert_eq!(rows[2], "  │(+29) │  ", "{rows:#?}");
-        assert_eq!(rows[3], "  │y/N   │  ", "{rows:#?}");
-        let rows = drawn(40, 6, &body);
-        assert!(
-            rows.iter().any(|r| r.contains("y = yes · n/Esc = no")),
-            "{rows:#?}"
-        );
     }
 }

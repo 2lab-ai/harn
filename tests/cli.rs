@@ -69,6 +69,47 @@ fn edit_prints_the_diff_then_the_journal_line_and_records_the_target() {
 }
 
 #[test]
+fn off_dry_run_on_a_hook_names_every_hook_and_the_status_line_that_leave() {
+    let f = fixture();
+    let out = harn(
+        &f,
+        &[],
+        &[
+            "off",
+            "PreToolUse hook [Bash] · 1 cmd · ~/.claude/settings.json",
+            "--agent",
+            "claude-code",
+            "--dry-run",
+            "--no-unicode",
+            "--color",
+            "never",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let text = stdout(&out);
+    // `side effects: none` when nothing leaves; else a `side effects` heading and one line each.
+    assert!(!text.contains("side effects: none"), "{text}");
+    let effects: Vec<&str> = text
+        .lines()
+        .skip_while(|l| *l != "side effects")
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .collect();
+    assert_eq!(effects.len(), 3, "{text}");
+    for (line, name) in
+        effects
+            .iter()
+            .zip(["SessionStart hook", "UserPromptSubmit hook", "statusLine"])
+    {
+        assert!(line.trim_start().starts_with(name), "{name}:\n{text}");
+        assert!(line.ends_with(") leaves"), "{line}");
+    }
+    // Two of them print into the request, unmeasured.
+    assert!(text.contains("freed D?"), "{text}");
+    assert!(text.contains("dry run: nothing written"), "{text}");
+}
+
+#[test]
 fn edit_journals_the_agent_version_of_the_picked_tree() {
     let f = fixture();
     // An installed version in the copy's HOME only: the resolver reports the newest

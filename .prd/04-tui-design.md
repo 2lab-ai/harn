@@ -119,8 +119,17 @@ Rules that produce it:
 
 One card replaces the old `d` → plan pane → `a` → `y/N` chain: `d` opens the card, Enter applies,
 Esc cancels; `→` on the "Leaves" line opens the list of what leaves (scrollable, Esc back). After
-Enter the detail panel shows `turned off · u undoes · takes effect next session` and the row shows
-`off` in the state column (greyed name). `o` on an off row = the same card titled "Turn … back on".
+Enter the message row says how the header's count moved (`turned off alpha · 6 fewer items load at
+start (83 → 77)`), the detail panel shows `turned off · u undoes · takes effect next session` and
+the row shows `off` in the state column (greyed name). `o` on an off row = the same card titled
+"Turn … back on"; `u` = the same card titled "Undo the last change" (Enter undo · Esc keep; `y` and
+`n` work too).
+
+Action cards (`d`, `o`, `u`) show their whole body before Enter (or `y`) can do anything, because
+Enter commits a write; in a smaller frame the card is not drawn, the message row
+says the size it needs, and only Esc works. Informational cards (`w`, `?`, `i`) have nothing to
+commit and scroll instead — ↑↓ moves the body, Esc closes — and are drawn whenever the frame is
+at least 40×10.
 
 ## `w` — where it comes from (card, not a path wall)
 

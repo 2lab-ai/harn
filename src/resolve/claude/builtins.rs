@@ -10,10 +10,11 @@
 //! `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`; attribution reminder → `attribution: {commit: "", pr:
 //! ""}`; a tool → a bare `permissions.deny` entry (removes it from context) or its
 //! `CLAUDE_CODE_DISABLE_*` variable; prompt / environment / date / userEmail → none. Output style
-//! (`outputStyle`), `statusLine` (mode none: runs locally) and permission rule lists (mode none)
-//! come from the merged settings.
+//! (`outputStyle`), `statusLine` (mode none: runs locally; `disableAllHooks` stops it, said in its
+//! `signal`) and permission rule lists (mode none) come from the merged settings.
 
 use super::fs::file_name;
+use super::hooks::OFF_ALL_HOOKS;
 use super::{cost_na, env_knob, frontmatter, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use serde_json::{json, Value};
@@ -285,11 +286,12 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
         }
     }
 
+    // `disableAllHooks` stops the status line too: it stays a row, saying so.
     let hooks_off = ctx
         .settings
         .get_bool("/disableAllHooks")
         .is_some_and(|(b, _)| b);
-    if let (Some((_, file)), false) = (ctx.settings.get("/statusLine"), hooks_off) {
+    if let Some((_, file)) = ctx.settings.get("/statusLine") {
         let setting = file.at("/statusLine");
         let mut item = new_item(
             Kind::StatusLine,
@@ -302,6 +304,10 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
         item.origin.path = Some(file.path.clone());
         item.origin.setting = Some(setting.clone());
         item.origin.why = vec![setting, "runs locally; never reaches the model".to_string()];
+        if hooks_off {
+            item.origin.why.push(OFF_ALL_HOOKS.to_string());
+            item.signal = Some(OFF_ALL_HOOKS.to_string());
+        }
         item.knobs = vec![Knob::None {
             reason: "not in the request".to_string(),
         }];
