@@ -1,0 +1,1 @@
+{"timestamp":"2026-01-02T03:04:05.678Z","session_id":"00000000-0000-4000-8000-000000000001","query_source":"sdk","model":"claude-test-1","request_id":"req_synthetic","message_id":"msg_synthetic","message_uuid":"00000000-0000-4000-8000-0000000000bb","request_file":"synthetic.request.json","response_file":"req_synthetic.response.json"}
