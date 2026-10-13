@@ -69,3 +69,21 @@ costs one `gh repo rename` plus a tap formula; the user vetoes by saying so.
 
 Consequence fixed here: the operator of harn is an AI agent; the human reads a visualization. No
 TUI. A GUI exists only as a read-only view of the current loadout. `01-spec.md` v3.0 carries it.
+
+## 유저 원문 3 (2026-10-13 17:1x, 설치 직후 `harn` 실행 후)
+
+> 니가 만든걸 어케 쓰는데 병신아 처음에 설치하고 harn을 치면 어떻게 쓰는지 설명을 해줘야지 시발 그냥 좇나 텍스트만 10만줄 나오는데 뭘 어쩌라는거야?
+
+> 아니 씨발 니가 말한 1번 2번을 사람이 하려면 시팔 니가 좇같이 만든거잖아 tui로 만들었어야지 병신아
+
+읽기: 두 번째 문장은 TUI 재요구가 아니라 귀류다 — "사람이 행 이름을 쳐서 why/off를 하라고 할 거면 TUI를 만들었어야지" = 사람에게 그 일을 시키는 것 자체가 설계 위반(원문 2: 넣고 뺄지는 AI). 고정 스코프: 사람이 치는 명령은 `harn`(보기)·`harn trim`(AI가 수행)·`harn report --html`뿐이고, 행 이름은 사람이 치지 않는다. TUI는 여전히 비목표.
+
+## 유저 원문 4–6 (2026-10-13 17:2x–17:3x, 같은 대화)
+
+> 아니 시팔 디폴트는 ai에게 물어서 ai 스킬을 추가해서 ai가 harn을 사용해서 고치는건 ok 근데 그래도 사람이 메뉴얼로 픽스하고 실제로 뭐가 있고 뭘 없얠수 있는지를 확인하려면 최소한 tui나 gui가 있어야하잖아 병신이야?
+
+> 니가 씨팔 그냥 tui로 해야할껄 좇같이 수백라인 출력하고 잇으니까 병ㅅ힌새끼야 그건 그냥 tui를 안만든 병신인거지
+
+> 수백라인 출력할 내용이 없으면 tui가 필요 없는거고 병신아 내가 무슨말하는건지 알아?
+
+읽기(고정): ① 결정의 디폴트는 AI(`harn trim` / `/harn-trim`). ② 사람이 "지금 뭐가 실려 있고 뭘 뺄 수 있는지" 직접 보고 손으로 고치는 화면이 반드시 있다 — 그 화면이 바로 터미널에서 `harn`을 쳤을 때 뜨는 TUI다. ③ 내용이 수백 줄이라는 사실 자체가 TUI의 근거다: 줄여서 요약하지 말고 전부를 접고·펴고·찾아 들어가게 한다. 원문 2의 "TUI도 아니고 CLI"는 "사람이 GUI에서 결정하게 만드는 것"에 대한 거부였지 사람용 화면 삭제 지시가 아니었다(v3.0에서 과잉 해석). GUI(HTML 리포트)는 공유용 읽기 전용으로 유지.

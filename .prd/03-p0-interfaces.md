@@ -207,3 +207,16 @@ Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
 - Spec §Problem byte corrections (v3.1): SessionStart hook 3,456 B (not 3,444 chars), MEMORY.md
   23,429 + 18 B closing tag as wrapper, `messages[0]` block 1 = wrapper 107 + userEmail 276 +
   gitStatus 3,166.
+
+## Amendments after R3 (user correction 2026-10-13, 원문 3)
+
+- `Cmd::Trim { dir, dry_run: bool, yes: bool, agent_cmd: Option<String> }` — `src/trim.rs`
+  `pub fn trim(resolver, target, tree, opts: TrimOpts) -> Result<TrimOutcome>` where `TrimOpts`
+  carries `agent_cmd: Vec<String>` (default `["claude", "-p", "--output-format", "json"]`; the
+  prompt is appended as the last argument or fed on stdin when the command ends with `-`),
+  `dry_run`, `yes`, and a `confirm: Box<dyn FnMut(&ActionPlan) -> bool>`; `TrimOutcome::{DryRun(ActionPlan),
+  Declined(ActionPlan), Applied(JournalEntry)}`. Exit codes: 3 for a rejected plan (same as
+  `apply`), 1 for a missing agent binary or a reply without a plan.
+- `render::overview(tree, opts) -> String`; `RenderOpts.width` is the detected terminal width
+  (`terminal_size` on a TTY, `COLUMNS` > 0 otherwise, else 120). `harn --all` = `render::table`.
+- `src/tui/`: `App::new(target, trees, opts) -> App`, `App::handle_key(&mut self, KeyEvent)`, `App::draw(&self, &mut Frame)`, `tui::run(target, trees, opts) -> Result<()>` (raw mode + alternate screen, restored on every exit path incl. panic). Bare `harn` dispatches to `tui::run` when stdout is a terminal and neither `--json` nor `--table` is set.

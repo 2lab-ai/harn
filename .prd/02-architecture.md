@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **shipped (P0)** — v1.5, 2026-10-13 (modules as built on `main`; P0.5 Codex resolver still planned). Boundaries for the first
+Status: **in-progress** — v1.6, 2026-10-13 (modules as built on `main` + the `trim` module from the R4 drive; P0.5 Codex resolver still planned). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 
@@ -11,7 +11,7 @@ and this file is fixed.
   edits), `walkdir`, `dirs`, `similar` (unified diffs). JSON settings files are rewritten through
   `preserve_order` + 2-space serialization and the diff is always printed before the write
   (`serde_json` does not preserve formatting; the diff is the user's check).
-- No TUI (user direction 2026-10-13); no `ratatui`/`crossterm`. The human-facing view is
+- TUI = `src/tui/` on ratatui 0.30 + crossterm 0.29 (llmux pins), restored on the user's 2026-10-13 correction; its `App` core is terminal-free (TestBackend tests) and every write goes through `plan`/`writers`/`journal`. The HTML report stays the read-only, shareable view.
   `render/html.rs`: one self-contained HTML file, inline CSS, no script that writes anything.
 - Deliberately absent: a Trash crate (harn deletes nothing), tokenizers (all costs are bytes;
   `~tok` is a later optional feature), `clap_mangen` (`--help` covers eight subcommands).
@@ -92,7 +92,7 @@ src/
 ```
 
 Data flow: `resolve` → `Tree` (pure, no writes, no spawned processes) → `plan` (freed via a
-second `resolve` with an overlay) → `render` or `tui`. Writes happen only in `writers` through
+second `resolve` with an overlay) → `render`. Writes happen only in `writers` through
 `journal` (snapshot first). `oracle`/`capture` produce a second `Tree` + `RunContext`; `verify`
 joins the two by item id.
 
@@ -115,6 +115,17 @@ prefixes `mcp__<server>__` / `mcp__plugin_<p>_<s>__`, skill and agent names, fil
 | journal + snapshots | harn's state dir (above) — never inside `~/.claude` or `~/.codex`; snapshot files keep the source file's mode; retention: journal entries are never auto-deleted (`harn history --prune` is the user's call) |
 
 A running agent is not restarted; every apply prints "takes effect on the next session".
+
+## `trim` — the operator loop as a module
+
+`src/trim.rs` owns the only place harn starts another program: it renders the brief (same code as
+`harn brief`), writes the prompt (the brief + the plan contract + "answer with one `harn-plan/1`
+JSON object only"), runs the agent command (`claude -p <prompt> --output-format json`, injectable
+via `--agent-cmd` so tests use a script and Codex plugs in later), extracts the first JSON object
+whose `schema` is `harn-plan/1` from the reply, and hands it to `plan::build_plan_from_request` —
+the same validation as `harn apply`. Confirmation is a y/N prompt on a TTY, `--yes` or `--dry-run`
+otherwise; apply and journal go through `writers::apply` unchanged. The module never parses the
+agent's prose; a reply without a valid plan is an error that quotes the reply's first lines.
 
 ## Distribution (the llmux pattern, unchanged)
 
@@ -140,6 +151,6 @@ A running agent is not restarted; every apply prints "takes effect on the next s
 1. `just check` green locally and in CI.
 2. Differential tests green on the author's macOS: P0 against Claude Code 2.1.x; P0.5 adds Codex 0.160.x (Codex never gates P0).
 3. P0 rows A1–A6, A9–A11 run by hand on macOS and on `cachy-z13`, each with its command output
-   captured into the workstream's `loop.done.md`; P0.5 adds A7–A8; the TUI drive adds its own rows.
+   captured into the workstream's `loop.done.md`; P0.5 adds A7–A8.
 4. One stable tag → release assets on GitHub → `brew install 2lab-ai/tap/harn` on macOS and the
    binary on `cachy-z13` → `harn --dir ~/2lab.ai/zbrain` runs on both.

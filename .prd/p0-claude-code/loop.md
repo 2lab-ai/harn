@@ -1,7 +1,17 @@
 # loop — P0 drive
 
-Status: done (2026-10-13; R1–R3 in `loop.done.md`; `main` 79b3279 + docs, 199 tests; preview `preview-2026-10-13-0650-79b3279e5c63` installed via `brew install 2lab-ai/tap/harn-preview`)
+Status: in-progress (2026-10-13; R1–R3 closed in `loop.done.md`; R4 = the user's first-install corrections, 원문 3–6: bare `harn` = TUI, `harn trim` = the AI default)
 
-Next start point: P0.5 — the Codex resolver (`01-spec.md` §P0.5, acceptance A7–A8) as its own workstream folder. P1 carry-overs in `01-spec.md` §P1 (pointer-level undo for `harn on`; hook stdout join rule).
+## R4 — human view + AI default (open)
 
-User gates left: the first `v*` release tag (stable formula renders from it); `TAP_DISPATCH_TOKEN` on 2lab-ai/harn if the tap should follow each preview immediately rather than on its 6-hourly schedule.
+| WU | files owned | agent | state |
+|---|---|---|---|
+| WU-M | terminal width detection (`terminal_size`), `--table` flag (also the non-TTY default), `--help` Getting started, `[AI operator]` labels, README usage order | opus-coder (bg) | in `.worktrees/wu-m-first-screen` (branch `wu/m-first-screen`); scope cut from an "overview" screen to this after 원문 5 |
+| WU-N | `src/trim.rs`, `Cmd::Trim`, shared plan printing with `apply`, tests/trim.rs, README `harn trim`, skill header line | opus-coder (bg) | in `.worktrees/wu-n-trim` (branch `wu/n-trim`) |
+| WU-O | `src/tui/` (ratatui 0.30 + crossterm 0.29, terminal-free `App`), bare-command dispatch on a TTY, tests/tui.rs (TestBackend), README first line | opus-coder (bg) | in `.worktrees/wu-o-tui` (branch `wu/o-tui`) |
+
+Merge order: M → N → O (each adds a main.rs arm; resolve by hand), review per unit before merge (gpt6-reviewer), `just check` after each, one push at the end → preview publish → tap render → `brew upgrade harn-preview` → A14 receipt = tmux captures at 80×24 and 120×40 on fable-m5max + cachy-z13; A15 receipt = fake-agent run + one real `claude -p` run.
+
+Open gaps: G3 (pointer-level undo, P1), G7 (hook stdout join, P1); `TAP_DISPATCH_TOKEN` and the first `v*` tag stay user gates.
+
+Next: agents report → review → merge → gate → push → measure → close R4 → Status done.

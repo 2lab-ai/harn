@@ -9,7 +9,7 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; CLI only — no TUI; a GUI only as a read-only view.
 
-Status: **shipped (P0, Claude Code chain)** — v3.4, 2026-10-13 (P0.5 Codex resolver and P1 remain planned; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **in-progress** — v3.6, 2026-10-13 (P0 rows A1–A13 shipped; A14 TUI + A15 `harn trim` in the R4 drive after the user's first-install corrections; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
@@ -150,11 +150,9 @@ request**. Details and URLs: `research/03`.
 
 ## Non-goals
 
-- A TUI, and a GUI that takes decisions. The user's direction after seeing migsilva89/loadout: a
-  GUI for choosing what to add or remove is a mistake, because the analysis belongs to an AI; CLI
-  only. A GUI is acceptable solely as a read-only visualization of the current loadout
-  (`harn report --html`).
-- An in-tool editor. Content editing is `harn edit` = snapshot → `$EDITOR` on the real path → diff
+- A GUI that takes decisions (the HTML report stays read-only). The user's 2026-10-13 correction after the
+  first install restored the TUI: the harness is hundreds of rows, so the human's view is an interactive
+  tree (`harn` on a terminal), with every write still going through the same ActionPlan/journal.- An in-tool editor. Content editing is `harn edit` = snapshot → `$EDITOR` on the real path → diff
   → journal; `harn path <item>` prints the resolved path for anything else (`grep`, `rm`, your own
   tools). harn does not delete files itself.
 - Editing the agent's built-in prompt or built-in tool definitions. harn **shows** them with
@@ -254,14 +252,15 @@ until a bound capture turns it into `observed`.
 ### P0 — CLI (ships first; Claude Code chain complete)
 
 Every command takes the target directory as `--dir <path>`; the listing commands — `harn [DIR]`,
-`harn --json [DIR]`, `harn tui [DIR]` — also accept it as the positional `[DIR]` the user's
+`harn --json [DIR]`, `harn trim [DIR]`, `harn report [DIR]` — also accept it as the positional `[DIR]` the user's
 statement uses (`harn ~/2lab.ai/zbrain`). Both normalize to the
 same canonical target; giving both is a usage error. Default: cwd. `--agent claude-code|codex`
 selects one agent (default: all, one table each).
 
 | command | does | output |
 |---|---|---|
-| `harn [DIR]` / `harn --dir D` | the effective tree, one table per agent, sorted by the freed bytes of each row's default action | table: freed · predicted · share · item · origin · mode · default action |
+| `harn [DIR]` / `harn --dir D` | **human entry point.** On a terminal: the interactive view (TUI) — the whole tree foldable, searchable, sortable, with `w` why, `d`/`space` stage off, `a` apply (confirm), `o` on, `u` undo, `e` edit, `t` hint to `harn trim`, `?` keys; every write through the same ActionPlan + journal; `--readonly` greys write keys. Not a terminal, or `--table`: the full table | TUI; `--table`: freed · predicted · share · item · origin · mode · default action |
+| `harn trim [DIR] [--dry-run] [--yes] [--agent-cmd <cmd>]` | **human entry point, the default way to trim.** The AI operator loop in one command: build the brief, hand it to the coding agent headless (`claude -p`, one model request, announced before it runs), receive a `harn-plan/1`, validate it exactly as `apply` does, print the plan with each op's reason, freed, side effects and diff, ask `apply? [y/N]` on a TTY (`--yes` skips, `--dry-run` stops before asking), apply, journal, and print the one line that undoes it. No item name is ever typed by the human. The agent command is injectable for tests and for Codex | plan + journal id + undo line |
 | `harn --json` | the full model | `{"schema":"harn/1", "agents":[…]}` |
 | `harn why <item>` | admission chain, realpath, knob candidates by scope, the freed bytes of each | text |
 | `harn path <item>` | the resolved realpath, one line | path |
@@ -275,21 +274,24 @@ selects one agent (default: all, one table each).
 | `harn report [DIR] --html <out>` | a read-only visualization of the current loadout for the human (one page, both agents, the same rows and signals, no write controls) | file |
 | `harn completions <shell>` | clap completions | — |
 
+Who types what: the human types `harn` (and acts inside it), `harn trim`, `harn report --html`, `harn undo` and `harn verify --run`. `why`, `path`, `off`, `on`, `edit`, `brief`, `apply` are the AI operator's instruments (and `--help` labels them `[AI operator]`); a human may use them, the first screen never asks them to.
+
 Item selectors: a full id or any unique suffix (`plugin:slack`, `rules/DEV.md`); an ambiguous
 selector lists the candidates and exits 2. Flags everywhere: `--readonly` (refuses every write and
 every active verify), `--no-unicode`, `--color`.
 
 ### P0.5 — Codex resolver (same commands; acceptance A7–A8)
 
-### P1 — the AI operator loop
+### P1 — beyond `harn trim`
 
-The intended use: inside the project, an agent runs `harn brief`, reasons over it (usage from
-session logs, which skills matter for this repo, which plugins are unused here), writes
-`plan.json` with a reason per op, runs `harn apply plan.json`, then `harn verify --run` to confirm
-the next session's request shrank and the signals cleared. A Claude Code skill shipped in this
-repo (`.claude/skills/harn-trim/SKILL.md`) packages that loop so `/harn-trim` does it in one turn;
-the skill is text, the contract is the CLI. The human looks at `harn report --html` before and
-after. No TUI is planned; the former TUI section was removed on the user's direction.
+The operator loop itself is P0 (`harn trim`, moved here from P1 on the user's 2026-10-13 correction:
+a human must never be told to type item names into `why`/`off`; see `prd-rewrite/ssot.md` 원문 3).
+The `/harn-trim` skill (`.claude/skills/harn-trim/SKILL.md`) is the same loop run inside an
+interactive Claude Code session, for when the agent is already there; the skill is text, the
+contract is the CLI. P1 adds: usage evidence in the brief (which skills/agents were actually
+invoked in this directory's session logs, so the agent's reasons cite use, not size alone);
+`harn trim --agent codex`; a `harn report` before/after pair. No TUI is planned; the former TUI
+section was removed on the user's direction.
 
 Carried over from the P0 drive (`p0-claude-code/loop.md` G3, G7), both P1:
 - pointer-level undo for `harn on` — today `on A` after `off A; off B` on the same file reports
@@ -363,6 +365,21 @@ plugin:slack:slack   (claude-code/mcp-server/plugin/plugin:slack:slack)        t
             [3] edits ~/.claude.json, which Claude Code also writes — apply with no claude running
 ```
 
+### The interactive view — `harn [DIR]` on a terminal
+
+Restored on the user's 2026-10-13 correction (`prd-rewrite/ssot.md` 원문 4–6): the content is
+hundreds of rows, so it is folded, searched and acted on in place, never summarized away. One tab
+per agent, the same header facts as the table, the tree in table order with children folded by
+default (`▸ 216` on the skill listing, plugin children under their plugin), columns freed · cost ·
+share bar · item · origin · mode, trailing runtime/none rows under a separator, a context key bar
+at the bottom. Keys follow `research/03` §B: `j/k` `h/l` Enter `g/G`, `/` filter keeping the
+hierarchy, `s` sort cycle (again = reverse), `w` why pane, `d`/`space` stage off → plan pane
+(diff · freed · side effects · warnings), `a` apply after `y/N`, `o` on, `u` undo, `e` edit in
+`$EDITOR` (TUI suspended), `r` refresh, `t` = hint to `harn trim`, `?` help, `q`/Esc. `--readonly`
+greys every write key. Narrow terminals drop the share bar, then mode; the item column is never
+truncated below the width left to it. Stack: ratatui + crossterm (llmux pins). Tests render through
+ratatui's TestBackend; the event loop is separable from the terminal.
+
 ## Claude Code coverage (condensed from `research/01`; every row has a doc URL there)
 
 | item | discovery | lands | mode | official off switch |
@@ -409,7 +426,7 @@ ignore trust entirely), and `-c plugins."x@y".enabled=false` being silently igno
 ## Acceptance scenarios
 
 Each row: run → what must be observed. "Both machines" = the author's macOS and `cachy-z13`.
-**P0 gate = A1–A6, A9–A13 on both machines. P0.5 = A7–A8.**
+**P0 gate = A1–A6, A9–A15 on both machines. P0.5 = A7–A8.**
 
 | # | run | observed |
 |---|---|---|
@@ -427,6 +444,8 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target (exit 1, the verify family, with the mismatch named) |
 | A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
 | A13 | `harn report --dir ~/2lab.ai/zbrain --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
+| A14 | `harn ~/2lab.ai/zbrain` in an 80×24 and a 120×40 terminal (tmux capture) | the TUI opens with the header, the tree in table order with children folded, a key bar; `j/k` move, `l`/Enter unfold the skill listing (216 children) and `h` folds it, `/` filters keeping the hierarchy, `w` shows the why pane for the cursor row, `d` on the slack plugin row stages a plan whose side-effects pane lists its 8 skills, `a` + `y` applies and the journal has one entry, `u` restores the file byte-for-byte; `q` leaves the terminal as it was; `harn --table` and a piped `harn` print the full table; no row's item name is truncated at 80 columns |
+| A15 | `harn trim ~/2lab.ai/zbrain --dry-run` with `--agent-cmd` pointing at a script that returns a canned `harn-plan/1`, and once for real with `claude -p` | prints the validated plan with reasons, freed, side effects and diff and writes nothing; `trim --yes` applies, journals each reason and prints the `harn undo` line; a rejected plan names the offending op (exit 3); a missing agent binary reports the `/harn-trim` fallback (exit 1). The human typed no item name at any point |
 
 **P0 receipt (2026-10-13):** every P0 gate row observed on macOS (release build, zbrain) and A1/A2/A9
 on cachy-z13; A5's quarantine half is unreachable while every emitted item has a knob. Per-row
@@ -474,6 +493,16 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.6 (2026-10-13, user correction, 원문 4–6)** — the TUI is back as the human's view and the
+  bare `harn` on a terminal: the harness is hundreds of rows, so it is folded and searched, not
+  summarized; writes still go through ActionPlan + journal. `--table` for the table (also the
+  non-terminal default). A14 rewritten for the TUI, A15 = `harn trim`. v3.5's overview screen
+  withdrawn before it shipped.
+- **v3.5 (2026-10-13, user correction after first install)** — the human surface is `harn`
+  (overview, 80-column readable, `next` footer) and `harn trim` (the AI operator loop as one
+  command); `why`/`off`/`edit`/`apply`/`brief` are the operator's instruments and the first screen
+  never asks a human to type an item name; `harn --all` for the full table; A14 added; stray
+  `harn tui` mention removed. Verbatim: `prd-rewrite/ssot.md` 원문 3.
 - **v3.4 (2026-10-13, distribution live)** — release/preview workflows and the tap formulae landed
   (02 §Distribution as written); first prerelease `preview-2026-10-13-0650-79b3279e5c63` built on
   4 targets and installed through `brew install 2lab-ai/tap/harn-preview`; `harn --version` prints
