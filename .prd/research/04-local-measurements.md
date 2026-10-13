@@ -98,3 +98,33 @@ Already fixed in `../prd-rewrite/ssot.md` §Fixed facts. Two additions for the s
 Instruction-file chain for zbrain: `~/.claude/CLAUDE.md` (738 B) → `zbrain/CLAUDE.md` (6,506 B)
 → `@rules/DEV.md` (8,602 B) + `@rules/PRINCIPLES.md` (4,261 B) → auto-memory `MEMORY.md`
 (25,560 B); Codex reads `zbrain/AGENTS.md` (4,163 B incl. wrapper) instead.
+
+## E. Two official Claude Code oracles, verified 2026-10-13 (one headless run, cwd `~/2lab.ai/zbrain`)
+
+Command:
+
+```
+CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOGS_EXPORTER=none OTEL_METRICS_EXPORTER=none \
+OTEL_LOG_RAW_API_BODIES=file:<dir> claude -p hi --output-format stream-json --verbose --max-turns 1
+```
+
+1. **Raw request body (measured mode).** `<dir>/<uuid>.request.json` = the untruncated JSON body
+   Claude Code sent (355,852 B today: 74 tools, system blocks of 102, 143, 6168 B, `messages[0]` = user
+   blocks of 58,778 B + 3,668 B + 30 B, `messages[1]` = system text 63,229 B + `tool_addition`),
+   plus `<dir>/index.jsonl` with `session_id`, `request_id`, `model`, `query_source` and the two
+   file names. No proxy, no llmux, no third-party tool: this is the measured source for Claude Code.
+   Today's body is 125 KB larger than the 2026-10-02 capture (231 KB): three plugin MCP servers are
+   connected now (slack, atlassian; context7 disabled) and the skill list grew to 213 entries.
+2. **Provenance (`system/init` event).** Keys: `tools` (73 names), `mcp_servers[{name,status,source}]`
+   (`plugin:slack:slack` connected/plugin, `plugin:atlassian:atlassian` connected/plugin,
+   `plugin:context7:context7` **disabled**/plugin), `skills` (213 names), `slash_commands` (259),
+   `agents` (31), `plugins[{name,path,source,version}]` (13, with the cache path of each enabled
+   version), `memory_paths` = `{"auto": "/Users/zhugehyuk/.claude/projects/-Users-zhugehyuk-2lab-ai-zbrain/memory/"}`, `output_style`, `model`, `permissionMode`,
+   `claude_code_version`. This is the authoritative "what is enabled, from where" list; it costs
+   one model request because it is emitted by a real session.
+
+Consequence for the spec: `harn` does not need to re-implement Claude Code's loading rules to be
+*right*; it needs to be right **without starting a session** (static resolver) and to **check itself**
+against these two oracles (verify mode). Codex has the equivalent of (1) for instructions in
+`codex debug prompt-input` (§B) and no equivalent of (2) beyond `codex mcp list --json` /
+`codex plugin list`.
