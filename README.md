@@ -1,64 +1,132 @@
 # harn
 
-`harn <dir>` shows everything an AI coding agent loads into its model request when started in
-`<dir>` — one tree per agent, each row with its size, where it came from, whether it is always
-loaded or only advertised, and the official switch that turns it off — and lets you turn items
-off reversibly. Claude Code first, Codex CLI second. One binary for macOS and Linux.
+See and trim what your AI coding agent loads before your first message.
 
-## Install and use
+A fresh Claude Code session in one real directory sends a 332 KB first request before it reads a
+2-byte instruction. `harn` lists every item behind those bytes without starting a session, one
+tree per agent: its size, where it came from, whether it is always loaded or only advertised, and
+the agent's official switch that turns it off. Every change it makes is reversible byte for byte.
+Claude Code today, Codex CLI next. One binary for macOS and Linux.
 
-```
+## Install
+
+```sh
 brew install 2lab-ai/tap/harn-preview
 ```
 
-1. `harn` — what Claude Code loads in this directory before your first message. On a terminal
-   this is the interactive view: a two-line header (the directory, how many items load, the total,
-   the biggest groups), then the groups by kind — Skill listing, Project files, Memory, Agent
-   listing, Plugins, Hooks, Built-in — each with its size, a bar and its share of the total; `→`
-   opens a group to its rows, each with its own size. The panel under the list explains the row
-   under the cursor in plain sentences: where it comes from, what `d` would turn off and for whom,
-   what that frees. `d` opens one card that says what file it writes, what leaves (`→` lists it),
-   what it saves and how to undo; Enter applies, Esc cancels. `o` turns an item back on and `u`
-   undoes the last change (both restore the file byte for byte) · `w` where it comes from · `/`
-   search · `s` sort · `i` notes · `?` every key · `q` quit. The key bar shows only the keys valid
-   now; `--readonly` says so in the header and leaves `d`, `o`, `u` and `e` out.
-2. `harn trim` — the AI decides what to turn off and applies it; every change is journaled and
-   `harn undo` puts it back (`/harn-trim` inside Claude Code does the same loop).
-3. `harn report --html harn.html` — the same picture as a shareable read-only page.
-4. `harn verify --run` — measure one real session (starts the agent once: runs your hooks and MCP
-   servers, may cost one model request).
+This works with Homebrew on macOS and Linux. Or download a binary from
+[GitHub Releases](https://github.com/2lab-ai/harn/releases) (`harn-macos-aarch64`,
+`harn-macos-x86_64`, `harn-linux-aarch64`, `harn-linux-x86_64`, checksums in `SHA256SUMS`), make
+it executable and put it on your `PATH` as `harn`. A preview release is published on every push to
+`main`; stable `v*` releases come later, as the `harn` formula.
 
-`harn --table [DIR]` prints the table (also what `harn` prints unless stdin and stdout are both a
-terminal); `harn --json [DIR]` prints the same model as JSON (schema `harn/1`). The commands marked
-`[AI operator]` in `harn --help` (`why`, `path`, `off`, `on`, `edit`, `brief`, `apply`) are what the
-AI runs on your behalf; you never type an item name.
+## Use
 
-`harn trim [DIR]` — the default way to trim; you never type an item name. It builds the brief (`harn
-brief`), asks your coding agent for a plan in one headless request (`claude -p --output-format json
---tools "" --max-turns 1`: no tools, one turn, the prompt piped on stdin; announced before it runs),
-validates the reply exactly as `harn apply` does, and prints the plan: each op with the agent's
-reason, the bytes freed, the side effects (a plugin takes its skills, agents and hooks with it) and
-the diff of every settings file it touches. On a terminal it then asks `apply? [y/N]`; `--dry-run`
-stops before asking, `--yes` applies without asking (required when stdin is not a terminal). Applied
-changes are journaled with their reasons (`harn history`), and `harn undo` puts every file back byte
-for byte. `--agent-cmd "<cmd>"` replaces the agent command and runs as given (yours, trusted: harn
-adds no flags); a trailing `-` means: pipe the prompt on stdin instead of passing it as the last
-argument. Without `claude` on PATH, run `/harn-trim` inside Claude Code instead — the same loop,
-step by step.
+`harn` in a real project on an 80×24 terminal, started with `--readonly` (no write keys shown):
 
-Status: P0 for the Claude Code chain is on main; preview builds install via the tap.
+```text
+ zbrain · read-only · 312 items load before your first message          ~145 KB
+ biggest: skill listing 87 KB (60%) · project 22 KB · memory 20 KB    ! 2 notes
+────────────────────────────────────────────────────────────────────────────────
+ ▸ Skill listing  218 entries                         87 KB ██████████████  60%
+ ▸ Project files (2)                                  22 KB ███▌            15%
+ ▸ Memory (1)                                         20 KB ███▎            14%
+ ▸ Agent listing  31 entries                          15 KB ██▌             10%
+ ▸ Plugins (10)  48 KB would leave with them · counted in the listings above
+ ▸ Hooks (14)                                    unmeasured
+ ▸ Built-in (8)  mostly cannot be turned off     unmeasured
+────────────────────────────────────────────────────────────────────────────────
+ Skill listing · 218 entries, one line per skill or command
+ Sent in every first request; it has a size cap, and whether it cuts
+ descriptions here needs `harn verify --run`.
+ Open it (→) to see the entries by owner; d on an entry would turn that one off.
+────────────────────────────────────────────────────────────────────────────────
+ ↑↓ move   →← open/close   / search   i notes   ? keys   q quit
+```
 
-The product definition lives in [`.prd/01-spec.md`](.prd/01-spec.md); the implementation
-boundaries in [`.prd/02-architecture.md`](.prd/02-architecture.md); the module contract in
-[`.prd/03-p0-interfaces.md`](.prd/03-p0-interfaces.md); the research it rests on in
+| Command | What it does |
+|---|---|
+| `harn [DIR]` | The interactive view on a terminal; the table when piped. `DIR` defaults to the current directory. |
+| `harn trim` | The AI picks what to turn off, shows the plan, applies on `y`. Journaled; `harn undo` puts it back. |
+| `harn report --html harn.html` | The same picture as a shareable read-only page. |
+| `harn verify --run` | Measures one real session: starts the agent once, runs your hooks and MCP servers, may cost one model request. |
+
+The header names the directory, how many items load, the total and the biggest groups. Items are
+grouped by kind, each group with its size, a bar and its share. The panel below explains the cursor
+row in sentences: where it comes from, what `d` would turn off and for whom, what that frees.
+
+| Key | Does |
+|---|---|
+| `→` `←` | open / close a group (each row inside has its own size) |
+| `d` | turn off: one card says what file it writes, what leaves (`→` lists it), what it saves and how to undo; Enter applies, Esc cancels |
+| `o` · `u` | turn an item back on · undo the last change (both restore the file byte for byte) |
+| `w` · `e` | where it comes from · edit its file in `$EDITOR` |
+| `/` · `s` | search · sort |
+| `i` · `?` · `q` | notes · every key · quit |
+
+The key bar shows only the keys valid now. `--readonly` says so in the header and leaves `d`, `o`,
+`u` and `e` out.
+
+## How it works
+
+- Reads the agent's real config layers without starting a session: settings scopes, `CLAUDE.md`
+  and its imports, memory, plugins and marketplaces, the skill, command and agent listings,
+  hooks, MCP servers and built-ins.
+- Sizes each item in bytes as it lands in the first request. What files cannot tell (built-ins,
+  hook output, MCP tool schemas) reads `unmeasured` until `harn verify --run` measures a real
+  session, so the screen's total covers only what files can size.
+- Turns things off only through the agent's official switches: a settings key, written to
+  `.claude/settings.local.json` by default (this project only); never a wider scope silently.
+- Snapshots the file before every write and journals the change (`harn history`). `harn undo`, or
+  `u` on the screen, restores the file byte for byte.
+- `--readonly` refuses every write and every active verify (exit 3).
+
+## For AI operators
+
+The commands marked `[AI operator]` in `harn --help` (`why`, `path`, `off`, `on`, `edit`,
+`brief`, `apply`) are what an agent runs on your behalf; you never type an item name. The loop:
+`harn brief` prints the facts and the plan format, the agent writes a plan (schema `harn-plan/1`),
+`harn apply <plan.json>` validates every op and applies it. `/harn-trim` inside Claude Code runs
+the same loop step by step. `harn trim [DIR]` runs it in one command:
+
+- It asks your coding agent for a plan in one headless request, announced before it runs. The
+  default command is `claude -p --output-format json --tools '' --max-turns 1 -`: no tools, one
+  turn, the prompt piped on stdin.
+- It validates the reply exactly as `harn apply` does and prints the plan: each op with the
+  agent's reason, the bytes freed, the side effects (a plugin takes its skills, agents and hooks
+  with it) and the diff of every settings file it touches.
+- On a terminal it asks `apply? [y/N]`. Applied changes are journaled with their reasons
+  (`harn history`); `harn undo` puts every file back byte for byte.
+- `--dry-run` prints the validated plan and writes nothing.
+- `--yes` applies without asking (required when stdin is not a terminal).
+- `--agent-cmd "<cmd>"` replaces the agent command and runs it as given, in an empty temp dir
+  (yours, trusted: harn adds no flags). A trailing `-` means: pipe the prompt on stdin instead of
+  passing it as the last argument.
+- Without `claude` on `PATH`, run `/harn-trim` inside Claude Code instead.
+
+Output flags:
+
+- `--table` prints the table; it is what `harn` prints unless stdin and stdout are both a terminal.
+- `--json` prints the same model as JSON (schema `harn/1`).
+- `--no-unicode` prints ASCII only.
+- `--color auto|always|never` (`auto` = stdout is a terminal and `NO_COLOR` is unset).
+
+## Status
+
+P0 for the Claude Code chain is shipped on `main`; preview builds install via the tap. Next: the
+Codex CLI resolver (P0.5). Open follow-ups: https://github.com/2lab-ai/harn/issues.
+
+## Development
+
+`just check` runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and
+`cargo test --locked`, the same three steps CI runs on macOS and Ubuntu.
+
+The spec: product definition [`.prd/01-spec.md`](.prd/01-spec.md), implementation boundaries
+[`.prd/02-architecture.md`](.prd/02-architecture.md), module contract
+[`.prd/03-p0-interfaces.md`](.prd/03-p0-interfaces.md), the interactive view
+[`.prd/04-tui-design.md`](.prd/04-tui-design.md), and the research it rests on
 [`.prd/research/`](.prd/research/).
 
-Development gate: `just check` — `cargo fmt --check`,
-`cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, the same three steps
-CI runs on macOS and Ubuntu.
+## License
 
-Why: a fresh Claude Code session in one real working directory sends a 332 KB first request before
-reading the user's 30-byte instruction. Nothing shows that list for a directory without starting a
-session, with a size per item, the file or setting that produced it, and the switch that removes it.
-
-License: MIT.
+MIT, see [`LICENSE`](LICENSE).
