@@ -138,7 +138,7 @@ pub fn html(doc: &Document) -> String;         // one self-contained read-only p
 `harn [DIR] [--dir D] [--agent A] [--json] [--readonly] [--no-unicode] [--color auto|always|never]`;
 subcommands `why <sel>`, `path <sel>`, `off <sel> [--scope] [--dry-run]`, `on <sel>`, `edit <sel>`,
 `undo [N]`, `history [--prune AGE]`, `verify [--capture P | --run] [--agent]`, `brief [DIR]`,
-`apply <plan.json> [--dry-run]`, `report [DIR] --html <out>`, `completions <shell>`. No `tui`.
+`apply <plan.json> [--dry-run]`, `report [DIR] --html <out>`, `trim [DIR] [--dry-run] [--yes] [--agent-cmd]`, `completions <shell>`; top-level `--table` (listing only; the non-terminal default) and the bare command on a terminal = the TUI (R4).
 `DIR` and `--dir` together = clap conflict error. Exit codes: 0 ok · 1 verify diff · 2 ambiguous
 selector · 3 refused (readonly / builtin / no knob) · 4 stale journal. `harn --version` prints
 `harn <ver> (<channel> <rev12>) rules: claude-code <VERIFIED_AGAINST>`.
