@@ -37,6 +37,7 @@
 use crate::model::{Cost, Item, Kind, Layer, Mode, RunContext, Tree};
 use crate::oracle::claude::{version_triple, NAME_ONLY};
 use crate::oracle::Capture;
+use crate::resolve::claude::CAP_STATE_UNKNOWN;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -233,7 +234,8 @@ fn relayer(item: &mut Item, layer: Layer) {
 /// Projection: Runtime/None skipped; capture-only children attach under `?` parents (never
 /// SeenNotPredicted); presence gate on static ids; content conformance on reproducible static
 /// items; promotes predicted→observed on matched rows; fills `Tree.observed_body` and the over-cap
-/// signal. See the module docs for the rules.
+/// signal, and drops the resolver's [`CAP_STATE_UNKNOWN`] warning. See the module docs for the
+/// rules.
 pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
     let statics = flatten(&static_tree.items);
     let observed = flatten(&capture.tree.items);
@@ -436,6 +438,8 @@ pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
         get_mut(&mut static_tree.items, &path).children.push(item);
     }
     static_tree.observed_body = Some(capture.body_bytes);
+    // Bound: the listing above is the observed cap state (over-cap signal or none).
+    static_tree.warnings.retain(|w| w != CAP_STATE_UNKNOWN);
     static_tree.observed_regions = capture
         .regions
         .iter()

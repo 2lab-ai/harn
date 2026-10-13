@@ -7,6 +7,7 @@
 
 use harn::model::{item_id, walk, Agent, Cost, Item, Kind, Layer, Mode, Origin, Target, Tree};
 use harn::oracle::{self, claude, Capture};
+use harn::resolve::claude::CAP_STATE_UNKNOWN;
 use harn::verify::{verify, RowVerdict};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -635,6 +636,21 @@ fn verify_passes_when_the_tree_matches_the_capture() {
     let report = verify(&mut tree, &run_capture());
     assert!(report.passed, "{:#?}", report.rows);
     assert!(tree.warnings.is_empty(), "{:#?}", tree.warnings);
+}
+
+#[test]
+fn verify_drops_the_cap_state_unknown_warning_once_a_capture_is_bound() {
+    // The resolver cannot know the token-denominated cap; a bound capture shows it, so the
+    // warning would contradict the observed listing. Other warnings survive the bind.
+    let mut tree = static_tree(resolved(skills_with(Vec::new()), 138));
+    tree.warnings = vec![CAP_STATE_UNKNOWN.to_string(), "unrelated".to_string()];
+    verify(&mut tree, &run_capture());
+    assert!(tree.observed_body.is_some());
+    assert_eq!(
+        tree.signals,
+        ["skill listing: OVER CAP — 1 of 4 descriptions dropped (observed)"]
+    );
+    assert_eq!(tree.warnings, ["unrelated"]);
 }
 
 #[test]
