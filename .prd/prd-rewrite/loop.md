@@ -1,12 +1,6 @@
 # loop — PRD authoring drive
 
-Status: in-progress (2026-10-13) — one open WU, then this drive closes.
-
-## R2 — repository (open)
-
-| WU | scope | owner | state |
-|---|---|---|---|
-| WU-7 | GitHub repo `2lab-ai/harn` created (public, MIT), `main` pushed with `.prd/` | dispatcher | in progress |
+Status: done (2026-10-13) — PRD drive closed; next start point below.
 
 Build facts: none (no code in this drive).
 
