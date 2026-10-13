@@ -337,7 +337,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             if cli.json {
                 print_json(&serde_json::json!({ "item": item, "plans": plans }))?;
             } else {
-                println!("{}", render::why(&resolved.tree, item, &plans));
+                println!(
+                    "{}",
+                    render::why(&resolved.tree, item, &plans, !cli.no_unicode)
+                );
             }
         }
         Some(Cmd::Path { selector }) => {
@@ -537,7 +540,7 @@ fn apply_plan(cli: &Cli, plan: &plan::ActionPlan, dry_run: bool) -> Result<()> {
     if cli.json {
         return print_json(&serde_json::json!({ "plan": plan, "entry": entry }));
     }
-    println!("{}", render::plan(plan));
+    println!("{}", render::plan(plan, !cli.no_unicode));
     match entry {
         Some(entry) => println!(
             "applied: journal {} · takes effect on the next session",

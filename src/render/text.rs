@@ -1,6 +1,6 @@
 //! Plain-text reports: `harn verify`, `harn off`/`apply` plans, `harn history`.
 
-use super::common::{exact, freed_value, kb, knob_full, UNICODE};
+use super::common::{exact, freed_value, glyphs, kb, knob_full, UNICODE};
 use crate::journal::JournalEntry;
 use crate::model::RunContext;
 use crate::plan::ActionPlan;
@@ -78,9 +78,10 @@ fn context_line(ctx: &RunContext) -> String {
 }
 
 /// Target dir, ops (item id, knob, scope, file, reason), predicted before → after, freed,
-/// side effects, warnings, then the unified diff verbatim.
-pub fn plan(plan: &ActionPlan) -> String {
-    let g = &UNICODE;
+/// side effects, warnings, then the unified diff verbatim. `unicode` false = ASCII decorations;
+/// ids, paths, side effects and the diff are printed as they are.
+pub fn plan(plan: &ActionPlan, unicode: bool) -> String {
+    let g = glyphs(unicode);
     let base = plan.target_dir.as_path();
     let mut out = vec![
         format!("plan for {} {} {}", base.display(), g.dot, plan.agent),

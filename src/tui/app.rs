@@ -582,8 +582,9 @@ impl App {
 
     fn why(&mut self) {
         if let Some(off) = self.cursor_off() {
+            let dot = crate::render::common::glyphs(self.opts.unicode).dot;
             let text = format!(
-                "{}\n  turned off here by journal {}\n  o turns it back on · `harn history` lists the entry",
+                "{}\n  turned off here by journal {}\n  o turns it back on {dot} `harn history` lists the entry",
                 off.item_id, off.entry_id
             );
             self.open(Mode::Why { text });
@@ -598,7 +599,7 @@ impl App {
                 Ok(plans) => (plans, None),
                 Err(err) => (Vec::new(), Some(describe(&err))),
             };
-        let mut text = render::why(&tab.tree, item, &plans);
+        let mut text = render::why(&tab.tree, item, &plans, self.opts.unicode);
         if let Some(note) = note {
             text.push_str(&format!("\n  plans: {note}"));
         }

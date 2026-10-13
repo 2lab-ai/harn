@@ -6,7 +6,7 @@ use super::rows::{self, origin_text, RowKind};
 use crate::model::{Item, Layer};
 use crate::render::common::{
     cost_column, denominator, facts, freed_cell, freed_value, glyphs, kb, knob_compact, percent,
-    request_bytes, share_tenths, truncate, Glyphs,
+    request_bytes, share_tenths, Glyphs,
 };
 use crate::render::{self, share_bar};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -74,16 +74,15 @@ impl Columns {
     fn fit(cells: &[&Cells], cost_header: &str, width: usize) -> Columns {
         let widest = |f: fn(&Cells) -> usize| cells.iter().map(|c| f(c)).max().unwrap_or(0);
         let mut c = Columns {
-            freed: widest(|c| c.freed.chars().count()).max(FREED_HEADER.len()),
-            cost: Some(widest(|c| c.cost.chars().count()).max(cost_header.len())),
+            freed: widest(|c| cols(&c.freed)).max(FREED_HEADER.len()),
+            cost: Some(widest(|c| cols(&c.cost)).max(cost_header.len())),
             share: true,
             bar: true,
             item: 0,
-            origin: Some(widest(|c| c.origin.chars().count()).clamp(6, ORIGIN_MAX)),
-            mode: Some(widest(|c| c.mode.chars().count()).max(4)),
+            origin: Some(widest(|c| cols(&c.origin)).clamp(6, ORIGIN_MAX)),
+            mode: Some(widest(|c| cols(&c.mode)).max(4)),
         };
-        let want = widest(|c| c.indent + c.label.chars().count() + c.fold.chars().count())
-            .clamp(4, ITEM_WANT);
+        let want = widest(|c| c.indent + cols(&c.label) + cols(&c.fold)).clamp(4, ITEM_WANT);
         let room = |c: &Columns| width.saturating_sub(c.fixed());
         let drops: [fn(&mut Columns); 4] = [
             |c| c.bar = false,
@@ -105,12 +104,14 @@ impl Columns {
     }
 }
 
+/// `text` right-aligned in `width` terminal columns.
 fn pad_left(text: &str, width: usize) -> String {
-    format!("{text:>width$}")
+    format!("{}{text}", " ".repeat(width.saturating_sub(cols(text))))
 }
 
+/// `text` left-aligned in `width` terminal columns.
 fn pad_right(text: &str, width: usize) -> String {
-    format!("{text:<width$}")
+    format!("{text}{}", " ".repeat(width.saturating_sub(cols(text))))
 }
 
 impl App {
@@ -133,7 +134,11 @@ impl App {
             Mode::Plan => {
                 let text = match &self.staged {
                     Some(staged) => {
-                        format!("turn off {}\n{}", staged.label, render::plan(&staged.plan))
+                        format!(
+                            "turn off {}\n{}",
+                            staged.label,
+                            render::plan(&staged.plan, self.opts.unicode)
+                        )
                     }
                     None => "nothing staged".to_string(),
                 };
@@ -145,7 +150,7 @@ impl App {
                     let text = self
                         .staged
                         .as_ref()
-                        .map(|s| render::plan(&s.plan))
+                        .map(|s| render::plan(&s.plan, self.opts.unicode))
                         .unwrap_or_default();
                     self.draw_pane(frame, body, " staged plan ", &text);
                 }
@@ -218,7 +223,7 @@ impl App {
         }
         lines
             .into_iter()
-            .map(|(text, style)| Line::styled(truncate(&text, width, g), style))
+            .map(|(text, style)| Line::styled(cut_right(&text, width, g), style))
             .collect()
     }
 
@@ -358,7 +363,7 @@ impl App {
         {
             let line = match (&row.kind, cell) {
                 (RowKind::Separator(title), _) => Line::styled(
-                    pad_right(&truncate(&format!("  {title}"), width, g), width),
+                    pad_right(&cut_right(&format!("  {title}"), width, g), width),
                     self.grey(),
                 ),
                 (_, Some(c)) => {
@@ -421,10 +426,10 @@ impl App {
         mode: &str,
     ) -> String {
         let mut out = " ".repeat(GUTTER);
-        out.push_str(&pad_left(&truncate(freed, cols.freed, g), cols.freed));
+        out.push_str(&pad_left(&cut_right(freed, cols.freed, g), cols.freed));
         out.push(' ');
         if let Some(width) = cols.cost {
-            out.push_str(&pad_left(&truncate(cost, width, g), width));
+            out.push_str(&pad_left(&cut_right(cost, width, g), width));
             out.push(' ');
         }
         if cols.share {
@@ -435,38 +440,27 @@ impl App {
             out.push_str(&pad_right(bar, BAR_WIDTH));
             out.push(' ');
         }
-        out.push_str(&pad_right(&truncate(item, cols.item, g), cols.item));
+        out.push_str(&pad_right(&cut_right(item, cols.item, g), cols.item));
         if let Some(width) = cols.origin {
             out.push(' ');
-            out.push_str(&pad_right(&truncate(origin, width, g), width));
+            out.push_str(&pad_right(&cut_right(origin, width, g), width));
         }
         if let Some(width) = cols.mode {
             out.push(' ');
-            out.push_str(&pad_right(&truncate(mode, width, g), width));
+            out.push_str(&pad_right(&cut_right(mode, width, g), width));
         }
         out.trim_end().to_string()
     }
 
     /// A bordered box: line drawing, or `+-|` under `--no-unicode`.
     fn block(&self, title: &str) -> Block<'static> {
-        let block = Block::bordered().title(title.to_string());
-        if self.opts.unicode {
-            block
-        } else {
-            block.border_set(ASCII_BORDER)
-        }
+        bordered(title, self.opts.unicode)
     }
 
     fn draw_pane(&self, frame: &mut Frame, area: Rect, title: &str, text: &str) {
         let block = self.block(title);
         let inner = block.inner(area);
         let width = (inner.width as usize).max(1);
-        // The why/plan renderers always draw their glyphs in unicode.
-        let text = if self.opts.unicode {
-            text.to_string()
-        } else {
-            ascii_glyphs(text)
-        };
         let lines: Vec<String> = text.lines().flat_map(|line| wrap(line, width)).collect();
         let height = inner.height as usize;
         self.list_height.set(height.max(1));
@@ -524,12 +518,7 @@ impl App {
                 }
             }
         }
-        let Some((popup, text)) = confirm_layout(area, &lines) else {
-            return;
-        };
-        frame.render_widget(Clear, popup);
-        let text: Vec<Line> = text.into_iter().map(Line::from).collect();
-        frame.render_widget(Paragraph::new(text).block(self.block(" confirm ")), popup);
+        confirm_box(frame, area, &lines, g, self.opts.unicode);
     }
 
     fn message_line(&self, g: &Glyphs) -> Line<'static> {
@@ -642,7 +631,7 @@ impl App {
         }
         let len = |k: &[(&str, &str, bool)]| -> usize {
             k.iter()
-                .map(|(key, desc, _)| key.chars().count() + 1 + desc.chars().count() + 3)
+                .map(|(key, desc, _)| cols(key) + 1 + cols(desc) + 3)
                 .sum()
         };
         while !keys.is_empty() && len(&keys) + len(&tail) > width {
@@ -679,19 +668,48 @@ const ASCII_BORDER: border::Set<'static> = border::Set {
     horizontal_bottom: "-",
 };
 
-/// The smallest frame a confirm popup is drawn in (border + the y/N line).
+/// The smallest frame a confirm popup is drawn in (border + the answer line).
 const CONFIRM_MIN: (u16, u16) = (8, 3);
-const CONFIRM_ANSWER: &str = "y = yes   n / Esc = no";
+/// The answer line when the full one does not fit.
+const CONFIRM_SHORT: &str = "y/N";
+
+/// A bordered box: line drawing, or `+-|` under `--no-unicode`.
+fn bordered(title: &str, unicode: bool) -> Block<'static> {
+    let block = Block::bordered().title(title.to_string());
+    if unicode {
+        block
+    } else {
+        block.border_set(ASCII_BORDER)
+    }
+}
+
+/// The first of `candidates` that fits `width` columns.
+fn first_fitting(candidates: Vec<String>, width: usize) -> Option<String> {
+    candidates.into_iter().find(|c| cols(c) <= width)
+}
 
 /// The confirm popup's rect (inside `area`, centred, at most 76 wide) and its lines: the body
-/// wrapped, a blank, the y/N line. When the body does not fit, its tail becomes `(+N more)`;
-/// the y/N line always stays. None when `area` is under [`CONFIRM_MIN`].
-pub(crate) fn confirm_layout(area: Rect, body: &[String]) -> Option<(Rect, Vec<String>)> {
+/// wrapped, a blank, the answer (`y = yes · n/Esc = no`, or `y/N` when narrower). When the body
+/// does not fit, its tail becomes `(+N more)` (or `(+N)`, `+N`, whichever fits); the answer line
+/// always stays. None when `area` is under [`CONFIRM_MIN`].
+pub(crate) fn confirm_layout(
+    area: Rect,
+    body: &[String],
+    g: &Glyphs,
+) -> Option<(Rect, Vec<String>)> {
     if area.width < CONFIRM_MIN.0 || area.height < CONFIRM_MIN.1 {
         return None;
     }
     let width = area.width.saturating_sub(4).clamp(CONFIRM_MIN.0, 76);
     let inner_width = usize::from(width.saturating_sub(2)).max(1);
+    let answer = first_fitting(
+        vec![
+            format!("y = yes {} n/Esc = no", g.dot),
+            CONFIRM_SHORT.to_string(),
+        ],
+        inner_width,
+    )
+    .unwrap_or_else(|| CONFIRM_SHORT.to_string());
     let body: Vec<String> = body.iter().flat_map(|l| wrap(l, inner_width)).collect();
     let rows = usize::from(area.height.saturating_sub(2));
     let mut lines = body.clone();
@@ -700,11 +718,16 @@ pub(crate) fn confirm_layout(area: Rect, body: &[String]) -> Option<(Rect, Vec<S
     } else {
         let keep = rows.saturating_sub(2).min(body.len());
         lines.truncate(keep);
-        if rows >= 2 {
-            lines.push(format!("(+{} more)", body.len() - keep));
+        let n = body.len() - keep;
+        let notice = first_fitting(
+            vec![format!("(+{n} more)"), format!("(+{n})"), format!("+{n}")],
+            inner_width,
+        );
+        if let (true, Some(notice)) = (rows >= 2, notice) {
+            lines.push(notice);
         }
     }
-    lines.push(CONFIRM_ANSWER.to_string());
+    lines.push(answer);
     let height = u16::try_from(lines.len() + 2)
         .unwrap_or(u16::MAX)
         .min(area.height);
@@ -717,28 +740,60 @@ pub(crate) fn confirm_layout(area: Rect, body: &[String]) -> Option<(Rect, Vec<S
     Some((popup, lines))
 }
 
-/// The why/plan renderers' unicode glyphs in their `--no-unicode` spelling.
-fn ascii_glyphs(text: &str) -> String {
-    let mut out = text.to_string();
-    for (from, to) in [
-        ("Δ?", "D?"),
-        ("—", "-"),
-        ("·", "|"),
-        ("→", "->"),
-        ("←", "<-"),
-        ("…", "..."),
-        ("▼", "v"),
-        ("▲", "^"),
-    ] {
-        out = out.replace(from, to);
+/// Draws the confirm popup for `body` over `area` (nothing under [`CONFIRM_MIN`]).
+pub(crate) fn confirm_box(
+    frame: &mut Frame,
+    area: Rect,
+    body: &[String],
+    g: &Glyphs,
+    unicode: bool,
+) {
+    let Some((popup, text)) = confirm_layout(area, body, g) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    let text: Vec<Line> = text.into_iter().map(Line::from).collect();
+    frame.render_widget(
+        Paragraph::new(text).block(bordered(" confirm ", unicode)),
+        popup,
+    );
+}
+
+/// Terminal columns of `text`, grapheme by grapheme (the way ratatui lays out cells).
+pub(crate) fn cols(text: &str) -> usize {
+    text.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
+/// `text` in at most `max` columns: whole when it fits, else its head and the ellipsis.
+pub(crate) fn cut_right(text: &str, max: usize, g: &Glyphs) -> String {
+    if cols(text) <= max {
+        return text.to_string();
     }
+    let ellipsis = cols(g.ellipsis);
+    let (room, mark) = if max > ellipsis {
+        (max - ellipsis, g.ellipsis)
+    } else {
+        (max, "")
+    };
+    let mut out = String::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true) {
+        let w = grapheme.width();
+        if used + w > room {
+            break;
+        }
+        out.push_str(grapheme);
+        used += w;
+    }
+    out.push_str(mark);
     out
 }
 
 /// Indent + label + fold marker (`▸ 29`) in `width` columns: the marker is reserved first, so
-/// it never goes; the indent shrinks before the label does; a label too long keeps its tail.
+/// it never goes; the indent shrinks before the label does; a label too long keeps its tail and
+/// then fills `width` exactly. Columns, not chars: a CJK label counts 2 per char.
 pub(crate) fn fit_item(indent: usize, label: &str, fold: &str, width: usize, g: &Glyphs) -> String {
-    let fold_width = fold.chars().count();
+    let fold_width = cols(fold);
     if width <= fold_width {
         return cut_left(fold.trim_start(), width, g);
     }
@@ -748,18 +803,30 @@ pub(crate) fn fit_item(indent: usize, label: &str, fold: &str, width: usize, g: 
     format!("{}{label}{fold}", " ".repeat(indent))
 }
 
-/// The last chars of `text` that fit `max` with a leading ellipsis; `text` when it fits.
+/// The tail of `text` in `max` columns behind an ellipsis; `text` when it fits. A cut result is
+/// exactly `max` columns (a space after the ellipsis takes the column a wide char cannot).
 fn cut_left(text: &str, max: usize, g: &Glyphs) -> String {
-    let len = text.chars().count();
-    if len <= max {
+    if cols(text) <= max {
         return text.to_string();
     }
-    let ellipsis = g.ellipsis.chars().count();
-    if max <= ellipsis {
-        return text.chars().skip(len - max).collect();
+    let ellipsis = cols(g.ellipsis);
+    let (room, mark) = if max > ellipsis {
+        (max - ellipsis, g.ellipsis)
+    } else {
+        (max, "")
+    };
+    let mut tail: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true).rev() {
+        let w = grapheme.width();
+        if used + w > room {
+            break;
+        }
+        tail.push(grapheme);
+        used += w;
     }
-    let tail: String = text.chars().skip(len - (max - ellipsis)).collect();
-    format!("{}{tail}", g.ellipsis)
+    tail.reverse();
+    format!("{mark}{}{}", " ".repeat(room - used), tail.concat())
 }
 
 /// `line` cut into rows of at most `width` terminal columns, between grapheme clusters (a wide
@@ -822,10 +889,16 @@ fn help_text(g: &Glyphs) -> String {
 mod tests {
     use super::*;
     use crate::render::common::{ASCII, UNICODE};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn wrap_breaks_by_columns_between_graphemes_and_loses_nothing() {
-        let line = "plan 計画を確認する 👍🏽 family 👨‍👩‍👧 done — é (e + U+0301) 漢字漢字漢字";
+        let line = "plan 計画を確認する 👍🏽 family 👨‍👩‍👧 done — cafe\u{0301} 漢字漢字漢字";
+        assert!(
+            line.contains("e\u{0301}") && !line.contains('é'),
+            "decomposed"
+        );
         for width in 1..=12 {
             let rows = wrap(line, width);
             assert_eq!(rows.concat(), line, "width {width}");
@@ -836,6 +909,10 @@ mod tests {
             }
         }
         assert_eq!(wrap("計画を", 4), ["計画", "を"]);
+        // The accent stays on its e: a row never starts with a lone combining mark.
+        for row in wrap("cafe\u{0301}cafe\u{0301}", 4) {
+            assert!(!row.starts_with('\u{0301}'), "{row:?}");
+        }
         assert_eq!(wrap("", 5), [""]);
     }
 
@@ -846,7 +923,7 @@ mod tests {
         for (indent, width) in [(0, 20), (4, 20), (2, 10), (6, 9)] {
             let cell = fit_item(indent, &label, " ▸ 29", width, &UNICODE);
             assert!(cell.ends_with("▸ 29"), "{indent}/{width}: {cell}");
-            assert!(cell.chars().count() <= width, "{indent}/{width}: {cell}");
+            assert_eq!(cols(&cell), width, "{indent}/{width}: {cell}");
         }
         // 20 columns = 5 for the marker + "…" + the label's last 14 chars.
         let tail: String = label.chars().skip(63 - 14).collect();
@@ -856,6 +933,15 @@ mod tests {
         );
         assert!(fit_item(0, &label, " > 29", 4, &ASCII).ends_with("29"));
         assert_eq!(fit_item(2, "short", " ▸ 3", 40, &UNICODE), "  short ▸ 3");
+        // Columns, not chars: 30 CJK chars are 60 columns.
+        let cjk = fit_item(0, &"漢".repeat(30), " ▸ 29", 20, &UNICODE);
+        assert_eq!(cols(&cjk), 20, "{cjk}");
+        assert!(cjk.ends_with("▸ 29"), "{cjk}");
+        assert_eq!(cjk, format!("…{} ▸ 29", "漢".repeat(7)));
+        // An even room: the column a wide char cannot take is a space after the ellipsis.
+        let even = fit_item(0, &"漢".repeat(30), " ▸ 29", 19, &UNICODE);
+        assert_eq!(even, format!("… {} ▸ 29", "漢".repeat(6)));
+        assert_eq!(cols(&even), 19);
     }
 
     #[test]
@@ -864,23 +950,59 @@ mod tests {
         for width in 0..=100u16 {
             for height in 0..=40u16 {
                 let area = Rect::new(3, 2, width, height);
-                match confirm_layout(area, &body) {
+                match confirm_layout(area, &body, &UNICODE) {
                     None => assert!(width < 8 || height < 3, "{width}x{height}"),
                     Some((popup, lines)) => {
                         assert!(popup.x >= area.x && popup.y >= area.y, "{width}x{height}");
                         assert!(popup.right() <= area.right(), "{width}x{height}");
                         assert!(popup.bottom() <= area.bottom(), "{width}x{height}");
-                        assert_eq!(lines.last().unwrap(), CONFIRM_ANSWER, "{width}x{height}");
+                        let inner = usize::from(popup.width - 2);
+                        assert!(lines.iter().all(|l| cols(l) <= inner), "{width}x{height}");
+                        let answer = lines.last().unwrap();
+                        assert!(answer == "y/N" || answer.starts_with("y = yes"));
                         assert!(lines.len() + 2 <= usize::from(popup.height).max(3));
                     }
                 }
             }
         }
         // 8 rows: 2 border + 4 body lines + `(+26 more)` + the answer.
-        let (_, lines) = confirm_layout(Rect::new(0, 0, 80, 8), &body).unwrap();
+        let (_, lines) = confirm_layout(Rect::new(0, 0, 80, 8), &body, &UNICODE).unwrap();
         assert_eq!(lines.len(), 6);
         assert_eq!(lines[3], "line 3 of the plan");
         assert_eq!(lines[4], "(+26 more)");
-        assert_eq!(lines[5], CONFIRM_ANSWER);
+        assert_eq!(lines[5], "y = yes · n/Esc = no");
+    }
+
+    /// The text of row `y` inside the popup border, as drawn.
+    fn drawn(width: u16, height: u16, body: &[String]) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| confirm_box(frame, frame.area(), body, &UNICODE, true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_answer_is_drawn_whole_at_the_smallest_popup() {
+        let body = vec!["Apply: turn off alpha@market-one?".to_string()];
+        // 8×3: border, one row of 6 cells, border; the answer is all that fits.
+        let rows = drawn(8, 3, &body);
+        assert_eq!(rows[1], "│y/N   │", "{rows:#?}");
+        // 12×5 with 30 short lines: 3 inner rows of 6 cells = one line, the notice in its
+        // compact form (`(+29 more)` is 10 cells), the answer.
+        let long: Vec<String> = (0..30).map(|i| format!("l{i}")).collect();
+        let rows = drawn(12, 5, &long);
+        assert_eq!(rows[1], "  │l0    │  ", "{rows:#?}");
+        assert_eq!(rows[2], "  │(+29) │  ", "{rows:#?}");
+        assert_eq!(rows[3], "  │y/N   │  ", "{rows:#?}");
+        // Wide enough: the full answer.
+        let rows = drawn(40, 6, &body);
+        assert!(
+            rows.iter().any(|r| r.contains("y = yes · n/Esc = no")),
+            "{rows:#?}"
+        );
     }
 }

@@ -159,6 +159,41 @@ fn snapshot(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
+/// Resolver data shown as it is: labels, admission chains, signals, warnings.
+fn tree_text(tree: &Tree) -> Vec<String> {
+    model::walk(tree)
+        .flat_map(|i| std::iter::once(i.label.clone()).chain(i.origin.why.clone()))
+        .chain(tree.signals.clone())
+        .chain(tree.warnings.clone())
+        .collect()
+}
+
+/// Non-ASCII glyphs of `line` that no resolver text accounts for: each one with two chars before
+/// it, around it or after it (a label cut by a popup or ending at padding still counts) must
+/// occur in `data`.
+fn foreign_glyphs(line: &str, data: &[String]) -> Vec<char> {
+    let chars: Vec<char> = line.chars().collect();
+    let window = |from: usize, to: usize| -> String {
+        chars[from.min(chars.len())..to.min(chars.len())]
+            .iter()
+            .collect()
+    };
+    (0..chars.len())
+        .filter(|&i| !chars[i].is_ascii())
+        .filter(|&i| {
+            let windows = [
+                window(i.saturating_sub(2), i + 1),
+                window(i.saturating_sub(1), i + 2),
+                window(i, i + 3),
+            ];
+            !windows
+                .iter()
+                .any(|w| w.chars().count() == 3 && data.iter().any(|d| d.contains(w.as_str())))
+        })
+        .map(|i| chars[i])
+        .collect()
+}
+
 /// `d` on the alpha plugin, `a`, `y`: applied through the journal.
 fn turn_alpha_off(app: &mut App) {
     assert!(app.select(ALPHA));
@@ -905,20 +940,14 @@ fn ascii_mode_draws_every_widget_in_ascii() {
             readonly: false,
         },
     );
-    // Only a resolver label may carry non-ASCII; everything harn draws is ASCII.
-    let mut labels: Vec<String> = model::walk(app.tree())
-        .map(|i| i.label.clone())
-        .filter(|l| !l.is_ascii())
-        .collect();
-    labels.sort_by_key(|l| std::cmp::Reverse(l.len()));
+    // Only resolver data (labels, admission chains, signals, warnings) may carry non-ASCII; it
+    // is shown as it is. Everything harn draws around it is ASCII.
+    let data = tree_text(app.tree());
     let check = |app: &App, what: &str| {
         let frame = screen(app, 160, 40);
         for line in &frame {
-            let mut rest = line.clone();
-            for label in &labels {
-                rest = rest.replace(label.as_str(), "");
-            }
-            assert!(rest.is_ascii(), "{what}: {line}");
+            let foreign = foreign_glyphs(line, &data);
+            assert!(foreign.is_empty(), "{what}: {foreign:?} in {line}");
         }
         frame.join("\n")
     };
@@ -975,7 +1004,7 @@ fn tiny_frames_draw_without_panic_and_the_answer_line_stays() {
     }
     // A confirm taller than the frame keeps the y/N line and counts what it cut.
     let short = screen(&app, 80, 8).join("\n");
-    assert!(short.contains("y = yes   n / Esc = no"), "{short}");
+    assert!(short.contains("y = yes · n/Esc = no"), "{short}");
     assert!(short.contains(" more)"), "{short}");
     press(&mut app, KeyCode::Char('n'));
 }
@@ -998,4 +1027,109 @@ fn short_screens_keep_the_cursor_row_visible() {
             );
         }
     }
+}
+
+/// Row `y` as the terminal shows it: one entry per grapheme, a wide one's second cell skipped.
+fn row_in_columns(buffer: &Buffer, y: u16) -> (String, Vec<(u16, String)>) {
+    let mut cells = Vec::new();
+    let mut x = 0;
+    while x < buffer.area.width {
+        let symbol = buffer[(x, y)].symbol().to_string();
+        let wide = unicode_width::UnicodeWidthStr::width(symbol.as_str()) == 2;
+        cells.push((x, symbol));
+        x += if wide { 2 } else { 1 };
+    }
+    (cells.iter().map(|(_, s)| s.as_str()).collect(), cells)
+}
+
+#[test]
+fn wide_labels_are_cut_by_columns_and_keep_their_marker_and_origin() {
+    let f = fixture();
+    let mut t = tree(&f);
+    let wide = "技能一覧".repeat(12); // 48 chars, 96 columns
+    t.items.iter_mut().find(|i| i.id == LISTING).unwrap().label = wide.clone();
+    let app = App::new(
+        target(&f),
+        vec![(Box::new(ClaudeCode) as Box<dyn Resolver>, t)],
+        journal(&f),
+        Opts {
+            unicode: true,
+            color: false,
+            readonly: false,
+        },
+    );
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        let buffer = draw(&app, width, height);
+        let rows: Vec<(String, Vec<(u16, String)>)> =
+            (0..height).map(|y| row_in_columns(&buffer, y)).collect();
+        let header = rows
+            .iter()
+            .position(|(text, _)| text.contains("freed") && text.contains("origin"))
+            .unwrap();
+        let origin_x = rows[header].0.find("origin").unwrap() as u16;
+        let (text, cells) = rows
+            .iter()
+            .find(|(text, _)| text.contains("技能"))
+            .unwrap_or_else(|| panic!("{width}: no wide row"));
+        assert!(text.contains("▸ 29"), "{width}: marker lost: {text}");
+        assert!(text.contains('…'), "{width}: {text}");
+        let columns = unicode_width::UnicodeWidthStr::width(text.as_str());
+        assert_eq!(columns, usize::from(width), "{width}: {text}");
+        // The origin column starts where the header says: the label did not push it.
+        let origin: String = cells
+            .iter()
+            .filter(|(x, _)| *x >= origin_x)
+            .take(7)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(origin, "builtin", "{width}: {text}");
+    }
+}
+
+#[test]
+fn ascii_mode_keeps_user_text_and_switches_only_harn_decorations() {
+    let f = fixture();
+    let mut t = tree(&f);
+    let label = "alpha — the plugin…";
+    t.items.iter_mut().find(|i| i.id == ALPHA).unwrap().label = label.to_string();
+    let mut app = App::new(
+        target(&f),
+        vec![(Box::new(ClaudeCode) as Box<dyn Resolver>, t)],
+        journal(&f),
+        Opts {
+            unicode: false,
+            color: false,
+            readonly: false,
+        },
+    );
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Char('d'));
+    let plan = screen(&app, 160, 40).join("\n");
+    assert!(plan.contains(&format!("turn off {label}")), "{plan}");
+    assert!(plan.contains("+ staged plan -"), "{plan}");
+    assert!(
+        plan.contains(" | claude-code") && plan.contains(" -> "),
+        "{plan}"
+    );
+    let data = tree_text(app.tree());
+    for line in plan.lines() {
+        let foreign = foreign_glyphs(line, &data);
+        assert!(foreign.is_empty(), "{foreign:?} in {line}");
+    }
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('w'));
+    let why = screen(&app, 160, 40);
+    let top = why.iter().position(|l| l.starts_with("+ why -")).unwrap();
+    assert!(
+        why[top + 1].starts_with(&format!("|{label}   (")),
+        "{}",
+        why[top + 1]
+    );
+    // The kind · cost · mode line, with ASCII separators.
+    assert!(
+        why[top + 2..].iter().any(|l| l.contains(" | mode ")),
+        "{}",
+        why.join("\n")
+    );
 }

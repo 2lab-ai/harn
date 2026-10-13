@@ -808,7 +808,7 @@ fn why_lists_every_plan_children_chain_and_warnings() {
             vec!["~/.claude.json is also written by Claude Code".to_string()],
         ),
     ];
-    let out = render::why(&t, &item, &plans);
+    let out = render::why(&t, &item, &plans, true);
     assert!(out.starts_with(&format!("mcp plugin:slack   ({})   target: {DIR}", item.id)));
     assert!(out.contains("predicted 77,536 B"), "{out}");
     assert!(out.contains("  why loaded\n"), "{out}");
@@ -848,17 +848,40 @@ fn why_lists_every_plan_children_chain_and_warnings() {
 }
 
 #[test]
+fn no_unicode_switches_why_and_plan_decorations_and_keeps_user_text() {
+    let t = tree();
+    let mut item = slack();
+    item.label = "mcp — slack…".to_string();
+    let plans = [plan_for(&item, item.knobs[0].clone(), 77_536, Vec::new())];
+
+    let ascii = render::why(&t, &item, &plans, false);
+    assert!(ascii.starts_with("mcp — slack…   ("), "{ascii}");
+    let rest = ascii.replace("mcp — slack…", "");
+    assert!(rest.is_ascii(), "{rest}");
+    assert!(rest.contains(" | mode ") && rest.contains("D?"), "{rest}");
+    assert!(render::why(&t, &item, &plans, true).contains(" · mode "));
+
+    let plan = render::plan(&plans[0], false);
+    assert!(plan.is_ascii(), "{plan}");
+    assert!(
+        plan.contains(" -> ") && plan.contains(" | claude-code"),
+        "{plan}"
+    );
+    assert!(render::plan(&plans[0], true).contains(" → "));
+}
+
+#[test]
 fn why_without_plans_lists_the_knob_candidates() {
     let t = tree();
     let item = slack();
-    let out = render::why(&t, &item, &[]);
+    let out = render::why(&t, &item, &[], true);
     let actions: Vec<&str> = out.lines().filter(|l| l.starts_with("    [")).collect();
     assert_eq!(actions.len(), 2, "{out}");
     assert!(actions[0].contains("freed 77.5 KB+Δ?"), "{out}");
     assert!(actions[1].contains("not planned"), "{out}");
-    let builtin = render::why(&t, &system_prompt(), &[]);
+    let builtin = render::why(&t, &system_prompt(), &[], true);
     assert!(builtin.contains("[1] none — built-in"), "{builtin}");
-    let none = render::why(&t, &status_line(), &[]);
+    let none = render::why(&t, &status_line(), &[], true);
     assert!(none.contains("actions     none (no knob"), "{none}");
     assert!(
         none.contains("why loaded  ? (no admission chain recorded)"),
@@ -1478,7 +1501,7 @@ fn plan_shows_ops_numbers_side_effects_warnings_then_the_diff() {
     );
     p.ops[0].reason = Some("unused in this repo".to_string());
     p.diff = "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n".to_string();
-    let out = render::plan(&p);
+    let out = render::plan(&p, true);
     assert!(out.starts_with(&format!(
         "plan for {DIR} · claude-code\nops (1)\n  [1] {}",
         item.id
@@ -1595,10 +1618,10 @@ fn renderers_end_without_a_newline() {
     for out in [
         render::table(&t, &unicode()),
         render::table(&t, &ascii()),
-        render::why(&t, &item, &[]),
+        render::why(&t, &item, &[], true),
         render::brief(&d),
         render::html(&d),
-        render::plan(&p),
+        render::plan(&p, true),
         render::history(&[]),
     ] {
         assert!(!out.ends_with('\n'), "{out}");
@@ -1633,6 +1656,6 @@ fn print_samples() {
         println!("=====HTML=====");
         println!("{}", render::html(&doc(vec![tree()])));
         println!("=====WHY=====");
-        println!("{}", render::why(&tree(), &slack(), &[]));
+        println!("{}", render::why(&tree(), &slack(), &[], true));
     }
 }
