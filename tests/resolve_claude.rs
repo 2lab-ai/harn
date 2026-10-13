@@ -564,6 +564,10 @@ fn with_link_values(f: &Fixture) -> PathBuf {
     local["autoMemoryDirectory"] = serde_json::json!("~/memory (old)");
     local["outputStyle"] = serde_json::json!("My Style (x)");
     local["advisorModel"] = serde_json::json!("opus (fast)");
+    local["skillOverrides"] = serde_json::json!({
+        "user-one": "user-invocable-only",
+        "user-two": "name-only",
+    });
     std::fs::write(
         local_settings(f),
         serde_json::to_string_pretty(&local).unwrap(),
@@ -611,6 +615,20 @@ fn every_link_value_in_the_fixture_is_a_boolean_or_a_json_string() {
                 values.push(value.to_string());
             }
         }
+    }
+    // The two skill visibility values, as the producer writes them (not through split_link).
+    let local = local_settings(&f);
+    for (skill, value) in [
+        ("user-one", "user-invocable-only"),
+        ("user-two", "name-only"),
+    ] {
+        let want = format!("{}#/skillOverrides/{skill} = \"{value}\"", local.display());
+        let item = find(&t, Kind::Skill, skill);
+        assert!(
+            item.origin.why.contains(&want),
+            "{skill}: {:#?}",
+            item.origin.why
+        );
     }
     for want in [
         serde_json::to_string(&memory.display().to_string()).unwrap(),

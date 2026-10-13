@@ -514,6 +514,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_json_string_tail_is_read_back_to_its_opening_quote() {
+        // An escaped quote inside the value.
+        let step = r#"f#/env/Q = "say \"hi\"""#;
+        assert_eq!(json_string_tail(step), Some(step.find(" = ").unwrap() + 3));
+        assert_eq!(step_text(step), r#"f#/env/Q = say "hi""#);
+        // A trailing backslash: `"a\\"` is the string `a\`, its closing quote unescaped.
+        let step = r#"f#/env/B = "a\\""#;
+        assert_eq!(json_string_tail(step), Some(step.find(" = ").unwrap() + 3));
+        assert_eq!(step_text(step), r#"f#/env/B = a\"#);
+        // ` = ` inside the value: the separator is the one before the opening quote.
+        let step = r#"f#/env/N = "a = b""#;
+        assert_eq!(json_string_tail(step), Some(step.find(" = ").unwrap() + 3));
+        assert_eq!(step_text(step), "f#/env/N = a = b");
+        // Not ASCII.
+        let step = "f#/autoMemoryDirectory = \"/home/me/메모 (old)\"";
+        assert_eq!(
+            step_text(step),
+            "f#/autoMemoryDirectory = /home/me/메모 (old)"
+        );
+        assert_eq!(link_value_text("\"메모\""), "메모");
+        // Malformed JSON: the raw text, never a guess.
+        assert_eq!(link_value_text(r#""a\q""#), r#""a\q""#);
+        assert_eq!(step_text(r#"f#/x = "a\q""#), r#"f#/x = "a\q""#);
+        // No string at the end: as it is.
+        assert_eq!(json_string_tail("f#/x = true"), None);
+        assert_eq!(
+            json_string_tail(r#"f#/x = \""#),
+            None,
+            "an escaped closing quote"
+        );
+        assert_eq!(step_text("f#/x = true"), "f#/x = true");
+        assert_eq!(link_value_text("true"), "true");
+    }
+
+    #[test]
     fn kb_matches_the_mockup_rounding() {
         assert_eq!(kb(77_536), "77.5 KB");
         assert_eq!(kb(332_548), "332.5 KB");

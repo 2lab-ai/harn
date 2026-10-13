@@ -700,6 +700,26 @@ fn brief_and_html_show_a_string_setting_as_its_text() {
 }
 
 #[test]
+fn html_escapes_a_string_setting_once() {
+    let mut t = tree();
+    let memory = t.items.iter_mut().find(|i| i.kind == Kind::Memory).unwrap();
+    memory.origin.why = vec![format!(
+        "{DIR}/.claude/settings.local.json#/outputStyle = \"a <b> & \\\"c\\\"\""
+    )];
+    let html = render::html(&doc(vec![t]));
+    assert!(
+        html.contains(&format!(
+            "<li>{DIR}/.claude/settings.local.json#/outputStyle = a &lt;b&gt; &amp; \
+             &quot;c&quot;</li>"
+        )),
+        "{html}"
+    );
+    for twice in ["&amp;lt;", "&amp;gt;", "&amp;amp;", "&amp;quot;", "<b>"] {
+        assert!(!html.contains(twice), "{twice}");
+    }
+}
+
+#[test]
 fn html_footer_is_the_version_line_of_the_lib() {
     let line = harn::version_line();
     assert!(

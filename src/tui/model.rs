@@ -2397,8 +2397,9 @@ fn enabled_scope(plugin: &Item, places: &Places) -> Option<String> {
 ///
 /// A JSON string tail (the text ends in an unescaped `"`) is read back to its opening quote,
 /// and the ` = ` right before it is the separator, whatever the string holds. Else, when the
-/// text ends in `)`, what follows its last ` (` is a note if it has no `=`. Else the last ` = `
-/// (a boolean). Anything else is all pointer.
+/// text ends in `)`, what follows its last ` (` is a note if it has no `=` and no `/` (a note
+/// harn writes is one word, `(http)`; after a directory's ` (` a pointer goes on with `/`).
+/// Else the last ` = ` (a boolean). Anything else is all pointer.
 pub fn split_link(rest: &str) -> (&str, &str) {
     if let Some(open) = json_string_tail(rest) {
         if let Some(at) = rest[..open].strip_suffix(" = ").map(str::len) {
@@ -2407,7 +2408,7 @@ pub fn split_link(rest: &str) -> (&str, &str) {
     }
     if rest.ends_with(')') {
         if let Some(at) = rest.rfind(" (") {
-            if !rest[at..].contains('=') {
+            if !rest[at..].contains(['=', '/']) {
                 return (&rest[..at], rest[at + 1..].trim_start());
             }
         }
@@ -3074,6 +3075,19 @@ mod tests {
             ("/projects/~1home~1me~1foo (x)/disabledMcpServers", "")
         );
         assert_eq!(split_link("/hooks/Stop/0"), ("/hooks/Stop/0", ""));
+        // A ` (` in a directory, the pointer ending in `)`, no tail: all pointer.
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo (x)/mcpServers/srv(x)"),
+            ("/projects/~1home~1me~1foo (x)/mcpServers/srv(x)", "")
+        );
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo (x)/mcpServers/srv (http)"),
+            ("/projects/~1home~1me~1foo (x)/mcpServers/srv", "(http)")
+        );
+        assert_eq!(
+            split_link("/projects/~1home~1me~1foo (x)/mcpServers/srv(x) = true"),
+            ("/projects/~1home~1me~1foo (x)/mcpServers/srv(x)", "= true")
+        );
         // A ` = ` inside a directory name: the note at the end decides the tail first.
         assert_eq!(
             split_link("/projects/~1home~1me~1foo = bar/mcpServers/srv (http)"),
