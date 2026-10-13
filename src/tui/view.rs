@@ -327,16 +327,20 @@ impl App {
 
         let mut lines = vec![Line::styled(
             pad_right(
-                &self.row_text(
-                    &cols,
-                    g,
-                    FREED_HEADER,
-                    cost_header,
-                    "share",
-                    "",
-                    "item",
-                    "origin",
-                    "mode",
+                &format!(
+                    "{}{}",
+                    " ".repeat(GUTTER),
+                    self.row_text(
+                        &cols,
+                        g,
+                        FREED_HEADER,
+                        cost_header,
+                        "share",
+                        "",
+                        "item",
+                        "origin",
+                        "mode",
+                    )
                 ),
                 width,
             ),
@@ -368,7 +372,7 @@ impl App {
                 ),
                 (_, Some(c)) => {
                     let item = self.item_cell(c, cols.item, g);
-                    let text = self.row_text(
+                    let body = self.row_text(
                         &cols, g, &c.freed, &c.cost, &c.share, &c.bar, &item, &c.origin, &c.mode,
                     );
                     let gutter = if c.staged {
@@ -380,7 +384,8 @@ impl App {
                     } else {
                         "  "
                     };
-                    let text = pad_right(&format!("{gutter}{}", &text[GUTTER..]), width);
+                    // Gutter and body composed, never sliced: a blank body stays a row.
+                    let text = pad_right(&format!("{gutter}{body}"), width);
                     let mut style = if c.dim { self.grey() } else { Style::new() };
                     if c.staged && self.opts.color {
                         style = style.fg(Color::Red);
@@ -425,7 +430,8 @@ impl App {
         origin: &str,
         mode: &str,
     ) -> String {
-        let mut out = " ".repeat(GUTTER);
+        // The gutter (staged mark) is the caller's: this is the row after it.
+        let mut out = String::new();
         out.push_str(&pad_left(&cut_right(freed, cols.freed, g), cols.freed));
         out.push(' ');
         if let Some(width) = cols.cost {
@@ -764,7 +770,21 @@ pub(crate) fn cols(text: &str) -> usize {
     text.graphemes(true).map(UnicodeWidthStr::width).sum()
 }
 
-/// `text` in at most `max` columns: whole when it fits, else its head and the ellipsis.
+/// The head of the ellipsis that fits `max` columns (`…`, or `.` of `...` in one column): what a
+/// cut shows when not one grapheme of the text fits.
+fn ellipsis_in(max: usize, g: &Glyphs) -> String {
+    let mut out = String::new();
+    for grapheme in g.ellipsis.graphemes(true) {
+        if cols(&out) + grapheme.width() > max {
+            break;
+        }
+        out.push_str(grapheme);
+    }
+    out
+}
+
+/// `text` in at most `max` columns: whole when it fits, else its head and the ellipsis; never
+/// blank for a non-empty `text` when `max` > 0.
 pub(crate) fn cut_right(text: &str, max: usize, g: &Glyphs) -> String {
     if cols(text) <= max {
         return text.to_string();
@@ -785,6 +805,9 @@ pub(crate) fn cut_right(text: &str, max: usize, g: &Glyphs) -> String {
         out.push_str(grapheme);
         used += w;
     }
+    if out.is_empty() && mark.is_empty() {
+        return ellipsis_in(max, g);
+    }
     out.push_str(mark);
     out
 }
@@ -804,7 +827,8 @@ pub(crate) fn fit_item(indent: usize, label: &str, fold: &str, width: usize, g: 
 }
 
 /// The tail of `text` in `max` columns behind an ellipsis; `text` when it fits. A cut result is
-/// exactly `max` columns (a space after the ellipsis takes the column a wide char cannot).
+/// exactly `max` columns (a space after the ellipsis takes the column a wide char cannot) and
+/// never blank: when no grapheme fits, the ellipsis alone.
 fn cut_left(text: &str, max: usize, g: &Glyphs) -> String {
     if cols(text) <= max {
         return text.to_string();
@@ -826,6 +850,12 @@ fn cut_left(text: &str, max: usize, g: &Glyphs) -> String {
         used += w;
     }
     tail.reverse();
+    if tail.is_empty() && mark.is_empty() {
+        // Not even the last grapheme fits (a wide one in 1 column): show that something is cut
+        // rather than a blank cell.
+        let mark = ellipsis_in(max, g);
+        return format!("{mark}{}", " ".repeat(max - cols(&mark)));
+    }
     format!("{mark}{}{}", " ".repeat(room - used), tail.concat())
 }
 
@@ -942,6 +972,11 @@ mod tests {
         let even = fit_item(0, &"漢".repeat(30), " ▸ 29", 19, &UNICODE);
         assert_eq!(even, format!("… {} ▸ 29", "漢".repeat(6)));
         assert_eq!(cols(&even), 19);
+        // One column, a wide last char: the ellipsis alone, never a blank cell.
+        assert_eq!(fit_item(0, "a漢", "", 1, &UNICODE), "…");
+        assert_eq!(fit_item(0, "漢", "", 1, &ASCII), ".");
+        assert_eq!(cut_right("漢x", 1, &UNICODE), "…");
+        assert_eq!(cut_right("漢", 0, &UNICODE), "");
     }
 
     #[test]

@@ -1133,3 +1133,102 @@ fn ascii_mode_keeps_user_text_and_switches_only_harn_decorations() {
         why.join("\n")
     );
 }
+
+#[test]
+fn an_off_row_ending_in_a_wide_char_draws_at_any_width() {
+    let f = fixture();
+    // A journal op for an item id whose name is `漢`: built from a tree where alpha has that id,
+    // applied for real (alpha turns off). The fresh tree has no such item, so it is an off row.
+    let t = target(&f);
+    let mut renamed = tree(&f);
+    let wide_id = "claude-code/plugin/plugin/漢";
+    renamed.items.iter_mut().find(|i| i.id == ALPHA).unwrap().id = wide_id.to_string();
+    let plan = plan::build_plan(&ClaudeCode, &t, &renamed, wide_id, None).unwrap();
+    writers::apply(&plan, &mut journal(&f)).unwrap();
+    let mut app = app(&f);
+    assert!(app.select(wide_id), "the off row");
+    for width in 1..=12u16 {
+        let buffer = draw(&app, width, 12);
+        // Reversed rows: the active agent tab first, then the cursor row.
+        let reversed: Vec<u16> = (0..12)
+            .filter(|&y| (0..width).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED)))
+            .collect();
+        assert_eq!(reversed.len(), 2, "{width}: {:#?}", lines(&buffer));
+        let y = reversed[1];
+        let marked =
+            (0..width.min(2)).all(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+        assert!(
+            marked,
+            "{width}: the cursor row lost its gutter: {:#?}",
+            lines(&buffer)
+        );
+    }
+}
+
+/// Every string in `value` with its non-ASCII chars replaced by `-` (ASCII strings, ids among
+/// them, stay as they are).
+fn ascii_only(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) if !s.is_ascii() => Value::String(
+            s.chars()
+                .map(|c| if c.is_ascii() { c } else { '-' })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(ascii_only).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(k, v)| (k, ascii_only(v))).collect())
+        }
+        other => other,
+    }
+}
+
+#[test]
+fn ascii_data_under_no_unicode_draws_zero_non_ascii_bytes() {
+    let f = fixture();
+    let data = ascii_only(serde_json::to_value(tree(&f)).unwrap());
+    let ascii_tree: Tree = serde_json::from_value(data).unwrap();
+    assert!(
+        serde_json::to_string(&ascii_tree).unwrap().is_ascii(),
+        "labels, origins, chains, signals, warnings, knobs: all ASCII"
+    );
+    let mut app = App::new(
+        target(&f),
+        vec![(Box::new(ClaudeCode) as Box<dyn Resolver>, ascii_tree)],
+        journal(&f),
+        Opts {
+            unicode: false,
+            color: false,
+            readonly: false,
+        },
+    );
+    let strict = |app: &App, what: &str| {
+        for (width, height) in [(160, 40), (80, 24), (40, 12)] {
+            for line in screen(app, width, height) {
+                assert!(line.is_ascii(), "{what} {width}x{height}: {line}");
+            }
+        }
+    };
+    strict(&app, "list");
+    press(&mut app, KeyCode::Char('?'));
+    strict(&app, "help");
+    press(&mut app, KeyCode::Esc);
+    assert!(app.select(LISTING));
+    press(&mut app, KeyCode::Char('l'));
+    strict(&app, "unfolded list");
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Char('w'));
+    strict(&app, "why");
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('d'));
+    assert!(app.staged().is_some(), "{}", message(&app));
+    strict(&app, "plan");
+    press(&mut app, KeyCode::Char('a'));
+    strict(&app, "confirm");
+    press(&mut app, KeyCode::Char('n'));
+    press(&mut app, KeyCode::Esc);
+    strict(&app, "staged list + message");
+    press(&mut app, KeyCode::Char('/'));
+    keys(&mut app, "alpha");
+    strict(&app, "filter");
+}
