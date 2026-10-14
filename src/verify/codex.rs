@@ -22,11 +22,12 @@
 //! - **AGENTS files** carry no header in the message, so the capture cannot name them: harn
 //!   assembles the message it predicts from the rows (the files read now, cut to their predicted
 //!   bytes, the framing codex adds) and compares it byte for byte with the observed one. A file is
-//!   seen when its text is where predicted, or later inside the message's body — between the
-//!   opening framing (matched in full) and the closing framing (the message's last bytes); when
-//!   either is not where predicted, a file past the first difference is not checkable and the
-//!   message's framing is a mismatch. The row holding the first differing byte is
-//!   `content-mismatch`, and the report names that offset.
+//!   seen when its text is inside the message's body — between the opening framing (matched in
+//!   full) and the closing framing (the message's last bytes) — where predicted, or later; when
+//!   either framing is not where predicted, a file past the first difference, or one whose text
+//!   runs into the closing framing, is not checkable and the message's framing is a mismatch.
+//!   The row holding the first differing byte is `content-mismatch`, and the report names that
+//!   offset.
 //! - **Content conformance** (exact predictions only, never `~` or `?`): the AGENTS.md message as
 //!   above; each listing entry's line against the line it joined (text compared when the row
 //!   carries its `rendered:` line, else bytes); the listing's total when its entries do not
@@ -597,8 +598,9 @@ fn agents_md(
     }
 
     // Compare, on bytes: `d` = the first differing byte; the span holding it decides whose
-    // mismatch it is. A later file is looked for only inside the observed body (after the
-    // opening framing, before the closing one) and after everything already accounted for.
+    // mismatch it is. A file is placed only inside the observed body (after the opening framing,
+    // before the closing one) — where predicted or, looked for, after everything already
+    // accounted for.
     let pred = text.as_bytes();
     let obs = o.text.as_bytes();
     let equal = pred == obs;
@@ -616,6 +618,11 @@ fn agents_md(
         .ends_with(AGENTS_CLOSE.as_bytes())
         .then(|| obs.len() - AGENTS_CLOSE.len());
     let body = body_start.zip(body_end).filter(|(start, end)| start <= end);
+    // Checked against each boundary that is established, so a closing framing that overlaps the
+    // opening one leaves no room for a file either.
+    let inside_body = |start: usize, end: usize| {
+        body_start.is_none_or(|s| s <= start) && body_end.is_none_or(|e| end <= e)
+    };
     // Where each file's text sits in the observed message, when established.
     let mut placed: Vec<Option<(usize, usize)>> = vec![None; spans.len()];
     let mut unestablished: Vec<usize> = Vec::new();
@@ -626,9 +633,14 @@ fn agents_md(
             continue;
         }
         let part = &pred[span.start..span.end];
-        if equal || span.end <= d {
+        if equal || (span.end <= d && inside_body(span.start, span.end)) {
             placed[k] = Some((span.start, span.end));
             cursor = span.end;
+        } else if span.end <= d {
+            // Its text is where predicted, but its last bytes are the closing framing's: whether
+            // the file or the framing differs cannot be told, so neither is its size.
+            unestablished.push(k);
+            framing_mismatch = true;
         } else if holder == Some(k) && span.start < d {
             // Its first bytes are where predicted: present, but different; its end comes later.
             mismatched = Some(k);

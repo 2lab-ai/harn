@@ -486,9 +486,9 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Runs one command in its own process group; its exit code, or `None` when it was killed at
-/// `timeout`. On the timeout, or when waiting for it fails, the whole group is killed (the MCP
-/// servers `debug prompt-input` starts are in it) before the command is reaped, so the group id
-/// cannot have been reused.
+/// `timeout`. On the timeout, or when waiting for it fails other than with ECHILD
+/// ([`supervise`]), the whole group is killed (the MCP servers `debug prompt-input` starts are in
+/// it) before the command is reaped, so the group id cannot have been reused.
 fn run_step(
     target: &Target,
     codex_bin: &Path,
@@ -524,25 +524,38 @@ fn run_step(
         let _ = child.wait();
     };
     let deadline = std::time::Instant::now() + timeout;
+    supervise(&mut child, |c| c.try_wait(), kill_all, deadline).map_err(|e| {
+        anyhow::Error::from(e).context(format!(
+            "waiting for {} {}",
+            codex_bin.display(),
+            args.join(" ")
+        ))
+    })
+}
+
+/// Polls `try_wait` on `child` until it exits (its exit code) or `deadline` passes (`None`).
+/// `kill` runs on the timeout and when waiting fails — except with ECHILD: the child was reaped
+/// elsewhere, so its pid — the group id — may already name another process; neither is
+/// signalled then.
+fn supervise<C>(
+    child: &mut C,
+    mut try_wait: impl FnMut(&mut C) -> std::io::Result<Option<std::process::ExitStatus>>,
+    mut kill: impl FnMut(&mut C),
+    deadline: std::time::Instant,
+) -> std::io::Result<Option<i32>> {
     loop {
-        match child.try_wait() {
+        match try_wait(child) {
             Ok(Some(status)) => return Ok(status.code()),
             Ok(None) => {}
             Err(e) => {
-                // ECHILD: the child was reaped elsewhere, so its pid — the group id — may
-                // already name another process; neither is signalled then.
                 if !reaped_elsewhere(&e) {
-                    kill_all(&mut child);
+                    kill(child);
                 }
-                return Err(anyhow::Error::from(e).context(format!(
-                    "waiting for {} {}",
-                    codex_bin.display(),
-                    args.join(" ")
-                )));
+                return Err(e);
             }
         }
         if std::time::Instant::now() >= deadline {
-            kill_all(&mut child);
+            kill(child);
             return Ok(None);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1470,12 +1483,24 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_child_reaped_elsewhere_is_not_signalled() {
-        assert!(reaped_elsewhere(&std::io::Error::from_raw_os_error(
-            libc::ECHILD
-        )));
-        assert!(!reaped_elsewhere(&std::io::Error::from_raw_os_error(
-            libc::EINTR
-        )));
+        // `run_step`'s wait loop, with a fake child: `kills` counts the kill action's calls.
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let failing = |errno: i32| move |_: &mut u32| Err(std::io::Error::from_raw_os_error(errno));
+        let kill = |kills: &mut u32| *kills += 1;
+
+        let mut kills = 0u32;
+        let err = supervise(&mut kills, failing(libc::ECHILD), kill, later).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ECHILD));
+        assert_eq!(kills, 0, "a child reaped elsewhere is not signalled");
+
+        let err = supervise(&mut kills, failing(libc::EINTR), kill, later).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EINTR));
+        assert_eq!(kills, 1, "any other wait failure kills the group");
+
+        // Still running at the deadline: killed, no exit code.
+        let mut kills = 0u32;
+        let exit = supervise(&mut kills, |_| Ok(None), kill, std::time::Instant::now()).unwrap();
+        assert_eq!((exit, kills), (None, 1));
     }
 
     #[test]

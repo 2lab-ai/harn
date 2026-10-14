@@ -1384,6 +1384,61 @@ fn rr2_a_file_is_attributed_only_inside_established_body_boundaries() {
 }
 
 #[test]
+fn rr5_a_file_running_into_the_closing_framing_is_not_seen() {
+    // Predicted `…Sub rules.\n` + `\n</INSTRUCTIONS>`; observed `…Sub rules.\n</INSTRUCTIONS>`.
+    // The sub file's text is a prefix of what follows the project files, but its last byte is
+    // the newline of the closing framing, which ends the message: it is not inside the body.
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            1,
+            0,
+            "Sub rules.\n\n</INSTRUCTIONS>",
+            "Sub rules.\n</INSTRUCTIONS>",
+        )
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [message, global, root, sub] = agents(&f);
+    assert!(
+        matches!(
+            verdict(&report, &sub),
+            Some(RowVerdict::NotCheckable { .. })
+        ),
+        "{:?}",
+        verdict(&report, &sub)
+    );
+    assert_eq!(find(&tree, &sub).cost.observed, None);
+    assert_eq!(verdict(&report, &global), Some(&RowVerdict::Seen));
+    assert_eq!(verdict(&report, &root), Some(&RowVerdict::Seen));
+    assert!(
+        matches!(
+            verdict(&report, &message),
+            Some(RowVerdict::ContentMismatch { observed: None, .. })
+        ),
+        "{:?}",
+        verdict(&report, &message)
+    );
+    // The sub file's bytes are not counted as framing either.
+    assert_eq!(find(&tree, &message).cost.observed, None);
+    assert!(!report.passed);
+
+    // The same file in the unedited message, which is identical to the predicted one: seen.
+    let f = fx();
+    let c = capture(&f, |_| {});
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [message, _, _, sub] = agents(&f);
+    assert_eq!(verdict(&report, &sub), Some(&RowVerdict::Seen));
+    assert_eq!(
+        find(&tree, &sub).cost.observed,
+        Some("Sub rules.\n".len() as u64)
+    );
+    assert_eq!(verdict(&report, &message), Some(&RowVerdict::Seen));
+}
+
+#[test]
 fn rr3_a_listing_total_with_its_own_residual_is_reported_beside_entry_differences() {
     let f = fx();
     let c = capture(&f, |items| {
