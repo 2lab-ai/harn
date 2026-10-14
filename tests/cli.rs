@@ -69,6 +69,65 @@ fn edit_prints_the_diff_then_the_journal_line_and_records_the_target() {
 }
 
 #[test]
+fn on_restores_the_file_and_says_so_when_the_hook_still_does_not_run() {
+    let f = fixture();
+    let local = f.project.join(".claude/settings.local.json");
+    let local_before = std::fs::read(&local).unwrap();
+    // `harn off` on a hook (every hook, by Claude Code's one switch); its journaled item id.
+    let off = |f: &Fixture| -> String {
+        let out = harn(
+            f,
+            &[],
+            &[
+                "off",
+                "PreToolUse hook [Bash] · 1 cmd · ~/.claude/settings.json",
+                "--agent",
+                "claude-code",
+            ],
+        );
+        assert!(out.status.success(), "{out:?}");
+        let history = harn(f, &[], &["--json", "history"]);
+        let entries: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+        entries[0]["ops"][0]["item_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let id = off(&f);
+    let stays = format!(
+        "{id}: file restored, but it stays off: your settings turn every hook off \
+         (disableAllHooks)"
+    );
+    // Nothing else keeps it off: the journal line alone.
+    let on = harn(&f, &[], &["--agent", "claude-code", "on", &id]);
+    assert!(on.status.success(), "{on:?}");
+    assert_eq!(std::fs::read(&local).unwrap(), local_before);
+    assert!(!stdout(&on).contains("stays off"), "{}", stdout(&on));
+
+    // Since the next `off`, every hook was turned off by hand, in the repository's settings.
+    let id = off(&f);
+    let project = f.project.join(".claude/settings.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+    json["disableAllHooks"] = serde_json::json!(true);
+    std::fs::write(&project, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    // `on` undoes harn's own write, and does not claim the hook runs again.
+    let on = harn(&f, &[], &["--agent", "claude-code", "on", &id]);
+    assert!(on.status.success(), "{on:?}");
+    assert_eq!(std::fs::read(&local).unwrap(), local_before);
+    let text = stdout(&on);
+    assert_eq!(text.lines().last().unwrap(), stays, "{text}");
+
+    // `--json`: stdout stays one JSON value; the line goes to stderr.
+    let id = off(&f);
+    let on = harn(&f, &[], &["--agent", "claude-code", "--json", "on", &id]);
+    assert!(on.status.success(), "{on:?}");
+    let entries: serde_json::Value = serde_json::from_slice(&on.stdout).expect("one JSON value");
+    assert_eq!(entries[0]["ops"][0]["item_id"], serde_json::json!(id));
+    assert_eq!(String::from_utf8_lossy(&on.stderr).trim_end(), stays);
+}
+
+#[test]
 fn off_dry_run_on_a_hook_names_every_hook_and_the_status_line_that_leave() {
     let f = fixture();
     let out = harn(

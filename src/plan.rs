@@ -492,6 +492,50 @@ fn choose_knob(item: &Item, scope: Option<Scope>) -> anyhow::Result<&Knob> {
     .into())
 }
 
+/// `harn on` for an item no live journal entry turned off: a hook a managed policy keeps off
+/// (signal `OFF_MANAGED_HOOKS_ONLY`) is refused with its `Knob::None` reason — no setting harn
+/// writes overrides that policy. None for anything else: not found stays not found.
+pub fn on_refusal(item: &Item) -> Option<Refused> {
+    if item.signal.as_deref() != Some(crate::resolve::claude::OFF_MANAGED_HOOKS_ONLY) {
+        return None;
+    }
+    let reason = item
+        .knobs
+        .iter()
+        .find_map(|k| match k {
+            Knob::None { reason } => Some(reason.as_str()),
+            _ => None,
+        })
+        .unwrap_or("no knob");
+    Some(Refused(format!("{}: {reason}", item.id)))
+}
+
+/// After harn restored the files of a change (`harn on`, `o`, `u`): which of `ids` the
+/// re-resolved `tree` still lists as switched off (mode none, an `off:` signal) — a managed
+/// policy that arrived since, or another layer's switch, keeps them off. The restore stands; a
+/// claim that they run again would not.
+pub fn still_off<'t>(tree: &'t Tree, ids: &[&str]) -> Vec<&'t Item> {
+    model::walk(tree)
+        .filter(|item| ids.contains(&item.id.as_str()) && switched_off(item))
+        .collect()
+}
+
+/// Why an item [`still_off`] lists does not run, to follow "stays off": ` by policy: your
+/// organisation allows only its own hooks (allowManagedHooksOnly)`, `: your settings turn every
+/// hook off (disableAllHooks)`, else its signal in parentheses.
+pub fn stays_off_why(item: &Item) -> String {
+    use crate::resolve::claude::{OFF_ALL_HOOKS, OFF_MANAGED_HOOKS_ONLY};
+    match item.signal.as_deref() {
+        Some(OFF_MANAGED_HOOKS_ONLY) => {
+            " by policy: your organisation allows only its own hooks (allowManagedHooksOnly)"
+                .to_string()
+        }
+        Some(OFF_ALL_HOOKS) => ": your settings turn every hook off (disableAllHooks)".to_string(),
+        Some(signal) => format!(" ({signal})"),
+        None => String::new(),
+    }
+}
+
 struct Pick<'a> {
     item: &'a Item,
     knob: &'a Knob,

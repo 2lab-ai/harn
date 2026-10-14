@@ -100,7 +100,22 @@ Rules that produce it:
 - **An unknown size reads `unmeasured`**, never a bare `?`; the notes card says how to measure.
 - **Counting.** "N items load before your first message" counts items that are always loaded or
   advertised (312 on zbrain); runtime / not-loaded items (33) are listed in their groups with the
-  words `runs later` / `not loaded` / `when used` instead of a size.
+  words `runs later` / `not loaded` / `when used` instead of a size. A hook that is off but still
+  listed says why instead: `off, with every other hook` (`disableAllHooks`) or `off by policy`.
+  `off by policy` is a managed `allowManagedHooksOnly`, under which only managed hooks and the
+  hooks of a plugin managed settings force-enable (its full `name@marketplace` id) run, and the
+  status line is read from managed settings only
+  ([settings-reference](https://code.claude.com/docs/en/settings-reference), "What runs under
+  allowManagedHooksOnly"). Such a row has no `d` or `o`, since no setting of the user's overrides
+  that policy; its detail says the organisation allows only its own hooks, a group whose every
+  row is off by policy says `off by policy` too, and its plugin's detail does not count it among
+  what the plugin brings ("Its hook is off by policy."). The status line has no row here; it is
+  off by policy the same way in the table and `harn why`. When `o` or `u` restores a change of
+  harn's and what it turned off still does not run (a policy arrived since), the message says the
+  file is restored and what stays off ("3 hooks stay off by policy"), never "back on"; `harn on`
+  adds the same as a line after the journal line. "Back on" is said only once the refreshed tree
+  shows it runs: when that check cannot run (the refresh fails), the message says the file is
+  restored and that whether it runs could not be checked.
 - **Agent listing** is a group of its own (31 entries, 15 KB on zbrain); the catch-all `Other`
   exists but is empty on known trees; status-line and permission rules are never shown (they are
   never in the request).

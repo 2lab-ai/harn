@@ -9,7 +9,15 @@
 //! `disableAllHooks` turned off stays a row: mode none, its `signal` naming the setting
 //! (`off: disableAllHooks`), a `why` step saying where it is set (`<file>#/disableAllHooks =
 //! true`), its knobs as when on — a reader sees what went off and why, and `o`/undo
-//! still find it. A hook only `allowManagedHooksOnly` drops is left out, as before.
+//! still find it. Under `allowManagedHooksOnly` (settings-reference, "What runs under
+//! allowManagedHooksOnly": https://code.claude.com/docs/en/settings-reference) managed hooks run,
+//! and so do the hooks of a plugin managed settings force-enable (`enabledPlugins["<name>@<m>"]
+//! = true`, the full id: the same name from another marketplace stays blocked); every other hook
+//! stays a row the same way (`off: allowManagedHooksOnly (managed policy)`,
+//! `<file>#/allowManagedHooksOnly = true`), with no knob: no setting outside the managed ones
+//! overrides that policy. The status line, read from managed settings only under it, is off the
+//! same way when set elsewhere (`builtins.rs`). Under both switches, a row says
+//! `disableAllHooks` only.
 
 use super::fs::esc;
 use super::plugins::Plugin;
@@ -21,6 +29,34 @@ use std::path::Path;
 
 /// The `signal` of a hook (and of the status line) `disableAllHooks` turned off.
 pub const OFF_ALL_HOOKS: &str = "off: disableAllHooks";
+
+/// The `signal` of a hook (and of the status line) a managed `allowManagedHooksOnly` turned off
+/// (and `disableAllHooks` did not).
+pub const OFF_MANAGED_HOOKS_ONLY: &str = "off: allowManagedHooksOnly (managed policy)";
+
+/// The `Knob::None` reason of such a hook: what `harn off` / `harn on` refuse with.
+const MANAGED_HOOKS_ONLY: &str =
+    "managed policy allowManagedHooksOnly allows only managed hooks; no user setting overrides it";
+
+/// `<file>#/allowManagedHooksOnly = true` of the managed settings file that sets it, if any.
+pub(crate) fn managed_hooks_only(ctx: &Ctx) -> Option<String> {
+    ctx.settings
+        .files
+        .iter()
+        .find(|f| {
+            f.source == Source::Managed
+                && f.value.get("allowManagedHooksOnly") == Some(&json!(true))
+        })
+        .map(|f| format!("{} = true", f.at("/allowManagedHooksOnly")))
+}
+
+/// Managed settings force-enable the plugin `id` (`name@marketplace`, matched whole).
+fn force_enabled(ctx: &Ctx, id: &str) -> bool {
+    ctx.settings.files.iter().any(|f| {
+        f.source == Source::Managed
+            && f.value.get("enabledPlugins").and_then(|e| e.get(id)) == Some(&json!(true))
+    })
+}
 
 const INJECTING: &[&str] = &[
     "SessionStart",
@@ -114,18 +150,20 @@ fn push_groups(
 pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
     let mut out = Vec::new();
     let disable_all = ctx.settings.get_bool("/disableAllHooks");
-    let managed_only = ctx.settings.files.iter().any(|f| {
-        f.source == Source::Managed && f.value.get("allowManagedHooksOnly") == Some(&json!(true))
-    });
     let all_off = matches!(disable_all, Some((true, f)) if f.source == Source::Managed);
-    let non_managed_off = all_off || matches!(disable_all, Some((true, _))) || managed_only;
-    // Off by the switch: still listed. Off only by `allowManagedHooksOnly`: dropped, as before
-    // — no view has words for "your organisation allows only its own hooks" yet.
     let set_at = disable_all.map(|(_, f)| format!("{} = true", f.at("/disableAllHooks")));
     let switch_off = match (disable_all, &set_at) {
         (Some((true, _)), Some(at)) => Some((OFF_ALL_HOOKS, at.as_str())),
         _ => None,
     };
+    let policy_at = managed_hooks_only(ctx);
+    let policy_off = policy_at.as_deref().map(|at| (OFF_MANAGED_HOOKS_ONLY, at));
+    // Off by either: still listed. Both: the switch's signal alone.
+    let non_managed_off = switch_off.or(policy_off);
+    let by_policy = matches!(non_managed_off, Some((OFF_MANAGED_HOOKS_ONLY, _)));
+    let policy_knobs = vec![Knob::None {
+        reason: MANAGED_HOOKS_ONLY.to_string(),
+    }];
     let disable_knob = setting_knob(
         ctx,
         Scope::Local,
@@ -138,18 +176,17 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
             continue;
         };
         let managed = file.source == Source::Managed;
-        let off = if all_off || (!managed && non_managed_off) {
-            match switch_off {
-                Some(signal) => Some(signal),
-                None => continue,
-            }
-        } else {
-            None
+        let off = match (managed, all_off) {
+            (true, true) => switch_off,
+            (true, false) => None,
+            (false, _) => non_managed_off,
         };
         let knobs = if managed {
             vec![Knob::None {
                 reason: "managed hook".to_string(),
             }]
+        } else if by_policy {
+            policy_knobs.clone()
         } else {
             vec![disable_knob.clone()]
         };
@@ -165,14 +202,19 @@ pub(crate) fn collect(ctx: &Ctx, plugins: &[Plugin]) -> Vec<Item> {
             off,
         );
     }
-    let off = match (non_managed_off, switch_off) {
-        (false, _) => None,
-        (true, Some(signal)) => Some(signal),
-        (true, None) => return out,
-    };
     for p in plugins {
+        // Force-enabled by managed settings: the policy lets its hooks run.
+        let (off, by_policy) = if by_policy && force_enabled(ctx, &p.id) {
+            (None, false)
+        } else {
+            (non_managed_off, by_policy)
+        };
         for (file, prefix, events) in p.hook_sources(ctx) {
-            let knobs = vec![p.contribution_knob(), disable_knob.clone()];
+            let knobs = if by_policy {
+                policy_knobs.clone()
+            } else {
+                vec![p.contribution_knob(), disable_knob.clone()]
+            };
             push_groups(
                 ctx,
                 &mut out,

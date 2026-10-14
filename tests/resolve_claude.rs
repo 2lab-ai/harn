@@ -6,7 +6,7 @@ mod common;
 use common::{fixture, slug, target, Fixture};
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
 use harn::plan;
-use harn::resolve::claude::OFF_ALL_HOOKS;
+use harn::resolve::claude::{OFF_ALL_HOOKS, OFF_MANAGED_HOOKS_ONLY};
 use harn::resolve::{ClaudeCode, Resolver};
 use std::path::{Path, PathBuf};
 
@@ -397,6 +397,325 @@ fn every_hook_and_the_status_line_stay_with_mode_none_once_all_hooks_are_off() {
         "SessionStart and the plugin's UserPromptSubmit"
     );
     assert_eq!(before.predicted_known, after.predicted_known);
+}
+
+/// Managed settings Claude Code reads on every OS; absent on a test machine, so an overlay patch
+/// reads as `{}` plus the patch.
+const MANAGED_SETTINGS: &str = "/Library/Application Support/ClaudeCode/managed-settings.json";
+
+/// `allowManagedHooksOnly = true` in managed settings, and `disableAllHooks = true` in the
+/// project's local settings when `all_hooks_off`.
+fn managed_hooks_only(f: &Fixture, all_hooks_off: bool) -> Overlay {
+    let mut ops = vec![OverlayOp::SetJson {
+        file: PathBuf::from(MANAGED_SETTINGS),
+        pointer: "/allowManagedHooksOnly".to_string(),
+        value: serde_json::json!(true),
+    }];
+    if all_hooks_off {
+        ops.push(OverlayOp::SetJson {
+            file: local_settings(f),
+            pointer: "/disableAllHooks".to_string(),
+            value: serde_json::json!(true),
+        });
+    }
+    Overlay { ops }
+}
+
+fn hook_ids(t: &Tree) -> Vec<String> {
+    let mut ids: Vec<String> = of_kind(t, Kind::Hook)
+        .into_iter()
+        .map(|i| i.id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn hooks_a_managed_policy_turns_off_stay_with_mode_none_and_no_knob() {
+    let f = fixture();
+    let before = resolve(&f, None);
+    let after = resolve(&f, Some(&managed_hooks_only(&f, false)));
+    // The same hooks (settings and plugin ones), each off by the policy and saying where it is
+    // set; none is in the request, and no knob of the user's can turn it back on.
+    assert_eq!(hook_ids(&after), hook_ids(&before));
+    assert_eq!(
+        hook_ids(&after).len(),
+        3,
+        "2 in settings + the alpha plugin's"
+    );
+    for hook in of_kind(&after, Kind::Hook) {
+        assert_eq!(hook.mode, Mode::None, "{}", hook.id);
+        assert!(hook.cost.not_applicable, "{}", hook.id);
+        assert_eq!(
+            hook.signal.as_deref(),
+            Some(OFF_MANAGED_HOOKS_ONLY),
+            "{}",
+            hook.id
+        );
+        let set_at = hook.origin.why.last().unwrap();
+        assert!(
+            set_at.ends_with("managed-settings.json#/allowManagedHooksOnly = true"),
+            "{}: {set_at}",
+            hook.id
+        );
+        assert!(!hook.knobs.is_empty(), "{}", hook.id);
+        for knob in &hook.knobs {
+            let Knob::None { reason } = knob else {
+                panic!("{}: a knob past a managed policy: {knob:?}", hook.id);
+            };
+            assert!(reason.contains("allowManagedHooksOnly"), "{reason}");
+        }
+    }
+    // The status line, set in the user's settings: Claude Code reads it from managed settings
+    // only under the policy, so it is off the same way.
+    let status = of_kind(&after, Kind::StatusLine);
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].mode, Mode::None);
+    assert_eq!(status[0].signal.as_deref(), Some(OFF_MANAGED_HOOKS_ONLY));
+    assert!(status[0]
+        .origin
+        .why
+        .last()
+        .unwrap()
+        .ends_with("managed-settings.json#/allowManagedHooksOnly = true"));
+    assert!(
+        matches!(&status[0].knobs[..], [Knob::None { reason }] if reason.contains("allowManagedHooksOnly")),
+        "{:?}",
+        status[0].knobs
+    );
+    assert_eq!(
+        before.unknown_rows - after.unknown_rows,
+        2,
+        "SessionStart and the plugin's UserPromptSubmit"
+    );
+}
+
+#[test]
+fn under_both_hook_switches_a_hook_is_one_row_saying_disable_all_hooks() {
+    let f = fixture();
+    let before = resolve(&f, None);
+    let after = resolve(&f, Some(&managed_hooks_only(&f, true)));
+    // One row per hook, never two; the switch the user can reverse is the one it names.
+    assert_eq!(hook_ids(&after), hook_ids(&before));
+    for hook in of_kind(&after, Kind::Hook) {
+        assert_eq!(hook.mode, Mode::None, "{}", hook.id);
+        assert_eq!(hook.signal.as_deref(), Some(OFF_ALL_HOOKS), "{}", hook.id);
+        assert!(
+            hook.origin
+                .why
+                .iter()
+                .all(|step| !step.contains("allowManagedHooksOnly")),
+            "{}: {:?}",
+            hook.id,
+            hook.origin.why
+        );
+        assert!(
+            hook.knobs.iter().any(
+                |k| matches!(k, Knob::Setting { pointer, .. } if pointer == "/disableAllHooks")
+            ),
+            "{}",
+            hook.id
+        );
+    }
+    let status = of_kind(&after, Kind::StatusLine);
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].signal.as_deref(), Some(OFF_ALL_HOOKS));
+    assert!(status[0]
+        .origin
+        .why
+        .iter()
+        .all(|step| !step.contains("allowManagedHooksOnly")));
+}
+
+/// The alpha plugin's one hook.
+fn alpha_hook(t: &Tree) -> &Item {
+    of_kind(t, Kind::Hook)
+        .into_iter()
+        .find(|h| h.origin.plugin.as_deref() == Some("alpha@market-one"))
+        .expect("alpha's hook")
+}
+
+#[test]
+fn hooks_of_a_plugin_managed_settings_force_enable_run_under_the_policy() {
+    let f = fixture();
+    let before = resolve(&f, None);
+    let force = |id: &str| {
+        let mut overlay = managed_hooks_only(&f, false);
+        overlay.ops.push(OverlayOp::SetJson {
+            file: PathBuf::from(MANAGED_SETTINGS),
+            pointer: "/enabledPlugins".to_string(),
+            value: serde_json::json!({ id: true }),
+        });
+        resolve(&f, Some(&overlay))
+    };
+    // Its full id: the hook runs as without the policy, with the plugin's own knobs.
+    let forced = force("alpha@market-one");
+    let hook = alpha_hook(&forced);
+    assert_eq!(hook.mode, alpha_hook(&before).mode);
+    assert_eq!(
+        hook.mode,
+        Mode::Always,
+        "UserPromptSubmit prints into the request"
+    );
+    assert_eq!(hook.signal, None);
+    assert!(
+        hook.knobs
+            .iter()
+            .any(|k| matches!(k, Knob::Setting { pointer, .. } if pointer == "/disableAllHooks")),
+        "{:?}",
+        hook.knobs
+    );
+    // The hooks in settings stay off by the policy.
+    for other in of_kind(&forced, Kind::Hook)
+        .into_iter()
+        .filter(|h| h.origin.plugin.is_none())
+    {
+        assert_eq!(other.signal.as_deref(), Some(OFF_MANAGED_HOOKS_ONLY));
+    }
+    // The same name from another marketplace: still blocked.
+    let other_market = force("alpha@market-two");
+    let hook = alpha_hook(&other_market);
+    assert_eq!(hook.mode, Mode::None);
+    assert_eq!(hook.signal.as_deref(), Some(OFF_MANAGED_HOOKS_ONLY));
+}
+
+#[test]
+fn a_status_line_in_managed_settings_runs_under_the_policy() {
+    let f = fixture();
+    let mut overlay = managed_hooks_only(&f, false);
+    overlay.ops.push(OverlayOp::SetJson {
+        file: PathBuf::from(MANAGED_SETTINGS),
+        pointer: "/statusLine".to_string(),
+        value: serde_json::json!({"type": "command", "command": "true"}),
+    });
+    let t = resolve(&f, Some(&overlay));
+    let status = of_kind(&t, Kind::StatusLine);
+    assert_eq!(status.len(), 1, "the managed one wins; one row");
+    assert_eq!(status[0].origin.layer, Layer::Managed);
+    assert_eq!(status[0].signal, None);
+    assert!(
+        matches!(&status[0].knobs[..], [Knob::None { reason }] if reason == "not in the request"),
+        "{:?}",
+        status[0].knobs
+    );
+}
+
+#[test]
+fn off_and_on_refuse_a_hook_a_managed_policy_turned_off() {
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, Some(&managed_hooks_only(&f, false)));
+    assert_eq!(
+        of_kind(&tree, Kind::Hook).len(),
+        3,
+        "listed, off by the policy"
+    );
+    for hook in of_kind(&tree, Kind::Hook) {
+        // `harn off`, in every scope, and `harn apply`: refused, naming the policy.
+        for scope in [
+            None,
+            Some(Scope::Local),
+            Some(Scope::Project),
+            Some(Scope::User),
+        ] {
+            let err = plan::build_plan(&ClaudeCode, &t, &tree, &hook.id, scope).unwrap_err();
+            let refused = err
+                .downcast_ref::<model::Refused>()
+                .unwrap_or_else(|| panic!("{}: not refused: {err:#}", hook.id));
+            assert!(
+                refused.0.contains("managed policy allowManagedHooksOnly"),
+                "{refused}"
+            );
+        }
+        let req = plan::PlanRequest {
+            schema: plan::PLAN_SCHEMA.to_string(),
+            target_dir: f.project.clone(),
+            ops: vec![plan::PlanOp {
+                selector: hook.id.clone(),
+                scope: None,
+                knob: None,
+                reason: "test".to_string(),
+            }],
+        };
+        let err = plan::build_plan_from_request(&ClaudeCode, &t, &tree, &req).unwrap_err();
+        assert!(err.downcast_ref::<model::Refused>().is_some(), "{err:#}");
+        // `harn on`: nothing harn wrote turned it off, and nothing it writes turns it on.
+        let refused = plan::on_refusal(hook).expect("on refused");
+        assert_eq!(
+            refused.0,
+            format!(
+                "{}: managed policy allowManagedHooksOnly allows only managed hooks; no user \
+                 setting overrides it",
+                hook.id
+            )
+        );
+    }
+    // The status line the policy turned off: the same.
+    let status = of_kind(&tree, Kind::StatusLine)[0];
+    let err = plan::build_plan(&ClaudeCode, &t, &tree, &status.id, None).unwrap_err();
+    let refused = err.downcast_ref::<model::Refused>().expect("refused");
+    assert!(
+        refused.0.contains("managed policy allowManagedHooksOnly"),
+        "{refused}"
+    );
+    let refused = plan::on_refusal(status).expect("on refused");
+    assert!(
+        refused.0.contains("managed policy allowManagedHooksOnly"),
+        "{refused}"
+    );
+    // Only that signal: a hook on, or off by the user's own `disableAllHooks`, is not refused
+    // here (`harn on` says not found, as before).
+    let on = resolve(&f, None);
+    let all_off = resolve(&f, Some(&managed_hooks_only(&f, true)));
+    for tree in [&on, &all_off] {
+        for hook in of_kind(tree, Kind::Hook) {
+            assert_eq!(plan::on_refusal(hook), None, "{}", hook.id);
+        }
+    }
+}
+
+#[test]
+fn on_restores_harns_change_but_a_hook_a_policy_keeps_off_is_said_to_stay_off() {
+    let f = fixture();
+    let t = target(&f);
+    let mut journal = harn::journal::Journal {
+        dir: f.root.join("state"),
+    };
+    let tree = resolve(&f, None);
+    let hook = of_kind(&tree, Kind::Hook)
+        .into_iter()
+        .find(|h| h.label.starts_with("SessionStart hook"))
+        .unwrap()
+        .id
+        .clone();
+    let local_before = std::fs::read(local_settings(&f)).unwrap();
+    // harn turns every hook off; a managed policy arrives after.
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &hook, None).unwrap();
+    harn::writers::apply(&plan, &mut journal).unwrap();
+    // `harn on` is the undo of harn's own write: the file comes back byte for byte.
+    let entry = harn::journal::on(&mut journal, &t, &hook).unwrap();
+    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
+    let ids: Vec<&str> = entry.ops.iter().map(|op| op.item_id.as_str()).collect();
+    assert_eq!(ids, [hook.as_str()]);
+    // Re-resolved under the policy, the hook still does not run, and it is said so.
+    let after = resolve(&f, Some(&managed_hooks_only(&f, false)));
+    let off = plan::still_off(&after, &ids);
+    assert_eq!(off.len(), 1);
+    assert_eq!(off[0].signal.as_deref(), Some(OFF_MANAGED_HOOKS_ONLY));
+    assert_eq!(
+        plan::stays_off_why(off[0]),
+        " by policy: your organisation allows only its own hooks (allowManagedHooksOnly)"
+    );
+    // Under the user's own `disableAllHooks`, set again by hand: also off, said by that
+    // switch.
+    let all_off = resolve(&f, Some(&managed_hooks_only(&f, true)));
+    let off = plan::still_off(&all_off, &ids);
+    assert_eq!(
+        plan::stays_off_why(off[0]),
+        ": your settings turn every hook off (disableAllHooks)"
+    );
+    // Without either: it runs again, nothing more to say.
+    assert!(plan::still_off(&resolve(&f, None), &ids).is_empty());
 }
 
 /// The side effects naming `label` (one line per item that leaves).

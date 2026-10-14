@@ -473,8 +473,21 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Some(Cmd::On { selector }) => {
             let target = target(cli, None)?;
             let mut journal = open_journal()?;
-            let entry = journal::on(&mut journal, &target, selector)?;
+            let entry = match journal::on(&mut journal, &target, selector) {
+                Ok(entry) => entry,
+                // Not harn's change: a hook a managed policy keeps off is refused by name.
+                Err(err) if matches!(err.downcast_ref(), Some(SelectError::NotFound(_))) => {
+                    let refused = resolve_trees(cli, &target).ok().and_then(|trees| {
+                        pick(&trees, selector)
+                            .ok()
+                            .and_then(|(_, item)| plan::on_refusal(item))
+                    });
+                    return Err(refused.map_or(err, Into::into));
+                }
+                Err(err) => return Err(err),
+            };
             print_entries(cli, std::slice::from_ref(&entry))?;
+            print_still_off(cli, std::slice::from_ref(&entry));
         }
         Some(Cmd::Edit { selector }) => {
             let target = target(cli, None)?;
@@ -740,6 +753,56 @@ fn open_journal() -> Result<Journal> {
     Journal::open()
 }
 
+/// After a restore, what [`after_restore`] says for each entry, from the re-resolve of the
+/// entry's own agent. Its stdout lines go to stderr under `--json`, so stdout stays one JSON
+/// value.
+fn print_still_off(cli: &Cli, entries: &[journal::JournalEntry]) {
+    for entry in entries {
+        let ids: Vec<&str> = entry.ops.iter().map(|op| op.item_id.as_str()).collect();
+        let agent = entry.context.agent;
+        let tree = target_for(&entry.context.cwd).and_then(|target| {
+            resolve::for_agent(agent)
+                .resolve(&target, None)
+                .with_context(|| agent.to_string())
+        });
+        for (line, stderr) in after_restore(&ids, tree) {
+            if stderr || cli.json {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+    }
+}
+
+/// What `harn on` adds after the journal line for the restored `ids`, given their agent's
+/// re-resolved tree: a line per item that still does not run (a managed policy that arrived
+/// since, or another layer's switch) — the files are back, the item is not; or, the re-resolve
+/// failed, one line saying the restore stands and whether it runs is unchecked. `true` = that
+/// line goes to stderr always.
+fn after_restore(ids: &[&str], tree: Result<model::Tree>) -> Vec<(String, bool)> {
+    match tree {
+        Err(err) => vec![(
+            format!(
+                "{}: file restored; whether it runs could not be checked: {err:#}",
+                ids.join(", ")
+            ),
+            true,
+        )],
+        Ok(tree) => plan::still_off(&tree, ids)
+            .into_iter()
+            .map(|item| {
+                let line = format!(
+                    "{}: file restored, but it stays off{}",
+                    item.id,
+                    plan::stays_off_why(item)
+                );
+                (line, false)
+            })
+            .collect(),
+    }
+}
+
 fn print_entries(cli: &Cli, entries: &[journal::JournalEntry]) -> Result<()> {
     if cli.json {
         print_json(&entries)
@@ -834,6 +897,26 @@ mod tests {
     #[test]
     fn clap_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn a_re_resolve_that_fails_after_a_restore_says_so_on_stderr() {
+        // No file makes the Claude Code resolver fail (it warns instead): the decision alone.
+        let failed = || Err(anyhow!("settings unreadable").context("claude-code"));
+        assert_eq!(
+            after_restore(&["claude-code/hook/user/a"], failed()),
+            [(
+                "claude-code/hook/user/a: file restored; whether it runs could not be checked: \
+                 claude-code: settings unreadable"
+                    .to_string(),
+                true
+            )]
+        );
+        let lines = after_restore(&["claude-code/a", "claude-code/b"], failed());
+        assert_eq!(lines.len(), 1, "one line per entry, not per op");
+        assert!(lines[0]
+            .0
+            .starts_with("claude-code/a, claude-code/b: file restored; "));
     }
 
     #[test]
