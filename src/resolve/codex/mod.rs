@@ -569,9 +569,28 @@ pub(crate) fn resolve_with(
         codex: None,
     };
     if !fs.is_dir(&codex_home) {
+        // A set `CODEX_HOME` must exist and be a directory, classified as codex does
+        // (`utils/home-dir/src/lib.rs:26-41`): its metadata first (missing, or unreadable), then
+        // anything that is not a directory (a file, a FIFO, a socket).
         let why = match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
-            Some(_) => "CODEX_HOME points to a missing directory; codex refuses to start (utils/home-dir/src/lib.rs:26-35)",
-            None => "codex has not run with this home (a first run creates it)",
+            Some(v) => {
+                let relative = if Path::new(v).is_relative() {
+                    " (relative: codex takes it from the folder it runs in, the target dir)"
+                } else {
+                    ""
+                };
+                let (what, at) = match fs.metadata(&codex_home) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        ("does not exist".to_string(), "26-35")
+                    }
+                    Err(e) => (format!("cannot be read ({e})"), "26-35"),
+                    Ok(_) => ("is not a directory".to_string(), "37-41"),
+                };
+                format!(
+                    "CODEX_HOME {v:?}{relative} {what}; codex refuses to start (utils/home-dir/src/lib.rs:{at})"
+                )
+            }
+            None => "codex has not run with this home (a first run creates it)".to_string(),
         };
         tree.warnings.push(format!(
             "no codex home at {}: {why}; nothing to list",
@@ -681,11 +700,15 @@ pub(crate) fn resolve_with(
     Ok(tree)
 }
 
-/// `CODEX_HOME` when set and non-empty, else `~/.codex` (`utils/home-dir/src/lib.rs:13-17`).
+/// `CODEX_HOME` when set and non-empty, else `~/.codex` (`utils/home-dir/src/lib.rs:13-62`).
+/// Codex reads a set value in its own process, whose cwd is the folder it runs in (`target.dir`;
+/// harn's oracle runs it there): a relative value is taken from `target.dir`, never from harn's
+/// own cwd; an absolute one is used as given. Canonicalised as codex does (`:43-48`); when that
+/// fails the path stays as joined (codex refuses it, and [`resolve`] warns).
 pub fn codex_home(target: &Target) -> PathBuf {
     match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
         Some(v) => {
-            let path = PathBuf::from(v);
+            let path = target.dir.join(v);
             std::fs::canonicalize(&path).unwrap_or(path)
         }
         None => target.home.join(".codex"),

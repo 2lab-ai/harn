@@ -62,6 +62,14 @@ impl Fs {
         !self.is_removed(path) && path.is_dir()
     }
 
+    /// `std::fs::metadata` (symlinks followed); `NotFound` for an overlay-removed path.
+    pub fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        if self.is_removed(path) {
+            return Err(std::io::ErrorKind::NotFound.into());
+        }
+        std::fs::metadata(path)
+    }
+
     pub fn read(&self, path: &Path) -> Option<Vec<u8>> {
         if self.is_removed(path) {
             return None;

@@ -1676,6 +1676,178 @@ fn codex_home_env_overrides_the_default() {
 }
 
 #[test]
+fn a_relative_codex_home_is_taken_from_the_target_dir() {
+    // Codex resolves a relative CODEX_HOME against the folder it runs in, the target dir
+    // (`utils/home-dir/src/lib.rs:20-49`), wherever harn itself runs from.
+    let f = fx();
+    assert_ne!(std::env::current_dir().unwrap(), f.repo);
+    let home = f.repo.join("codex-rel");
+    write(
+        &home.join("config.toml"),
+        "include_environment_context = false\n",
+    );
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "codex-rel".to_string());
+    let tree = resolve(&t, None);
+    assert_eq!(tree.codex.as_ref().expect("facts").home, home);
+    assert!(!tree.items.is_empty(), "{:?}", tree.warnings);
+    assert!(find(&tree, "/environment_context").is_none());
+    // Its knobs write that home's config.
+    let perms = row(&tree, "/permissions_instructions");
+    assert_eq!(setting(&perms.knobs[0]).0, home.join("config.toml"));
+
+    // `.codex` is the target's own `.codex`: the user layer, never also a project layer.
+    write(&f.repo.join(".codex/config.toml"), "");
+    t.env.insert("CODEX_HOME".to_string(), ".codex".to_string());
+    let tree = resolve(&t, None);
+    assert_eq!(
+        tree.codex.as_ref().expect("facts").home,
+        f.repo.join(".codex")
+    );
+    let env = row(&tree, "/environment_context");
+    assert_eq!(env.knobs.len(), 1);
+    assert_eq!(setting(&env.knobs[0]).0, f.repo.join(".codex/config.toml"));
+    assert_eq!(setting(&env.knobs[0]).3, Scope::User);
+}
+
+#[test]
+fn an_absolute_codex_home_is_used_as_given() {
+    let f = fx();
+    let other = f.root.join("alt-codex");
+    write(&other.join("config.toml"), "");
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), other.display().to_string());
+    let tree = resolve(&t, None);
+    assert_eq!(tree.codex.as_ref().expect("facts").home, other);
+    assert!(!tree.items.is_empty(), "{:?}", tree.warnings);
+
+    // A missing one is named as given, not joined to the target dir.
+    let missing = f.root.join("missing-abs");
+    t.env
+        .insert("CODEX_HOME".to_string(), missing.display().to_string());
+    let tree = resolve(&t, None);
+    assert!(tree.items.is_empty());
+    assert_eq!(tree.codex.as_ref().expect("facts").home, missing);
+    let prefix = format!("no codex home at {}: ", missing.display());
+    assert!(
+        tree.warnings.iter().any(|w| w.starts_with(&prefix)),
+        "{:?}",
+        tree.warnings
+    );
+}
+
+#[test]
+fn a_relative_codex_home_codex_would_refuse_is_named_where_codex_looks() {
+    let f = fx();
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "missing-rel".to_string());
+    let tree = resolve(&t, None);
+    assert!(tree.items.is_empty());
+    let missing = f.repo.join("missing-rel");
+    assert_eq!(tree.codex.as_ref().expect("facts").home, missing);
+    assert_eq!(
+        tree.warnings,
+        vec![format!(
+            "no codex home at {}: CODEX_HOME \"missing-rel\" (relative: codex takes it from the folder it runs in, the target dir) does not exist; codex refuses to start (utils/home-dir/src/lib.rs:26-35); nothing to list",
+            missing.display()
+        )]
+    );
+
+    // A file, not a directory: codex refuses it too.
+    write(&f.repo.join("not-a-dir"), "");
+    t.env
+        .insert("CODEX_HOME".to_string(), "not-a-dir".to_string());
+    let tree = resolve(&t, None);
+    assert!(tree.items.is_empty());
+    assert_eq!(
+        tree.warnings,
+        vec![format!(
+            "no codex home at {}: CODEX_HOME \"not-a-dir\" (relative: codex takes it from the folder it runs in, the target dir) is not a directory; codex refuses to start (utils/home-dir/src/lib.rs:37-41); nothing to list",
+            f.repo.join("not-a-dir").display()
+        )]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_codex_home_that_is_a_fifo_is_not_a_directory() {
+    // Codex reads the metadata first: an existing FIFO is "not a directory"
+    // (`utils/home-dir/src/lib.rs:37-41`), never "does not exist".
+    use std::os::unix::ffi::OsStrExt;
+    let f = fx();
+    let fifo = f.repo.join("codex-fifo");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+    let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "codex-fifo".to_string());
+    let tree = resolve(&t, None);
+    assert!(tree.items.is_empty());
+    assert_eq!(
+        tree.warnings,
+        vec![format!(
+            "no codex home at {}: CODEX_HOME \"codex-fifo\" (relative: codex takes it from the folder it runs in, the target dir) is not a directory; codex refuses to start (utils/home-dir/src/lib.rs:37-41); nothing to list",
+            fifo.display()
+        )]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_codex_home_whose_metadata_cannot_be_read_says_so() {
+    // Neither missing nor a file: codex fails to read it (`utils/home-dir/src/lib.rs:31-34`).
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through a mode-000 folder");
+        return;
+    }
+    let f = fx();
+    let locked = f.repo.join("locked");
+    std::fs::create_dir_all(locked.join("home")).unwrap();
+    let mode = |m: u32| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(m));
+    mode(0o000).unwrap();
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "locked/home".to_string());
+    let tree = resolve(&t, None);
+    // Restored before asserting, so the fixture can be removed.
+    mode(0o755).unwrap();
+    assert!(tree.items.is_empty());
+    let prefix = format!(
+        "no codex home at {}: CODEX_HOME \"locked/home\" (relative: codex takes it from the folder it runs in, the target dir) cannot be read (",
+        locked.join("home").display()
+    );
+    assert_eq!(tree.warnings.len(), 1, "{:?}", tree.warnings);
+    let w = &tree.warnings[0];
+    assert!(
+        w.starts_with(&prefix)
+            && w.ends_with(
+                "); codex refuses to start (utils/home-dir/src/lib.rs:26-35); nothing to list"
+            ),
+        "{w}"
+    );
+}
+
+#[test]
+fn the_settings_fingerprint_reads_a_relative_codex_home_under_the_target_dir() {
+    let f = fx();
+    assert_ne!(std::env::current_dir().unwrap(), f.repo);
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "codex-rel".to_string());
+    std::fs::create_dir_all(f.repo.join("codex-rel")).unwrap();
+    let before = harn::oracle::codex::settings_fingerprint(&t);
+    write(&f.repo.join("codex-rel/config.toml"), "model = \"x\"\n");
+    assert_ne!(harn::oracle::codex::settings_fingerprint(&t), before);
+}
+
+#[test]
 fn no_codex_home_is_an_empty_tree_with_a_warning() {
     let f = fx();
     std::fs::remove_dir_all(&f.codex).unwrap();
