@@ -727,13 +727,7 @@ fn mcp_sources(
 
 fn mcp_servers(ctx: &Ctx, p: &Plugin, warnings: &mut Vec<String>) -> Vec<Item> {
     let mut out = Vec::new();
-    let search = ctx
-        .model
-        .catalog
-        .as_ref()
-        .and_then(|c| c.get("supports_search_tool"))
-        .and_then(Value::as_bool)
-        == Some(true);
+    let search = super::mcp::tool_search(ctx).0 == Some(true);
     for (file, prefix, servers) in mcp_sources(ctx, p, warnings) {
         for (name, def) in &servers {
             if !def.is_object() {

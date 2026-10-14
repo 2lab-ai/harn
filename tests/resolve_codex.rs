@@ -653,6 +653,7 @@ fn untrusted_drops_project_agents_but_keeps_the_global_file() {
 fn base_instructions_and_context_window_come_from_models_cache() {
     let f = fx();
     let cache = json!({
+        "fetched_at": FETCHED_AT,
         "client_version": "0.160.1",
         "models": [
             {
@@ -678,7 +679,7 @@ fn base_instructions_and_context_window_come_from_models_cache() {
     // No codex found: the file stays the best snapshot, and says it may not be what codex uses.
     assert!(
         base.origin.why.iter().any(|w| w
-            == "from models_cache.json, which codex may refetch: codex not found: cannot tell whether it accepts models_cache.json"),
+            == "from models_cache.json, which codex may refetch: codex not found on PATH: cannot tell whether it accepts models_cache.json"),
         "{:?}",
         base.origin.why
     );
@@ -688,7 +689,7 @@ fn base_instructions_and_context_window_come_from_models_cache() {
         "{model}"
     );
     assert!(
-        model.ends_with(" · models_cache.json not used as is, which codex may refetch: codex not found: cannot tell whether it accepts models_cache.json"),
+        model.ends_with(" · models_cache.json not used as is, which codex may refetch: codex not found on PATH: cannot tell whether it accepts models_cache.json"),
         "{model}"
     );
     assert!(!model.contains("identity not compared"), "{model}");
@@ -749,12 +750,22 @@ fn ctarget(f: &Fx) -> Target {
     with_codex(f, target(f), "0.160.1")
 }
 
-/// `models_cache.json` as codex 0.160.1 writes it: its own `client_version` and an `identity`
-/// (`models-manager/src/manager.rs:635-641`), plus `models`.
+/// `fetched_at` of every fixture cache: a fixed instant, so the `model:` signal is deterministic.
+const FETCHED_AT: &str = "2026-10-14T00:00:00Z";
+
+/// `models_cache.json` as codex 0.160.1 writes it: every `ModelsCacheEntry` field
+/// (`models-manager/src/cache.rs:64-88`, written at `manager.rs:635-641`) — `fetched_at`, the
+/// endpoint's `etag`, its own `client_version`, an `identity` — plus `models`.
 fn cache(f: &Fx, models: Value) {
     raw_cache(
         f,
-        json!({"client_version": "0.160.1", "identity": "test-login", "models": with_base(models)}),
+        json!({
+            "fetched_at": FETCHED_AT,
+            "etag": "W/\"catalog-1\"",
+            "client_version": "0.160.1",
+            "identity": "test-login",
+            "models": with_base(models)
+        }),
     );
 }
 
@@ -778,6 +789,9 @@ fn raw_cache(f: &Fx, cache: Value) {
         &serde_json::to_string(&cache).unwrap(),
     );
 }
+
+/// The end of the `model:` signal when the catalog-gated rows follow a fixture cache.
+const USED: &str = " · catalog facts from codex's catalog fetched at 2026-10-14T00:00:00Z (models_cache.json): codex re-checks a catalog older than 5 minutes with the server when it starts, identity is not compared with your login, and `harn verify --run --agent codex` confirms";
 
 /// One entry per catalog shape (generic slugs).
 fn catalog(f: &Fx) {
@@ -825,15 +839,17 @@ fn unusable_caches() -> Vec<(Option<Value>, &'static str)> {
             "no models_cache.json yet (codex writes it on its first run)",
         ),
         (
-            Some(json!({"client_version": "0.159.0", "identity": "test-login", "models": entry})),
+            Some(
+                json!({"fetched_at": FETCHED_AT, "client_version": "0.159.0", "identity": "test-login", "models": entry}),
+            ),
             "written by codex 0.159.0, not 0.160.1",
         ),
         (
-            Some(json!({"identity": "test-login", "models": entry})),
+            Some(json!({"fetched_at": FETCHED_AT, "identity": "test-login", "models": entry})),
             "has no client_version",
         ),
         (
-            Some(json!({"client_version": "0.160.1", "models": entry})),
+            Some(json!({"fetched_at": FETCHED_AT, "client_version": "0.160.1", "models": entry})),
             "has no identity",
         ),
     ]
@@ -857,9 +873,10 @@ fn catalog_decides_the_collaboration_mode_block() {
         "{:?}",
         c.origin.why
     );
-    // A definite row rests on the cache: the signal says the identity was not compared.
+    // A definite row rests on the cache: the signal says what the snapshot is and what was not
+    // checked.
     assert!(
-        signal(&t, "model:").ends_with(" · catalog facts from models_cache.json (identity not compared with your login; codex refetches if they differ)"),
+        signal(&t, "model:").ends_with(USED),
         "{}",
         signal(&t, "model:")
     );
@@ -915,7 +932,7 @@ fn catalog_decides_the_collaboration_mode_block() {
     let mut caches = unusable_caches();
     caches.push((
         Some(
-            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+            json!({"fetched_at": FETCHED_AT, "client_version": "0.160.1", "identity": "test-login", "models": [
                 {"slug": "rich-model", "base_instructions": "B.", "model_messages": {"collaboration_modes": {"default": 5}}}
             ]}),
         ),
@@ -923,7 +940,7 @@ fn catalog_decides_the_collaboration_mode_block() {
     ));
     caches.push((
         Some(
-            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+            json!({"fetched_at": FETCHED_AT, "client_version": "0.160.1", "identity": "test-login", "models": [
                 {"slug": "rich-model", "base_instructions": "B.", "model_messages": "text"}
             ]}),
         ),
@@ -1070,7 +1087,7 @@ fn catalog_decides_the_multi_agent_block() {
     let mut caches = unusable_caches();
     caches.push((
         Some(
-            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+            json!({"fetched_at": FETCHED_AT, "client_version": "0.160.1", "identity": "test-login", "models": [
                 {"slug": "rich-model", "base_instructions": "B.", "multi_agent_version": 2}
             ]}),
         ),
@@ -1143,7 +1160,7 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
     let file = |models: Value| {
         raw_cache(
             &f,
-            json!({"client_version": "0.160.1", "identity": "test-login", "models": models}),
+            json!({"fetched_at": FETCHED_AT, "client_version": "0.160.1", "identity": "test-login", "models": models}),
         )
     };
     file(json!([good.clone()]));
@@ -1172,8 +1189,8 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
             "models[1] (other) context_window is not an integer in i64 range",
         ),
         (
-            other(json!({"model_messages": {"collaboration_modes": []}})),
-            "models[1] (other) model_messages.collaboration_modes is a array",
+            other(json!({"model_messages": {"collaboration_modes": "modes"}})),
+            "models[1] (other) model_messages.collaboration_modes is a string",
         ),
         (
             json!([good.clone(), {"slug": "other"}]),
@@ -1219,33 +1236,114 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
             "{model}"
         );
     }
+
+    // Required top-level fields: codex's serde rejects the file.
+    for (top, why) in [
+        (
+            json!({"client_version": "0.160.1", "identity": "test-login", "models": [good.clone()]}),
+            "models_cache.json: fetched_at is missing, so codex cannot parse the file",
+        ),
+        (
+            json!({"fetched_at": 5, "client_version": "0.160.1", "identity": "test-login", "models": [good.clone()]}),
+            "models_cache.json: fetched_at is a number, so codex cannot parse the file",
+        ),
+        (
+            json!({"fetched_at": FETCHED_AT, "client_version": "0.160.1", "identity": "test-login", "models": {}}),
+            "models_cache.json: models is an object, so codex cannot parse the file",
+        ),
+    ] {
+        raw_cache(&f, top);
+        let t = resolve(&ctarget(&f), None);
+        let s = row(&t, "/builtin/multi_agent")
+            .signal
+            .clone()
+            .unwrap_or_default();
+        assert!(s.contains(why), "{why}: {s}");
+    }
+
+    // An array where an object is expected: serde derive may read a struct from a sequence, so
+    // harn does not claim codex rejects it — the facts are unknown, and the base instructions say
+    // codex *may* refetch.
+    for (models, why) in [
+        (
+            other(json!({"model_messages": {"collaboration_modes": []}})),
+            "models[1] (other) model_messages.collaboration_modes is an array, a shape harn does not read; catalog facts unknown",
+        ),
+        (
+            other(json!({"model_messages": []})),
+            "models[1] (other) model_messages is an array, a shape harn does not read; catalog facts unknown",
+        ),
+        (
+            json!([good.clone(), []]),
+            "models[1] is an array, a shape harn does not read; catalog facts unknown",
+        ),
+    ] {
+        file(models);
+        let t = resolve(&ctarget(&f), None);
+        for name in ["collaboration_mode", "multi_agent"] {
+            let r = row(&t, &format!("/builtin/{name}"));
+            let s = r.signal.as_deref().unwrap_or_default();
+            assert!(
+                gated(r) && s.contains(why) && !s.contains("cannot parse"),
+                "{name}: {s}"
+            );
+        }
+        let base = row(&t, "/builtin/instructions");
+        assert!(
+            base.origin.why.iter().any(|w| w
+                .starts_with("from models_cache.json, which codex may refetch: ")
+                && w.contains(why)),
+            "{why}: {:?}",
+            base.origin.why
+        );
+    }
 }
 
 #[test]
 fn without_codex_on_path_the_cache_is_not_trusted() {
-    const NOT_FOUND: &str = "codex not found: cannot tell whether it accepts models_cache.json";
+    const NOT_FOUND: &str =
+        "codex not found on PATH: cannot tell whether it accepts models_cache.json";
     let f = fx();
     catalog(&f);
     user_config(&f, None, "model = \"rich-model\"\n");
-    let check = |t: &Tree| {
+    let check_as = |t: &Tree, reason: &str| {
         for name in ["collaboration_mode", "multi_agent"] {
             let r = row(t, &format!("/builtin/{name}"));
             let s = r.signal.as_deref().unwrap_or_default();
-            assert!(gated(r) && s.ends_with(NOT_FOUND), "{name}: {s}");
+            assert!(gated(r) && s.ends_with(reason), "{name}: {s}");
         }
         let model = signal(t, "model:");
         assert!(
             model.ends_with(&format!(
-                " · models_cache.json not used as is, which codex may refetch: {NOT_FOUND}"
+                " · models_cache.json not used as is, which codex may refetch: {reason}"
             )),
             "{model}"
         );
     };
+    let check = |t: &Tree| check_as(t, NOT_FOUND);
     check(&resolve(&target(&f), None));
+
+    // A codex on PATH whose version no file names: found, version unknown — not "not found".
+    let exe = f.root.join("plain/bin/codex");
+    write(&exe, "binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut unversioned = target(&f);
+    unversioned.env.insert(
+        "PATH".to_string(),
+        exe.parent().unwrap().display().to_string(),
+    );
+    check_as(
+        &resolve(&unversioned, None),
+        "the installed codex's version could not be determined: cannot tell whether it accepts models_cache.json",
+    );
     // Another version's cache: still no version claim without an installed codex.
     raw_cache(
         &f,
-        json!({"client_version": "0.159.0", "identity": "test-login", "models": with_base(json!([{"slug": "rich-model"}]))}),
+        json!({"fetched_at": FETCHED_AT, "client_version": "0.159.0", "identity": "test-login", "models": with_base(json!([{"slug": "rich-model"}]))}),
     );
     let t = resolve(&target(&f), None);
     check(&t);
@@ -1535,6 +1633,7 @@ fn review_symlinked_target_resolves_by_real_path() {
 fn review_model_catalog_json_leaves_catalog_facts_unknown() {
     let f = fx();
     let cache = json!({
+        "fetched_at": FETCHED_AT,
         "client_version": "0.160.1",
         "models": [{
             "slug": "test-model",

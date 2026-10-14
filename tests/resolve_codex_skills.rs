@@ -336,7 +336,7 @@ fn entry_and_framing_bytes_match_a_hand_rendered_block() {
     // (openai_models.rs:432-433) — the block below has none.
     write(
         &f.codex.join("models_cache.json"),
-        r#"{"client_version": "0.160.1", "identity": "test-login", "models": [{"slug": "m", "base_instructions": "B.", "context_window": 100000}]}"#,
+        r#"{"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "identity": "test-login", "models": [{"slug": "m", "base_instructions": "B.", "context_window": 100000}]}"#,
     );
     let mut t = ctarget(&f);
     t.context_window = None;
@@ -678,7 +678,7 @@ fn skills_usage_section_follows_the_catalog_flag() {
             &serde_json::to_string(&cache).unwrap(),
         )
     };
-    let usable = |models: &Value| json!({"client_version": "0.160.1", "identity": "test-login", "models": models});
+    let usable = |models: &Value| json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "identity": "test-login", "models": models});
     cache(usable(&models));
     let framing_at = |model: &str, mut t: Target| {
         user_config(&f, &format!("model = \"{model}\"\n"));
@@ -727,14 +727,18 @@ fn skills_usage_section_follows_the_catalog_flag() {
         );
     }
     // A cache codex would not use, or no codex to tell.
-    cache(json!({"client_version": "0.159.0", "identity": "test-login", "models": models}));
+    cache(
+        json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.159.0", "identity": "test-login", "models": models}),
+    );
     unknown(&framing("on"), "written by codex 0.159.0, not 0.160.1");
-    cache(json!({"client_version": "0.160.1", "models": models}));
+    cache(
+        json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "models": models}),
+    );
     unknown(&framing("silent"), "has no identity");
     cache(usable(&models));
     unknown(
         &framing_at("silent", target(&f)),
-        "codex not found: cannot tell whether it accepts models_cache.json",
+        "codex not found on PATH: cannot tell whether it accepts models_cache.json",
     );
 }
 
@@ -756,7 +760,9 @@ fn plugins_instructions_follow_the_catalog_flag() {
         {"slug": "off-model", "base_instructions": "B.", "include_plugin_usage_instructions": false},
         {"slug": "silent-model", "base_instructions": "B."}
     ]);
-    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
+    cache(
+        json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "identity": "test-login", "models": models}),
+    );
     let config = |model: &str| format!("{model}[plugins.\"demo@mkt\"]\nenabled = true\n");
 
     // true: rendered, the fixed text's exact size (available_plugins_instructions.rs:30-48).
@@ -804,15 +810,15 @@ fn plugins_instructions_follow_the_catalog_flag() {
     user_config(&f, &config("model = \"off-model\"\n"));
     for (file, why) in [
         (
-            json!({"client_version": "0.159.0", "identity": "test-login", "models": models}),
+            json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.159.0", "identity": "test-login", "models": models}),
             "written by codex 0.159.0, not 0.160.1",
         ),
         (
-            json!({"client_version": "0.160.1", "models": models}),
+            json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "models": models}),
             "has no identity",
         ),
         (
-            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+            json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "identity": "test-login", "models": [
                 {"slug": "off-model", "base_instructions": "B."},
                 {"slug": "other-model", "base_instructions": "B.", "include_plugin_usage_instructions": null}
             ]}),
@@ -824,9 +830,14 @@ fn plugins_instructions_follow_the_catalog_flag() {
     }
     std::fs::remove_file(f.codex.join("models_cache.json")).unwrap();
     unknown("no models_cache.json yet (codex writes it on its first run)");
+    // Present but without `fetched_at`: codex's serde rejects it.
+    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
+    unknown("fetched_at is missing, so codex cannot parse the file");
 
     // No plugin with a part: no block, whatever the catalog says.
-    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
+    cache(
+        json!({"fetched_at": "2026-10-14T00:00:00Z", "client_version": "0.160.1", "identity": "test-login", "models": models}),
+    );
     user_config(&f, "model = \"on-model\"\n");
     assert!(find(&resolve(&ctarget(&f), None), ID).is_none());
 }

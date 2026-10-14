@@ -18,7 +18,8 @@
 //! `tools[]` (`core/src/tools/spec_plan.rs:246-254`, `spec_plan.rs:653-655`; the provider half of
 //! that test, `namespace_tools`, is true for every provider, `model-provider/src/provider.rs:53-63`)
 //! — `always` when it is false or absent (`protocol/src/openai_models.rs:477-478`), and `always`
-//! with an undecidable tree state when the entry is unknown.
+//! with an undecidable tree state when harn does not use the entry (unknown model, or a
+//! `models_cache.json` outside the contract on `CacheUse`).
 //!
 //! Knob: `mcp_servers.<id>.enabled = false` by the shared scope rule, minus a file for which the
 //! server's `command`/`url` comes only from layers that can stop loading while that file still
@@ -36,34 +37,28 @@ use crate::resolve::claude::fs;
 use serde_json::{json, Value};
 use std::path::Path;
 
-/// The tool-search state and its cause, from the model catalog.
+/// The tool-search state and its cause, from the model catalog — the only decider: codex has no
+/// config key for it (`core/src/tools/spec_plan.rs:653-655`). Unknown (`None`) whenever harn does
+/// not use the catalog entry (`Ctx::catalog_entry`: no model, `model_catalog_json`, a
+/// `models_cache.json` outside the contract on `CacheUse`, the model missing from it); the file's
+/// value is then named in the cause only.
 pub(crate) fn tool_search(ctx: &Ctx) -> (Option<bool>, String) {
-    if let Some(at) = &ctx.model.catalog_unread {
-        return (
-            None,
-            format!("{at} is set: the catalog comes from that file (not read)"),
-        );
-    }
-    let Some(slug) = &ctx.model.slug else {
-        return match &ctx.model.slug_unreadable {
-            Some(at) => (
-                None,
-                format!("{at} is not a string: model unknown (codex refuses to start with it)"),
-            ),
-            None => (
-                None,
-                "no model in config: codex picks its default from the catalog at startup"
-                    .to_string(),
-            ),
-        };
+    let entry = match ctx.catalog_entry() {
+        Ok((slug, entry)) => (slug, entry),
+        Err(why) => {
+            let said = ctx
+                .model
+                .catalog
+                .as_ref()
+                .and_then(|e| e.get("supports_search_tool"))
+                .and_then(Value::as_bool)
+                .map(|v| format!(" (the file says supports_search_tool = {v})"))
+                .unwrap_or_default();
+            return (None, format!("{why}; supports_search_tool unknown{said}"));
+        }
     };
-    let Some(entry) = &ctx.model.catalog else {
-        return (
-            None,
-            format!("{slug} is not in models_cache.json: supports_search_tool unknown"),
-        );
-    };
-    let (state, cause) = match entry.get("supports_search_tool") {
+    let (slug, entry) = entry;
+    match entry.get("supports_search_tool") {
         Some(Value::Bool(true)) => (
             Some(true),
             format!("models_cache.json: {slug} supports_search_tool = true (MCP tools deferred behind tool_search)"),
@@ -76,13 +71,6 @@ pub(crate) fn tool_search(ctx: &Ctx) -> (Option<bool>, String) {
             Some(false),
             format!("models_cache.json: {slug} has no supports_search_tool (false)"),
         ),
-    };
-    // A best snapshot from a file codex does not (or may not) use as it is: said, not hidden
-    // (the reason is in the `model:` signal). The capture's tool-search state replaces it in
-    // verify.
-    match ctx.model.cache_use.short_qualifier() {
-        Some(q) => (state, format!("{cause}; models_cache.json, {q}")),
-        None => (state, cause),
     }
 }
 
@@ -199,11 +187,12 @@ fn rows(ctx: &Ctx, tool_search: Option<bool>) -> (Vec<Item>, Vec<String>) {
         .iter()
         .any(|s| s.def.get("enabled") != Some(&Value::Bool(false)));
     // In the merged definition `null` is a non-finite float (see [`readable`]).
+    let undecidable = || format!("tool search undecidable ({})", self::tool_search(ctx).1);
     if any_enabled && tool_search.is_none() {
-        warnings.push(
-            "tool search state undecidable statically (model unknown or not in models_cache.json): MCP rows are listed as always"
-                .to_string(),
-        );
+        warnings.push(format!(
+            "tool search state undecidable statically ({}): MCP rows are listed as always",
+            self::tool_search(ctx).1
+        ));
     }
 
     let mut out = Vec::new();
@@ -274,10 +263,10 @@ fn rows(ctx: &Ctx, tool_search: Option<bool>) -> (Vec<Item>, Vec<String>) {
             Mode::Always
         };
         item.origin.why.push(match tool_search {
-            Some(true) => "tool search on: its tools sit behind tool_search; schemas unknown until the server has run",
-            Some(false) => "tool search off: every tool schema is sent up front; size unknown until the server has run",
-            None => "tool search undecidable; schema size unknown until the server has run",
-        }.to_string());
+            Some(true) => "tool search on: its tools sit behind tool_search; schemas unknown until the server has run".to_string(),
+            Some(false) => "tool search off: every tool schema is sent up front; size unknown until the server has run".to_string(),
+            None => format!("{}; schema size unknown until the server has run", undecidable()),
+        });
         item.origin.why.push(
             "server instructions become the tool namespace description in tools[] (codex-mcp/src/rmcp_client.rs:839-856)"
                 .to_string(),
@@ -577,21 +566,45 @@ enabled = false
         );
     }
 
+    /// Codex 0.160.1 on the target's `PATH` (Homebrew layout): the version the cache must match.
+    #[cfg(unix)]
+    fn resolve_with_codex(root: &Path) -> Tree {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = root.join("Caskroom/codex/0.160.1/bin/codex");
+        write(&exe, "binary");
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut t = target(root);
+        t.env.insert(
+            "PATH".to_string(),
+            exe.parent().unwrap().display().to_string(),
+        );
+        resolve_with(&t, None, &root.join("etc/codex")).unwrap()
+    }
+
     #[test]
+    #[cfg(unix)]
     fn deferral_follows_the_model_catalog() {
         let t = tmp();
         let root = &t.0;
         let codex = root.join("home/.codex");
-        let cache = |search: Option<bool>| {
-            let mut entry = json!({"slug": "m", "context_window": 1000});
+        let cache_by = |version: &str, search: Option<bool>| {
+            let mut entry = json!({"slug": "m", "base_instructions": "B.", "context_window": 1000});
             if let Some(s) = search {
                 entry["supports_search_tool"] = json!(s);
             }
             write(
                 &codex.join("models_cache.json"),
-                &json!({"models": [entry]}).to_string(),
+                &json!({
+                    "fetched_at": "2026-10-14T00:00:00Z",
+                    "client_version": version,
+                    "identity": "test-login",
+                    "models": [entry]
+                })
+                .to_string(),
             );
         };
+        let cache = |search: Option<bool>| cache_by("0.160.1", search);
+        let resolve = |root: &Path, _: Option<&Overlay>| resolve_with_codex(root);
         write(
             &codex.join("config.toml"),
             &format!("model = \"m\"\n{USER}"),
@@ -620,6 +633,33 @@ enabled = false
             Some(false),
             "absent = false"
         );
+
+        // A cache another codex version wrote: its value is not used; the rows say why.
+        cache_by("0.159.0", Some(true));
+        let tree = resolve(root, None);
+        assert_eq!(tree.tool_search, None);
+        let cause = tree.tool_search_cause.clone().unwrap();
+        assert!(
+            cause.contains("written by codex 0.159.0, not 0.160.1")
+                && cause.ends_with(
+                    "supports_search_tool unknown (the file says supports_search_tool = true)"
+                ),
+            "{cause}"
+        );
+        let docs = server(&tree, "docs");
+        assert_eq!(docs.mode, Mode::Always);
+        assert!(
+            docs.origin
+                .why
+                .iter()
+                .any(|w| w.starts_with("tool search undecidable (")
+                    && w.contains("written by codex 0.159.0, not 0.160.1")),
+            "{:?}",
+            docs.origin.why
+        );
+        assert!(tree.warnings.iter().any(|w| w
+            .starts_with("tool search state undecidable statically (")
+            && w.contains("written by codex 0.159.0")));
 
         write(&codex.join("config.toml"), USER);
         let tree = resolve(root, None);
