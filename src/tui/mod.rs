@@ -3,7 +3,8 @@
 //! [`App`] is the terminal-free core (keys in, frames out); [`run`] owns raw
 //! mode, the alternate screen and the event loop, and restores the terminal on every exit path:
 //! `q`, an error, a panic, and SIGINT / SIGTERM / SIGHUP (a flag the loop polls every
-//! [`TICK`]).
+//! [`TICK`]; when the loop cannot get back to it, a watchdog thread restores what it can and
+//! exits with the same code a second later).
 
 mod app;
 pub mod model;
@@ -26,8 +27,10 @@ use ratatui::Terminal;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
@@ -161,6 +164,122 @@ fn trap_signals() -> io::Result<(Arc<AtomicUsize>, Vec<signal_hook::SigId>)> {
     Ok((flag, ids))
 }
 
+/// How long a signal may go unanswered before the watchdog stops the process. The loop can be
+/// stuck where it never sees the flag: on a hung-up terminal (its tmux session killed), crossterm
+/// 0.29 retries a read that returns 0 bytes, or fails with anything but WouldBlock, without end
+/// (`event/source/unix/mio.rs`), and SIGTERM or SIGHUP only set the flag.
+const GRACE: Duration = Duration::from_secs(1);
+
+/// What [`run`] tells its watchdog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Note {
+    /// `$EDITOR` starts: a Ctrl-C typed there reaches harn too, and is the editor's.
+    Editing,
+    /// The editor is done: a flag still set is harn's.
+    Back,
+}
+
+/// The watchdog's view of the signal flag.
+#[derive(Debug, Default)]
+struct Watch {
+    /// When the flag was first seen set, since it was last seen clear.
+    since: Option<Instant>,
+    /// `$EDITOR` runs.
+    editing: bool,
+}
+
+impl Watch {
+    /// One look at the flag at `now`: 128 + the signal once one has gone unanswered for `grace`.
+    /// A clear flag, or the editor running, starts the wait over.
+    fn look(&mut self, signal: usize, now: Instant, grace: Duration) -> Option<i32> {
+        if signal == 0 || self.editing {
+            self.since = None;
+            return None;
+        }
+        let since = *self.since.get_or_insert(now);
+        (now.saturating_duration_since(since) >= grace).then_some(128 + signal as i32)
+    }
+}
+
+/// Looks at `signal` every [`TICK`] until `notes` hangs up (the end of [`run`]). A signal
+/// unanswered for `grace`: `restore`, then `exit` with 128 + it.
+fn watch(
+    signal: &AtomicUsize,
+    notes: &Receiver<Note>,
+    grace: Duration,
+    restore: impl FnOnce(),
+    exit: impl FnOnce(i32),
+) {
+    let mut watch = Watch::default();
+    loop {
+        match notes.recv_timeout(TICK) {
+            Ok(Note::Editing) => watch.editing = true,
+            Ok(Note::Back) => watch.editing = false,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if let Some(code) = watch.look(signal.load(Ordering::SeqCst), Instant::now(), grace) {
+            restore();
+            exit(code);
+            return;
+        }
+    }
+}
+
+/// [`watch`] on a thread of its own while [`run`] lasts. Dropped on every way out of `run`, a
+/// panic too: the thread sees the hang-up at once and is joined, so it never acts after `run`
+/// returned (unless it was already exiting the process, with the code `run` would have given).
+struct Watchdog {
+    notes: Option<Sender<Note>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn start(
+        signal: Arc<AtomicUsize>,
+        grace: Duration,
+        restore: impl FnOnce() + Send + 'static,
+        exit: impl FnOnce(i32) + Send + 'static,
+    ) -> io::Result<Watchdog> {
+        let (notes, inbox) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("harn-watchdog".to_string())
+            .spawn(move || watch(&signal, &inbox, grace, restore, exit))?;
+        Ok(Watchdog {
+            notes: Some(notes),
+            thread: Some(thread),
+        })
+    }
+
+    fn note(&self, note: Note) {
+        if let Some(notes) = &self.notes {
+            let _ = notes.send(note);
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        drop(self.notes.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// [`leave`] for the watchdog: on a thread of its own, waited for at most [`GRACE`], so a
+/// terminal that takes no more output cannot keep the process alive. A hung-up one fails at once.
+fn leave_briefly() {
+    let (done, finished) = mpsc::channel();
+    let started = thread::Builder::new().spawn(move || {
+        let _ = leave();
+        let _ = done.send(());
+    });
+    if started.is_ok() {
+        let _ = finished.recv_timeout(GRACE);
+    }
+}
+
 /// A full-screen [`Terminal`] on `backend`, blank and owed a full repaint.
 fn full_screen<B: Backend>(backend: B) -> Result<Terminal<B>, B::Error> {
     let mut terminal = Terminal::new(backend)?;
@@ -199,6 +318,10 @@ pub fn run(
     let (signal, ids) = trap_signals()?;
     install_panic_hook();
     let restore = Restore;
+    // After `restore`: dropped before it on every way out, so the two never restore at once.
+    let watchdog = Watchdog::start(Arc::clone(&signal), GRACE, leave_briefly, |code| {
+        std::process::exit(code)
+    })?;
     enter()?;
     let mut terminal = full_screen(CrosstermBackend::new(io::stdout()))?;
     let exit = drive(
@@ -218,17 +341,20 @@ pub fn run(
                 return Ok(());
             }
             let before = signal.load(Ordering::SeqCst);
+            watchdog.note(Note::Editing);
             app.edit(&item_id, &editor);
             // A Ctrl-C typed in the editor reached harn too (same process group): the editor's.
             if before == 0 {
                 let _ =
                     signal.compare_exchange(SIGINT as usize, 0, Ordering::SeqCst, Ordering::SeqCst);
             }
+            watchdog.note(Note::Back);
             enter()?;
             repaint(terminal)?;
             Ok(())
         },
     );
+    drop(watchdog);
     drop(restore);
     for id in ids {
         signal_hook::low_level::unregister(id);
@@ -509,5 +635,119 @@ mod tests {
             assert_eq!(exit.unwrap(), Exit::Quit);
             assert_eq!(events.ticks, 2);
         }
+    }
+
+    #[test]
+    fn the_watchdog_acts_once_a_signal_has_waited_out_the_grace() {
+        let (t0, grace) = (Instant::now(), Duration::from_secs(1));
+        let mut watch = Watch::default();
+        assert_eq!(watch.look(0, t0, grace), None);
+        assert_eq!(watch.look(SIGTERM as usize, t0, grace), None, "first seen");
+        assert_eq!(watch.look(SIGTERM as usize, t0 + grace / 2, grace), None);
+        assert_eq!(
+            watch.look(SIGTERM as usize, t0 + grace, grace),
+            Some(128 + SIGTERM)
+        );
+    }
+
+    #[test]
+    fn a_cleared_flag_or_the_editor_starts_the_wait_over() {
+        let (t0, grace) = (Instant::now(), Duration::from_secs(1));
+        let mut watch = Watch::default();
+        assert_eq!(watch.look(SIGINT as usize, t0, grace), None);
+        // The loop answered, or the editor's Ctrl-C was taken back.
+        assert_eq!(watch.look(0, t0 + grace / 2, grace), None);
+        assert_eq!(watch.look(SIGINT as usize, t0 + grace, grace), None);
+        assert_eq!(
+            watch.look(SIGINT as usize, t0 + grace * 2, grace),
+            Some(128 + SIGINT)
+        );
+        // While $EDITOR runs, however long, and for a full grace after it.
+        let mut watch = Watch {
+            editing: true,
+            ..Watch::default()
+        };
+        assert_eq!(watch.look(SIGINT as usize, t0, grace), None);
+        assert_eq!(watch.look(SIGINT as usize, t0 + grace * 10, grace), None);
+        watch.editing = false;
+        assert_eq!(watch.look(SIGINT as usize, t0 + grace * 10, grace), None);
+        assert_eq!(
+            watch.look(SIGINT as usize, t0 + grace * 11, grace),
+            Some(128 + SIGINT)
+        );
+    }
+
+    /// A watchdog whose restore and exit only report what they were called with, in order.
+    fn watchdog(signal: &Arc<AtomicUsize>, grace: Duration) -> (Watchdog, Receiver<String>) {
+        let (acted, acts) = mpsc::channel();
+        let restored = acted.clone();
+        let dog = Watchdog::start(
+            Arc::clone(signal),
+            grace,
+            move || {
+                let _ = restored.send("restore".to_string());
+            },
+            move |code| {
+                let _ = acted.send(format!("exit {code}"));
+            },
+        )
+        .unwrap();
+        (dog, acts)
+    }
+
+    #[test]
+    fn a_signal_the_loop_never_answers_restores_the_terminal_then_exits_with_128_plus_it() {
+        let signal = Arc::new(AtomicUsize::new(SIGTERM as usize));
+        let (dog, acts) = watchdog(&signal, Duration::ZERO);
+        let wait = Duration::from_secs(10);
+        let first = acts.recv_timeout(wait).expect("the watchdog acted");
+        let second = acts.recv_timeout(wait).expect("and exited");
+        drop(dog);
+        assert_eq!(
+            [first, second],
+            ["restore".to_string(), format!("exit {}", 128 + SIGTERM)]
+        );
+    }
+
+    #[test]
+    fn the_end_of_run_stops_the_watchdog_before_it_acts() {
+        let signal = Arc::new(AtomicUsize::new(SIGTERM as usize));
+        let (dog, acts) = watchdog(&signal, Duration::from_secs(3600));
+        // Joined: nothing can come after this.
+        drop(dog);
+        assert_eq!(acts.try_iter().collect::<Vec<_>>(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_ctrl_c_the_editor_took_never_stops_the_process() {
+        let signal = Arc::new(AtomicUsize::new(0));
+        let (dog, acts) = watchdog(&signal, Duration::from_millis(10));
+        // As `run` does around $EDITOR, with the editor's Ctrl-C landing while it runs.
+        dog.note(Note::Editing);
+        signal.store(SIGINT as usize, Ordering::SeqCst);
+        thread::sleep(TICK * 3);
+        let _ = signal.compare_exchange(SIGINT as usize, 0, Ordering::SeqCst, Ordering::SeqCst);
+        dog.note(Note::Back);
+        thread::sleep(TICK * 3);
+        drop(dog);
+        assert_eq!(acts.try_iter().collect::<Vec<_>>(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_sigterm_during_the_editor_is_acted_on_once_the_editor_is_done() {
+        let signal = Arc::new(AtomicUsize::new(0));
+        let (dog, acts) = watchdog(&signal, Duration::from_millis(10));
+        dog.note(Note::Editing);
+        signal.store(SIGTERM as usize, Ordering::SeqCst);
+        thread::sleep(TICK * 3);
+        assert_eq!(acts.try_recv().ok(), None, "not while the editor runs");
+        dog.note(Note::Back);
+        let wait = Duration::from_secs(10);
+        assert_eq!(acts.recv_timeout(wait).as_deref(), Ok("restore"));
+        assert_eq!(
+            acts.recv_timeout(wait),
+            Ok(format!("exit {}", 128 + SIGTERM))
+        );
+        drop(dog);
     }
 }
