@@ -18,6 +18,8 @@ clap_complete = "4.6.5"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dirs = "6.0.0"
 ratatui = "0.30.1"
+# Codex hook matchers are `regex` patterns (codex-rs `hooks/Cargo.toml`, workspace `regex = "1.12.3"`).
+regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 # preserve_order: settings JSON is rewritten in its original key order (02-architecture §Stack).
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
