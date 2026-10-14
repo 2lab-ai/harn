@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>harn — see what your coding agent loads</title>
-<meta name="description" content="harn lists every skill, plugin, hook, memory file, MCP server and CLAUDE.md that Claude Code loads before your first message, with its size, its source and the official switch that turns it off. Every change is reversible, byte for byte.">
+<meta name="description" content="harn lists every skill, plugin, hook, memory file, MCP server, CLAUDE.md and AGENTS.md that Claude Code or the Codex CLI loads before your first message, with its size, its source and the official switch that turns it off. Every change is reversible, byte for byte.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0A0A0A" media="(prefers-color-scheme: dark)">
@@ -15,7 +15,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="harn">
 <meta property="og:title" content="harn — see what your coding agent loads">
-<meta property="og:description" content="Every skill, plugin, hook, memory file, MCP server and CLAUDE.md in Claude Code's first request: its size, its source, the official switch that turns it off. Reversible, byte for byte.">
+<meta property="og:description" content="Every skill, plugin, hook, MCP server, CLAUDE.md and AGENTS.md in Claude Code's or Codex's first request: its size, its source, the switch that turns it off. Reversible, byte for byte.">
 <meta property="og:image" content="https://harn.2lab.ai/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -44,9 +44,9 @@
 <main id="main">
 
 <section class="hero" aria-labelledby="hero-h">
-  <p class="label">Claude Code · macOS · Linux · preview</p>
+  <p class="label">Claude Code · Codex CLI · macOS · Linux · preview</p>
   <h1 id="hero-h">See what your coding agent loads before your first message.</h1>
-  <p class="lede">harn lists every skill, plugin, hook, memory file, MCP server and <code>CLAUDE.md</code> that Claude Code puts into its first request, with its size, where it came from, and the official switch that turns it off. Every change is reversible, byte for byte.</p>
+  <p class="lede">harn lists every skill, plugin, hook, memory file, MCP server, <code>CLAUDE.md</code> and <code>AGENTS.md</code> that Claude Code or the Codex CLI puts into its first request, with its size, where it came from, and the official switch that turns it off. Every change is reversible, byte for byte.</p>
   <div class="cmd">
     <code><span class="prompt" aria-hidden="true">$</span> <span class="cmd-text">brew install 2lab-ai/tap/harn-preview</span></code>
     <button class="copy" type="button" data-copy="brew install 2lab-ai/tap/harn-preview" aria-label="Copy the install command" hidden>copy</button>
@@ -341,7 +341,7 @@
       <span class="num" aria-hidden="true">01</span>
       <div class="row-copy">
         <h3>See everything it loads.</h3>
-        <p>harn reads Claude Code's config layers without starting a session and groups what lands in the first request by kind: the skill listing, project files, memory, agents, plugins, hooks and built-ins, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code> until <code>harn verify --run</code> measures one real session.</p>
+        <p>harn reads your agent's config without starting a session, Claude Code's settings layers or Codex's <code>config.toml</code> layers, and groups what lands in the first request by kind: the skill listing, project files, plugins, hooks, built-ins and more, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code>; <code>harn verify --run</code> (with <code>--agent codex</code> for Codex) measures what the agent's own view of the first request shows.</p>
       </div>
       <figure class="ev">
         <figcaption>First screen · excerpt</figcaption>
@@ -370,10 +370,10 @@ contributes 8 skills · 5 commands · 1 MCP server</pre>
       <span class="num" aria-hidden="true">03</span>
       <div class="row-copy">
         <h3>Turn one off with one card.</h3>
-        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches: a settings key, written to <code>.claude/settings.local.json</code> for this project, never a wider scope silently.</p>
+        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches, never a wider scope silently. For Claude Code it writes a settings key to <code>.claude/settings.local.json</code>, for this project. For Codex it writes the item's own key to the narrowest <code>config.toml</code> where Codex reads that key. For a plugin, MCP server or block, that is the folder's <code>.codex/config.toml</code> when Codex trusts the folder and nothing Codex reads later sets the key; otherwise it is your user config in <code>$CODEX_HOME</code> (<code>~/.codex</code> by default), which every project reads. A hook's or skill's own entry goes there too, whatever the trust, because Codex reads those only from your user config. Some items have no switch harn can write, such as a managed hook or a key a higher-priority config already sets; the card says so, and otherwise names the file and the key.</p>
       </div>
       <figure class="ev">
-        <figcaption>Turn off · excerpt</figcaption>
+        <figcaption>Turn off · Claude Code excerpt</figcaption>
 <pre>Turn off alpha for this project
 Writes   .claude/settings.local.json → enabledPlugins.alpha = false
 Leaves   6 at start (alpha, 2 skills, 1 MCP server, 1 MCP instructions,
@@ -388,7 +388,7 @@ Enter apply · Esc</pre>
         <p>harn snapshots the file before every write and journals the change. <kbd>u</kbd> undoes the last one, <kbd>o</kbd> turns an item back on, and <code>harn undo</code> works later from the shell. The file comes back byte for byte.</p>
       </div>
       <figure class="ev">
-        <figcaption>Undo · excerpt</figcaption>
+        <figcaption>Undo · Claude Code excerpt</figcaption>
 <pre>Undo the last change
 alpha comes back on
 restores .claude/settings.local.json byte for byte
@@ -399,7 +399,7 @@ undone: alpha back · 6 more items load at start (77 → 83)</pre>
       <span class="num" aria-hidden="true">05</span>
       <div class="row-copy">
         <h3>Or let your agent trim.</h3>
-        <p><code>harn trim</code> asks your coding agent for a plan in one headless request, with no tools and one turn. It validates the plan, prints each change with the agent's reason and the bytes it frees, and applies only when you answer <span class="nw"><kbd>y</kbd>.</span> Inside Claude Code, <code>/harn-trim</code> runs the same loop.</p>
+        <p><code>harn trim</code> asks your coding agent for a plan in one headless request, with no tools and one turn. It validates the plan, prints each change with the agent's reason and the bytes it frees, and applies only when you answer <span class="nw"><kbd>y</kbd>.</span> Inside Claude Code, <code>/harn-trim</code> runs the same loop. <code>harn trim</code> works with Claude Code for now; for Codex it refuses.</p>
       </div>
       <figure class="ev">
         <figcaption>harn trim · first line and last line</figcaption>
@@ -418,7 +418,7 @@ apply? [y/N]</pre>
     <li><strong>Official switches only</strong><span>A settings key the agent already reads, never a wider scope silently.</span></li>
     <li><strong>Reversible byte for byte</strong><span>A snapshot before every write; <code>harn undo</code> puts it back.</span></li>
     <li><strong><code>--readonly</code> refuses every write</strong><span>And every active verify. The screen says so in its header.</span></li>
-    <li><strong>Looks without starting a session</strong><span>It reads files. Your agent starts only on <code>harn trim</code> or <code>harn verify --run</code>.</span></li>
+    <li><strong>Looks without starting a session</strong><span>It reads files. Your agent starts only on <code>harn trim</code> or <code>harn verify --run</code> (<code>--agent codex</code> for Codex).</span></li>
     <li><strong>No network from harn itself</strong><span>The binary has no network code.</span></li>
   </ul>
 </section>
@@ -431,23 +431,23 @@ apply? [y/N]</pre>
   <div class="faq-grid">
     <div class="qa">
       <h3>What does it change on disk?</h3>
-      <p>Nothing until you ask. When you turn something off, harn sets one official settings key, by default in <code>.claude/settings.local.json</code> for this project only, never a wider scope silently. It snapshots the file first and journals the change (<code>harn history</code>).</p>
+      <p>Nothing until you ask. When you turn something off, harn sets one official key, never a wider scope silently. For Claude Code it is a settings key, by default in <code>.claude/settings.local.json</code> for this project only. For Codex it is the item's own key in the narrowest <code>config.toml</code> where Codex reads it: for a plugin, MCP server or block, the folder's <code>.codex/config.toml</code> when Codex trusts the folder and nothing Codex reads later sets the key; otherwise, and for a hook's or skill's own entry, your user config in <code>$CODEX_HOME</code> (<code>~/.codex</code> by default), which every project reads. Some items have no switch harn can write, such as a managed hook or a key a higher-priority config already sets; the card says so. It snapshots the file first and journals the change (<code>harn history</code>).</p>
     </div>
     <div class="qa">
       <h3>How do I undo?</h3>
       <p><kbd>u</kbd> on the screen undoes the last change, <kbd>o</kbd> turns an item back on, and <code>harn undo</code> works from the shell. Each one restores the file byte for byte.</p>
     </div>
     <div class="qa">
-      <h3>Does it start Claude Code?</h3>
-      <p>No. It reads the config layers and sizes what files can size. Two commands start your agent: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request).</p>
+      <h3>Does it start your agent?</h3>
+      <p>No. It reads the config layers and sizes what files can size. Claude Code starts on two commands: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request). For Codex, <code>harn verify --agent codex --run</code> runs four of Codex's inspection commands: no model request, but <code>codex debug prompt-input</code> starts your MCP servers and may write into <code>$CODEX_HOME</code> (<code>~/.codex</code> by default).</p>
     </div>
     <div class="qa">
       <h3>Does it send anything anywhere?</h3>
-      <p>harn itself has no network code. <code>harn trim</code> and <code>harn verify --run</code> start your own agent, which talks to its provider the way it always does.</p>
+      <p>harn itself has no network code. The commands above that start your agent let it talk to its provider the way it always does.</p>
     </div>
     <div class="qa">
       <h3>What about Codex?</h3>
-      <p>Claude Code today. The Codex CLI is next; harn shows one tree per agent.</p>
+      <p>Yes. harn shows one tree per agent: Claude Code and the Codex CLI each get their own tab when they load something in the directory. For Codex it reads <code>$CODEX_HOME</code> (<code>~/.codex</code> by default) and the <code>AGENTS.md</code> files, and turns things off with Codex's own keys in <code>config.toml</code>.</p>
     </div>
     <div class="qa">
       <h3>Linux?</h3>
@@ -464,7 +464,7 @@ apply? [y/N]</pre>
     <button class="copy" type="button" data-copy="brew install 2lab-ai/tap/harn-preview" aria-label="Copy the install command" hidden>copy</button>
     <span class="sr-only" role="status" aria-live="polite"></span>
   </div>
-  <p class="after">Claude Code today <span class="sep" aria-hidden="true">·</span> Codex CLI next</p>
+  <p class="after">Claude Code <span class="sep" aria-hidden="true">·</span> Codex CLI</p>
   <ul class="end-links">
     <li><a href="https://github.com/2lab-ai/harn">GitHub</a></li>
     <li><a href="https://github.com/2lab-ai/harn#readme">README</a></li>

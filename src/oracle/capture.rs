@@ -34,7 +34,7 @@ pub fn read_capture(path: &Path, target: &Target) -> anyhow::Result<Capture> {
             }
         }
         bail!(
-            "{}: not an OTEL raw-body directory (no index.jsonl); Codex trace bundles are not read before P0.5",
+            "{}: not an OTEL raw-body directory (no index.jsonl); Codex trace bundles (CODEX_ROLLOUT_TRACE_ROOT) are not read: that is P1",
             path.display()
         );
     }

@@ -225,7 +225,7 @@ The 2026-10-02 capture places SessionStart output (3.4 KB) in `R1`.
 
 **Where could `blender` have come from?** [local] facts:
 - Transcript `8f46bdfe-….jsonl` uses the bare tool prefix `mcp__blender__*`. Plugin tools use `mcp__plugin_<p>_<s>__`, as seen with `mcp__plugin_slack_slack__`.
-- The log dir is `~/Library/Caches/claude-cli-nodejs/-Users-zhugehyuk-2lab-ai-zbrain/mcp-logs-blender/`. Plugin servers get `mcp-logs-plugin-*` dirs.
+- The log dir is `~/Library/Caches/claude-cli-nodejs/-Users-me-work-project/mcp-logs-blender/`. Plugin servers get `mcp-logs-plugin-*` dirs.
 - Transport is stdio (`Successfully connected (transport: stdio)`, `uvx blender-mcp` banner). The **last connection was 2026-10-02T07:08:23Z**.
 - Today `blender` appears in none of: `~/.claude.json`, its 3 backups, user/project/local settings, plugin dirs (incl. `synced/`), Claude Desktop config. `/Library/Application Support/ClaudeCode/` does not exist.
 - All of these checks postdate the last connection. **Absence now does not prove absence at measurement time.**

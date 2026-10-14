@@ -169,8 +169,8 @@ Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
   (unified diff of every changed file; `off`/`apply`/`edit` print it); new `on(journal, target,
   selector)` (matches journaled ids, since an item that is off is no longer in the tree) and
   `prune(journal, Duration) -> Vec<JournalEntry>`.
-- `oracle`: `read_capture(path, target)` decides OTEL dir / llmux line / trace bundle (WU-D owns
-  the policy); `Region { name, bytes }`; `InitEvent { tools, mcp_servers: Vec<InitMcpServer{name,
+- `oracle`: `read_capture(path, target)` decides OTEL dir / llmux line (WU-D owns the policy; a
+  Codex capture dir goes to `oracle::codex::read_capture_dir`, a Codex trace bundle is P1); `Region { name, bytes }`; `InitEvent { tools, mcp_servers: Vec<InitMcpServer{name,
   status, source}>, skills, agents, plugins: Vec<InitPlugin{name,path,source,version}>,
   memory_paths: BTreeMap<String,String>, claude_code_version, model }`. `claude.rs` = `run_claude`,
   `parse_request_body`, `parse_init_event`; `capture.rs` = the readers; all re-exported.

@@ -296,7 +296,7 @@ this directory gets no tab. Everything else follows the rules above; what differ
   source or research, or is a developer's note (a lead not verified, an `[unverified]`/`[추정]`
   tag), is cut to its human part or dropped; content hashes, hook state keys and a skill's
   rendered listing line stay in `harn why`. The AGENTS chain reads `AGENTS.md in this folder
-  (~/2lab.ai/zbrain)`, or `AGENTS.md in ~/repo, one of the files from the project root down to
+  (~/work/project)`, or `AGENTS.md in ~/repo, one of the files from the project root down to
   this folder`; a project file's `d` says what else it frees ("That frees 4.2 KB: the file and
   the wrapper around the AGENTS.md files"). A rules file is named by its file (`default.rules`,
   source `~/.codex`).
@@ -330,9 +330,10 @@ this directory gets no tab. Everything else follows the rules above; what differ
 
 ## Acceptance (A16 — replaces A14's readability clause)
 
-Run `harn ~/2lab.ai/zbrain` in tmux 80×24 and 120×40, capture: first screen, Plugins opened, cursor
-on slack, `d` card, `w` card, `?` card, after Enter (applied), after `u` (undone). A reader who has
-never seen harn must be able to say, from the first screen alone, what the five biggest things are
-and that `d` turns a thing off; from the detail panel, where the cursor row is enabled and what
-leaves if it goes. No raw id, absolute path, hash, `Δ?`, `mode`, `knob` or `ops (1)` appears in any
-captured frame. No mid-word wrap. The dispatcher reads every frame before declaring the row green.
+Run `harn ~/work/project` (a real working folder) in tmux 80×24 and 120×40, capture: first screen,
+Plugins opened, cursor on slack, `d` card, `w` card, `?` card, after Enter (applied), after `u`
+(undone). A reader who has never seen harn must be able to say, from the first screen alone, what
+the five biggest things are and that `d` turns a thing off; from the detail panel, where the cursor
+row is enabled and what leaves if it goes. No raw id, absolute path, hash, `Δ?`, `mode`, `knob` or
+`ops (1)` appears in any captured frame. No mid-word wrap. The dispatcher reads every frame before
+declaring the row green.

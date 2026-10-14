@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **shipped (P0)** — v1.7, 2026-10-14 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5: the Codex resolver, its TOML writes and the wiring are built, `oracle/codex.rs` + Codex `verify` in progress). Boundaries for the first
+Status: **shipped (P0 and P0.5)** — v1.8, 2026-10-15 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5, shipped 2026-10-15: the Codex resolver, its TOML writes, `oracle/codex.rs`, `verify/codex.rs` and the wiring are built). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 
@@ -16,10 +16,18 @@ and this file is fixed.
 - Deliberately absent: a Trash crate (harn deletes nothing), tokenizers (all costs are bytes;
   `~tok` is a later optional feature), `clap_mangen` (`--help` covers eight subcommands).
 - Tests: `cargo test` unit tests on fixture directories (a miniature `~/.claude`, `~/.codex`, and
-  project trees with every discovery rule exercised), plus **differential conformance tests** that
-  run the real `claude`/`codex` binaries when present (`research/03` §A, cclint): compare the
-  static tree with `stream-json init` / `debug prompt-input` on a fixture directory and fail on any
-  presence or content-conformance diff within the oracle's projection; plus `freed` fixtures
+  project trees with every discovery rule exercised), plus **differential conformance tests**
+  against the agents' own output (`research/03` §A, cclint), which run only when asked:
+  `tests/differential.rs` compares the static Claude Code tree of a real directory with the
+  `system/init` event of a session started there and needs `HARN_DIFFERENTIAL=<dir>` and
+  `HARN_DIFFERENTIAL_INIT=<stream.jsonl>` (an existing capture; it starts nothing);
+  `tests/differential_codex.rs` runs the `codex` on `PATH` (`debug prompt-input`, `debug models`,
+  `mcp list --json`, `plugin list --json`) through `verify_codex` and needs
+  `HARN_DIFFERENTIAL_CODEX=<dir>`. Without its variables (or, for Codex, without `codex` on
+  `PATH`) each test skips and passes, saying why. When they run, the Claude Code test fails on any
+  presence diff for skills, agents, plugins and MCP servers (or an MCP server whose `source` is not
+  its row's layer), the Codex test on any `predicted-not-seen`, `seen-not-predicted` or
+  `content-mismatch`; plus `freed` fixtures
   (listing at cap, plugin side effects, shared items, `@imports`), each fixture defining both the
   before and the after rendering so the assertion is the fixture's own byte difference. Gate = `just check` (`cargo fmt --check`, `cargo clippy --all-targets --locked
   -- -D warnings`, `cargo test --locked`), the llmux justfile shape. Each resolver carries a
@@ -50,13 +58,19 @@ src/
                      plugin + connectors + dynamic; schemas `?` until a capture), plugins
                      (installed_plugins.json + enabledPlugins from six sources), builtins table,
                      tool-search state (base URL first-party or not)
-    codex/           mod.rs (CODEX_HOME, model facts from models_cache.json, the knob scope rule:
-                     a key is listed only in the files where it takes effect), config.rs (layers:
+    codex/           mod.rs (CODEX_HOME — a relative one resolved against the target dir, as
+                     codex does; model facts from models_cache.json only when it is an accepted
+                     snapshot: required fields present, an installed codex whose version — read
+                     from npm or Homebrew layouts, never by running it — equals client_version;
+                     else catalog-gated rows with the reason; the knob scope rule: a key is listed
+                     only in the files where it takes effect), config.rs (layers:
                      defaults · /etc/codex · user · profile · trusted .codex/config.toml root→cwd ·
                      managed, overlay applied to TOML; the three trust gates), instructions.rs
-                     (developer_instructions, the AGENTS message: one row per file + its framing,
-                     32 KiB shared budget), builtins.rs (base instructions, permissions,
-                     collaboration, apps, environment, multi-agent; `include_*`/`agents.enabled`),
+                     (developer_instructions, the AGENTS message: one row per file + its framing;
+                     the project chain shares one project_doc_max_bytes budget, 32 KiB by default,
+                     and the global AGENTS file is outside it), builtins.rs (base instructions,
+                     permissions, collaboration, apps, environment, multi-agent;
+                     `include_*`/`agents.enabled`),
                      skills.rs (roots trust-independent, 2 %/10k-token budget, listing + its
                      framing row), plugins.rs (plugin rows are switches; parts tagged
                      origin.plugin), hooks.rs (per handler; trusted_hash; `off:` rows), rules.rs,
@@ -76,10 +90,13 @@ src/
   oracle/
     claude.rs        spawn `claude -p` with OTEL_LOG_RAW_API_BODIES + stream-json; parse body +
                      init; build RunContext from index.jsonl + init
-    codex.rs         `codex -C dir debug prompt-input`, `debug models`, `mcp list --json`,
-                     `plugin list --json`; CODEX_ROLLOUT_TRACE_ROOT reader
-    capture.rs       readers for an OTEL raw-body dir, an llmux raw-io.jsonl record, a Codex
-                     trace bundle → (Tree, RunContext); selection = RunContext match, never "newest"
+    codex.rs         `codex --version`, `codex -C dir debug prompt-input`, `debug models`, `mcp list
+                     --json`, `plugin list --json` into a new 0700 capture dir (manifest: RunContext,
+                     argv, exit status, files, the bundled skills root bound at capture time);
+                     reads such a dir back for `verify --capture` (a CODEX_ROLLOUT_TRACE_ROOT
+                     reader is P1)
+    capture.rs       readers for an OTEL raw-body dir, an llmux raw-io.jsonl record → (Tree,
+                     RunContext); selection = RunContext match, never "newest"
   verify.rs          inputs: static Tree, capture Tree + RunContext, the oracle's observable
                      projection (modes runtime/none excluded; capture-only children attach under
                      their `?` parent, never seen-not-predicted). Gate 1 presence by id over
@@ -88,6 +105,22 @@ src/
                      resolver defect; per-run values (date, git status, hook stdout, MCP runtime
                      text) replace predicted → observed without failing; promotion only for
                      matched rows and regions
+  verify/codex.rs    the Codex projection over codex's inspection output: gate 1 presence (AGENTS
+                     message and files, developer_instructions, skill listing and entries, blocks,
+                     environment, MCP servers, plugins), gate 2 content (the AGENTS message byte
+                     for byte, each exactly predicted skill listing line as text, every other
+                     exactly predicted row by size only, to the byte: a change of the same length
+                     there is not detected; an estimated row, such as the skill lines when the
+                     listing is over its budget, gets gate 1 only); not-checkable rows with their
+                     reason, never a failure: outside the
+                     dump (tools[], base instructions, hook output), AGENTS files whose place in
+                     the message cannot be established because its framing is not where predicted
+                     (the framing row still fails), rules files, runtime-decided blocks,
+                     catalog-gated rows, bundled .system skills (and listing lines or framing that
+                     differ only by the .system root's line, on one side only, and the aliases it
+                     renumbers), MCP servers when `mcp list` gave no list, plugins `plugin list`
+                     does not show and no listed skill is provably their own, account plugins
+                     (source remote)
   render/
     common.rs        shared cells: costs, freed, compact knobs (JSON pointer for Claude Code
                      settings, the dotted TOML key for Codex config.toml), header facts per agent
@@ -128,7 +161,7 @@ prefixes `mcp__<server>__` / `mcp__plugin_<p>_<s>__`, skill and agent names, fil
 
 | what | where |
 |---|---|
-| official knob | the agent's own file in the chosen scope (`.claude/settings.local.json`, `~/.claude/settings.json`, `~/.claude.json#projects[cwd]`, `.codex/config.toml`, `~/.codex/config.toml`, `~/.codex/hooks.json` state) — a git-tracked team file only after a printed warning; a file the agent itself rewrites (`~/.claude.json`) only after a warning when an agent process is running |
+| official knob | the agent's own file in the chosen scope (Claude Code: `.claude/settings.local.json`, `~/.claude/settings.json`, `~/.claude.json#projects[cwd]`; Codex: the folder's `.codex/config.toml` and the user `config.toml` in `$CODEX_HOME`, or the profile file that already sets a hook's state or re-enables a skill) — a git-tracked team file only after a printed warning; a file the agent itself rewrites (`~/.claude.json`) only after a warning when an agent process is running |
 | quarantine | `<discovery-root-parent>/harn-off/<kind>/<name>` (`.claude/harn-off/…` for project items, `~/.claude/harn-off/…` for user items — outside `.claude/agents/**` and `.claude/skills/`; relocated per Open question 3 if the agent proves to scan it) + `manifest.json` (origin, date, loaders) |
 | journal + snapshots | harn's state dir (above) — never inside `~/.claude` or `~/.codex`; snapshot files keep the source file's mode; retention: journal entries are never auto-deleted (`harn history --prune` is the user's call) |
 
@@ -148,7 +181,8 @@ agent's prose; a reply without a valid plan is an error that quotes the reply's 
 ## Distribution (the llmux pattern, unchanged)
 
 - `.github/workflows/ci.yml` — fmt, clippy `-D warnings`, test on `ubuntu-latest` + `macos-latest`;
-  the differential tests are skipped when the agent binaries are absent (CI) and run locally.
+  CI sets none of the differential tests' variables, so they skip there (passing) and run locally
+  when asked.
 - `.github/workflows/release.yml` — on `v*` tag: verify tag == `Cargo.toml` version; the llmux
   build matrix (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
   `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`); bare binaries named `harn-<os>-<arch>` +
@@ -174,4 +208,4 @@ agent's prose; a reply without a valid plan is an error that quotes the reply's 
 3. P0 rows A1–A6, A9–A11 run by hand on macOS and on `cachy-z13`, each with its command output
    captured into the workstream's `loop.done.md`; P0.5 adds A7–A8.
 4. One stable tag → release assets on GitHub → `brew install 2lab-ai/tap/harn` on macOS and the
-   binary on `cachy-z13` → `harn --dir ~/2lab.ai/zbrain` runs on both.
+   binary on `cachy-z13` → `harn --dir ~/work/project` (a real working folder) runs on both.
