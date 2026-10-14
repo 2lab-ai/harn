@@ -1,6 +1,6 @@
 # loop — P0.5 drive (Codex resolver)
 
-Status: done (2026-10-15; R1 closed in `loop.done.md`). Codex is shipped on `main` (f8b65da): the
+Status: done (2026-10-15; R1 closed in `loop.done.md`). Codex is shipped on `main` (d7b45e3): the
 resolver, TOML switches with undo, `harn verify --agent codex`, every surface.
 
 Next start point: P1 (`ssot.md`, out of scope; `01-spec.md` §P1):

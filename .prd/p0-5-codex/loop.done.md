@@ -68,3 +68,13 @@ not be determined" and leaves catalog facts unknown (`01-spec.md` §Source of tr
 
 Each WU: one coding agent, its own worktree/branch, `just check` green, external review, merge.
 Screens (C6) need captured frames read before ship.
+
+## After R1 — one more fix (2026-10-15)
+
+#22 merged after the round closed, so the last Codex PR on `main` is d7b45e3, not f8b65da.
+`just check` on d7b45e3 (the author's macOS): exit 0, 676 tests passed, 3 ignored, 0 failed. The
+acceptance runs above stay as taken on f8b65da; #22 changes only how footnotes are numbered.
+
+| WU | scope | PR · merge | outcome |
+|---|---|---|---|
+| #22 | shared footnotes | #22 · d7b45e3 | rows with the same signal share one footnote that names them all, in the table and the HTML report (found on cachy-z13: one bundled-skill footnote printed once per skill); a tree whose signals all differ renders byte for byte as before |
