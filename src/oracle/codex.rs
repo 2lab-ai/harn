@@ -17,7 +17,9 @@
 //!   included, with `enabled` (`cli/src/mcp_cmd.rs:664-745`);
 //! - `codex -C <dir> plugin list --json` — plugins of the configured marketplaces
 //!   (`cli/src/plugin_cmd.rs:445-519`). A plugin enabled in config whose marketplace is not
-//!   configured still loads but is not listed (measured on 0.160.1, 2026-10-14).
+//!   configured still loads but is not listed (measured on 0.160.1, 2026-10-14). Plugins installed
+//!   for the ChatGPT account are listed with `source.source = "remote"` (marketplace
+//!   `openai-curated-remote`); no local file names them (measured on 0.160.1, 2026-10-14).
 //!
 //! `--profile` (from [`PROFILE_ENV`], as the resolver reads it) goes to prompt-input and mcp list
 //! only: codex rejects it for every other subcommand (`cli/src/main.rs:1861-1889`). No other flag
@@ -27,8 +29,28 @@
 //!
 //! Every run keeps its raw outputs in a directory so `harn verify --capture <dir>` re-checks them
 //! offline: [`MANIFEST`] (schema [`MANIFEST_SCHEMA`]: the `RunContext`, the environment that
-//! decides what codex reads, and each command's argv, exit status and files) plus one stdout and
-//! one stderr file per command.
+//! decides what codex reads, the bundled skill root as the run resolved it, and each command's
+//! argv, exit status and files) plus one stdout and one stderr file per command.
+//!
+//! The bundled root (`<CODEX_HOME>/skills/.system`) decides which listed skills `verify` may
+//! exempt as codex's own, so it is bound to the run, never to the verifier's filesystem now
+//! ([`CodexCapture::bundled_root`]): the manifest's `bundled_root` (written by [`run_codex`]:
+//! `CODEX_HOME` resolved against the run's cwd, canonicalised after the run) when present and
+//! absolute; for a manifest without it (an optional field: older captures read unchanged, the
+//! schema stays `/1`) the fallback touches no file ([`legacy_bundled_root`]).
+//!
+//! LEGACY RULE: an old capture binds a bundled root only when the recorded `CODEX_HOME` is unset
+//! (then `.codex` under the target's home) or is an absolute path with no `.` or `..` component,
+//! and only when codex listed exactly `<that home>/skills/.system` in its `### Skill roots`
+//! table. In every other case — a relative `CODEX_HOME` included — it binds nothing, and warns
+//! when codex listed any skill (with an empty listing no row depends on the root). The reason: without the filesystem as it was at capture time, harn cannot prove what a
+//! relative or dotted home resolved to (`link/..` cancelled lexically is not where codex went
+//! when `link` was a symlink), nor whether a home was reached through a symlink.
+//!
+//! Trust boundary: a capture directory is trusted data written by harn (`run_codex`, in a private
+//! `0700` dir). harn checks its shape (schema, artifact names, regular files, the working
+//! directory it is bound to) but does not authenticate it: a hand-edited manifest, a recorded
+//! `bundled_root` included, is believed.
 //!
 //! # How the prompt input is cut
 //!
@@ -253,7 +275,13 @@ pub struct ListedPlugin {
     /// `name@marketplace`.
     pub id: String,
     pub enabled: bool,
+    /// `source.source` as written: `local` (a path) or [`REMOTE_SOURCE`] (an account plugin).
+    #[serde(default)]
+    pub source: Option<String>,
 }
+
+/// `source.source` of a plugin installed for the ChatGPT account on the server.
+pub const REMOTE_SOURCE: &str = "remote";
 
 /// The files a capture dir may hold besides [`MANIFEST`]: each command's stdout and stderr. A
 /// manifest naming any other file is refused, and so is any of these that is a symlink.
@@ -287,6 +315,10 @@ pub struct Manifest {
     pub context: RunContext,
     /// [`BINDING_ENV`] as the run saw them (absent = unset).
     pub env: BTreeMap<String, Option<String>>,
+    /// `<CODEX_HOME>/skills/.system` as the run resolved it ([`run_bundled_root`]); absent in
+    /// captures written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_root: Option<PathBuf>,
     pub steps: Vec<Step>,
 }
 
@@ -307,6 +339,11 @@ pub struct CodexCapture {
     pub mcp_servers: Option<Vec<ListedServer>>,
     /// `None` when `plugin list` failed or its output is missing.
     pub plugins: Option<Vec<ListedPlugin>>,
+    /// Codex's bundled skill root in the run (`<CODEX_HOME>/skills/.system`), bound to the
+    /// capture (module docs); `None` when it cannot be established, and then no listed skill is
+    /// treated as bundled.
+    #[serde(default)]
+    pub bundled_root: Option<PathBuf>,
     /// Model slugs of `debug models` (`None` when it failed).
     pub models: Option<Vec<String>>,
     pub tree: Tree,
@@ -440,6 +477,7 @@ pub fn run_codex(target: &Target, codex_bin: &Path) -> anyhow::Result<CodexCaptu
             captured_at: now_iso8601(),
         },
         env: binding_env(target),
+        bundled_root: Some(run_bundled_root(target)),
         steps,
     };
     std::fs::write(
@@ -448,6 +486,102 @@ pub fn run_codex(target: &Target, codex_bin: &Path) -> anyhow::Result<CodexCaptu
     )
     .with_context(|| format!("writing {}", dir.join(MANIFEST).display()))?;
     read_capture_dir(&dir, target).with_context(|| format!("outputs kept in {}", dir.display()))
+}
+
+/// `<CODEX_HOME>/skills/.system` as a run of codex in `target.dir` resolves it: `CODEX_HOME`
+/// against that dir (the run's cwd; `utils/home-dir/src/lib.rs:13-35` canonicalises it), else
+/// `.codex` in the target's home; canonicalised (the root itself when it exists, else its home).
+pub fn run_bundled_root(target: &Target) -> PathBuf {
+    let home = match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
+        Some(v) => target.dir.join(v),
+        None => target.home.join(".codex"),
+    };
+    let root = home.join(BUNDLED_DIR);
+    std::fs::canonicalize(&root)
+        .or_else(|_| std::fs::canonicalize(&home).map(|h| h.join(BUNDLED_DIR)))
+        .unwrap_or(root)
+}
+
+/// The bundled root below `CODEX_HOME`.
+const BUNDLED_DIR: &str = "skills/.system";
+
+/// The bundled root of a capture: the recorded one when it is an absolute path; else (none
+/// recorded, or a malformed one, ignored with a warning) [`legacy_bundled_root`]. Warnings go to
+/// `warnings`.
+fn bind_bundled_root(
+    recorded: Option<PathBuf>,
+    capture: &CodexCapture,
+    target: &Target,
+    warnings: &mut Vec<String>,
+) -> Option<PathBuf> {
+    match recorded {
+        Some(root) if root.is_absolute() => return Some(root),
+        Some(root) => warnings.push(format!(
+            "bundled skills: the capture's recorded bundled_root {:?} is not an absolute path; ignored",
+            root.display().to_string()
+        )),
+        None => {}
+    }
+    let (root, warning) = legacy_bundled_root(capture, target);
+    warnings.extend(warning);
+    root
+}
+
+/// The bundled root of a capture that records none, by the LEGACY RULE (module docs), without
+/// touching a file: `<home>/skills/.system`, where home is `.codex` in the target's home (the
+/// manifest records no home) when the recorded `CODEX_HOME` is unset, else that `CODEX_HOME`
+/// when it is absolute with no `.` or `..` component — bound only if codex listed exactly that
+/// path in its `### Skill roots` table. Otherwise None, and a warning when codex listed any skill
+/// (one it may have taken from its bundled root stays unexempted).
+fn legacy_bundled_root(
+    capture: &CodexCapture,
+    target: &Target,
+) -> (Option<PathBuf>, Option<String>) {
+    let warn = |why: String| (None, (!capture.skills.is_empty()).then_some(why));
+    let recorded = capture
+        .env
+        .get("CODEX_HOME")
+        .and_then(Option::as_deref)
+        .filter(|v| !v.is_empty());
+    let home = match recorded {
+        None => target.home.join(".codex"),
+        Some(v) => PathBuf::from(v),
+    };
+    if !plain_absolute(&home) {
+        let which = match recorded {
+            Some(v) => format!("its CODEX_HOME ({v:?})"),
+            None => format!(
+                "the codex home under the target's home ({:?})",
+                home.display().to_string()
+            ),
+        };
+        return warn(format!(
+            "bundled skills: this capture records no bundled root, and {which} is relative or has a `.` or `..` component, which harn cannot resolve without the filesystem as it was at capture time; no listed skill is treated as bundled (a capture from `harn verify --run --agent codex` records the root)"
+        ));
+    }
+    let rebuilt = home.join(BUNDLED_DIR);
+    let written = rebuilt.to_string_lossy();
+    let listed = capture.block(names::SKILLS_FRAMING).is_some_and(|b| {
+        parse_skill_roots(&b.text)
+            .into_iter()
+            .any(|(_, root)| root == written)
+    });
+    if listed {
+        return (Some(rebuilt), None);
+    }
+    warn(format!(
+        "bundled skills: this capture records no bundled root, and the one harn rebuilds from its env ({written}) is not a skill root codex listed; no listed skill is treated as bundled (a home reached through a symlink cannot be proven from an old capture: a capture from `harn verify --run --agent codex` records the root)"
+    ))
+}
+
+/// An absolute path with no `.` or `..` segment, read from its text (`Path::components` drops an
+/// inner `.`).
+fn plain_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .to_string_lossy()
+            .split(std::path::is_separator)
+            .any(|segment| segment == "." || segment == "..")
 }
 
 /// [`BINDING_ENV`] from the target's environment.
@@ -766,6 +900,9 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
     );
     capture.dir = Some(dir);
     capture.warnings.extend(warnings);
+    let mut bound = Vec::new();
+    capture.bundled_root = bind_bundled_root(manifest.bundled_root, &capture, target, &mut bound);
+    capture.warnings.extend(bound);
     bind(&capture, target)?;
     capture.warnings.extend(drift(&capture, target));
     Ok(capture)
@@ -1015,8 +1152,7 @@ fn classify(
 /// (`` - `rN` = `<dir>` ``) or is absolute.
 pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
     let mut out = Vec::new();
-    let mut roots: BTreeMap<&str, &str> = BTreeMap::new();
-    let mut section = "";
+    let roots: BTreeMap<&str, &str> = parse_skill_roots(text).into_iter().collect();
     let mut inside = false;
     for line in text.split('\n') {
         if line == "### Available skills" {
@@ -1024,17 +1160,6 @@ pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
             continue;
         }
         if !inside {
-            if line.starts_with("### ") {
-                section = line;
-            } else if section == "### Skill roots" {
-                let alias_root = line
-                    .strip_prefix("- `")
-                    .and_then(|rest| rest.split_once("` = `"))
-                    .and_then(|(alias, root)| Some((alias, root.strip_suffix('`')?)));
-                if let Some((alias, root)) = alias_root {
-                    roots.insert(alias, root);
-                }
-            }
             continue;
         }
         if line.starts_with("### ") || line.starts_with("</skills_instructions>") {
@@ -1067,6 +1192,32 @@ pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
     out
 }
 
+/// The `### Skill roots` table of a `<skills_instructions>` block, `(alias, root)` in order: the
+/// `` - `rN` = `<dir>` `` lines of that section before `### Available skills` (empty when codex
+/// lists absolute paths).
+pub fn parse_skill_roots(text: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut section = "";
+    for line in text.split('\n') {
+        if line == "### Available skills" {
+            break;
+        }
+        if line.starts_with("### ") {
+            section = line;
+        } else if section == "### Skill roots" {
+            out.extend(parse_root_line(line));
+        }
+    }
+    out
+}
+
+/// One roots-table line, `` - `rN` = `<dir>` `` → `(rN, dir)`.
+pub fn parse_root_line(line: &str) -> Option<(&str, &str)> {
+    line.strip_prefix("- `")
+        .and_then(|rest| rest.split_once("` = `"))
+        .and_then(|(alias, root)| Some((alias, root.strip_suffix('`')?)))
+}
+
 /// `codex mcp list --json`: an array of `{name, enabled, disabled_reason, …}`.
 pub fn parse_mcp_list(text: &str) -> anyhow::Result<Vec<ListedServer>> {
     let v: Value = serde_json::from_str(text.trim()).context("not JSON")?;
@@ -1083,8 +1234,8 @@ pub fn parse_mcp_list(text: &str) -> anyhow::Result<Vec<ListedServer>> {
         .collect())
 }
 
-/// `codex plugin list --json`: `{installed: [{pluginId, enabled, …}], available: […]}`; only
-/// `installed` entries are kept.
+/// `codex plugin list --json`: `{installed: [{pluginId, enabled, source: {source, …}, …}],
+/// available: […]}`; only `installed` entries are kept.
 pub fn parse_plugin_list(text: &str) -> anyhow::Result<Vec<ListedPlugin>> {
     let v: Value = serde_json::from_str(text.trim()).context("not JSON")?;
     let installed = v["installed"]
@@ -1097,6 +1248,7 @@ pub fn parse_plugin_list(text: &str) -> anyhow::Result<Vec<ListedPlugin>> {
             Some(ListedPlugin {
                 id: e["pluginId"].as_str()?.to_string(),
                 enabled: e["enabled"].as_bool().unwrap_or(false),
+                source: e["source"]["source"].as_str().map(str::to_string),
             })
         })
         .collect())
@@ -1226,7 +1378,12 @@ pub fn build(
     }
     for p in plugins.iter().flatten().filter(|p| p.enabled) {
         let mut item = row(Kind::Plugin, Layer::Unresolved, &p.id, None);
-        item.origin.why = vec!["codex plugin list --json: installed, enabled".to_string()];
+        item.origin.why = vec![match p.source.as_deref() {
+            Some(source) => {
+                format!("codex plugin list --json: installed, enabled, source {source}")
+            }
+            None => "codex plugin list --json: installed, enabled".to_string(),
+        }];
         items.push(item);
     }
     let tree = Tree {
@@ -1256,6 +1413,7 @@ pub fn build(
         skills,
         mcp_servers,
         plugins,
+        bundled_root: None,
         models,
         tree,
         dir: None,
@@ -1479,6 +1637,22 @@ mod tests {
         assert_eq!(blocks[0].name, "developer_instructions");
         assert_eq!(blocks[1].name, "input[0].part[1]");
         assert!(!blocks[1].known);
+    }
+
+    #[test]
+    fn only_a_plain_absolute_home_is_provable() {
+        assert!(plain_absolute(Path::new("/h/.codex")));
+        assert!(plain_absolute(Path::new("/h/codex-home/")));
+        for p in [
+            "rel/home",
+            ".codex",
+            "/h/link/..",
+            "/h/./x",
+            "/h/x/.",
+            "/../h",
+        ] {
+            assert!(!plain_absolute(Path::new(p)), "{p}");
+        }
     }
 
     #[test]

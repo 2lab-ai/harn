@@ -4,7 +4,10 @@
 //! tests assume absent; the admin root (`/etc/codex/skills`) is covered in `src/resolve/codex`.
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
-use harn::resolve::codex::{CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV};
+use harn::resolve::codex::{
+    BUNDLED_ROOT_PREFIX, BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, CATALOG_GATED,
+    PROFILE_ENV, ROOT_PREFIX,
+};
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -390,6 +393,19 @@ fn entry_and_framing_bytes_match_a_hand_rendered_block() {
         block.len() as u64,
         "framing + entries = the whole block"
     );
+    // The roots table it predicts, line by line (verify compares it with codex's).
+    let roots: Vec<&str> = framing
+        .origin
+        .why
+        .iter()
+        .filter_map(|w| w.strip_prefix(ROOT_PREFIX))
+        .collect();
+    let table = format!("- `r0` = `{r}`");
+    if block.contains("### Skill roots") {
+        assert_eq!(roots, [table.as_str()]);
+    } else {
+        assert!(roots.is_empty(), "{roots:?}");
+    }
     // The container is skipped by the totals; framing and entries are counted once each.
     assert!(tree.predicted_known >= block.len() as u64);
     // Request order: the block right after the base instructions (no developer_instructions).
@@ -557,9 +573,25 @@ fn bundled_enabled_false_removes_the_system_skills() {
         .expect("bundled knob");
     // `.system` is not walked as part of `~/.codex/skills` (hidden dirs are pruned).
     assert_eq!(skill_ids(&t).len(), 2);
+    // One bundled skill: the note says so in the singular.
+    assert!(
+        t.signals.iter().any(|s| s.starts_with("bundled skills:")
+            && s.contains(", so this skill and its listing line can change. `harn verify")),
+        "{:?}",
+        t.signals
+    );
 
     let after = resolve(&target(&f), Some(&overlay_of(bundled)));
     assert_eq!(skill_ids(&after), ["codex/skill/user/notes"]);
+    // No `.system` row, no note on the folder.
+    assert!(
+        !after
+            .signals
+            .iter()
+            .any(|s| s.starts_with("bundled skills:")),
+        "{:?}",
+        after.signals
+    );
 
     // A missing `.system` while bundled skills are on: codex installs it at startup.
     std::fs::remove_dir_all(f.codex.join("skills/.system")).unwrap();
@@ -570,6 +602,93 @@ fn bundled_enabled_false_removes_the_system_skills() {
             .any(|w| w.contains("codex installs its bundled skills")),
         "{:?}",
         t.warnings
+    );
+}
+
+#[test]
+fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
+    // The folder holds the set of whichever codex started last (skills/src/lib.rs:59-121): its
+    // rows are listed as found, with a signal; the tree says it once.
+    let f = fx();
+    skill(
+        &f.codex.join("skills/.system"),
+        "imagegen",
+        "Generate images.",
+    );
+    skill(
+        &f.codex.join("skills/.system"),
+        "skill-creator",
+        "Create skills.",
+    );
+    // Not in the listing (`allow_implicit_invocation: false`), still from the folder.
+    write(
+        &skill(&f.codex.join("skills/.system"), "quiet", "Invoked by name.")
+            .parent()
+            .unwrap()
+            .join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    );
+    skill(&f.codex.join("skills"), "notes", "Keep notes.");
+    user_config(&f, "");
+    let signal = format!(
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; when codex 0.160.1 starts it may replace them with its own built-in skills, so this skill and its listing line can change"
+    );
+    let note = "bundled skills: ~/.codex/skills/.system holds the built-in skills last written there by Codex (skills/src/lib.rs:59-121); when codex 0.160.1 starts it may replace them with its own built-in skills, so these 3 skills and their listing lines can change. `harn verify --run --agent codex` shows the ones Codex lists".to_string();
+    let t = resolve(&ctarget(&f), None);
+    // The table names the bundled root (`r1`, after the user root), and the framing says so.
+    let framing = row(&t, "codex/system-prompt/builtin/skills_instructions");
+    let system = std::fs::canonicalize(f.codex.join("skills/.system")).unwrap();
+    let in_table =
+        framing.origin.why.iter().any(|w| {
+            w.starts_with(ROOT_PREFIX) && w.ends_with(&format!(" = `{}`", system.display()))
+        });
+    let marked: Vec<&str> = framing
+        .origin
+        .why
+        .iter()
+        .filter_map(|w| w.strip_prefix(BUNDLED_ROOT_PREFIX))
+        .collect();
+    assert!(in_table, "{:?}", framing.origin.why);
+    assert_eq!(marked, [system.display().to_string()]);
+    for name in ["imagegen", "skill-creator", "quiet"] {
+        let r = row(&t, &format!("codex/skill/builtin/{name}"));
+        assert_eq!(r.signal.as_deref(), Some(signal.as_str()), "{name}");
+    }
+    assert_eq!(
+        row(&t, "codex/skill/builtin/quiet").mode,
+        Mode::OnDemand,
+        "the signal does not depend on the listing"
+    );
+    assert_eq!(row(&t, "codex/skill/user/notes").signal, None);
+    assert_eq!(listing(&t).signal, None);
+    let notes: Vec<&String> = t
+        .signals
+        .iter()
+        .filter(|s| s.starts_with("bundled skills:"))
+        .collect();
+    assert_eq!(notes, [&note]);
+    assert!(
+        !t.signals.iter().any(|s| s.starts_with(BUNDLED_SKILL)),
+        "the note is not a row signal: {:?}",
+        t.signals
+    );
+
+    // Which codex rewrites the folder, as far as the files say.
+    let t = resolve(&target(&f), None);
+    let r = row(&t, "codex/skill/builtin/imagegen");
+    assert!(
+        r.signal.as_deref().is_some_and(|s| s.contains(
+            "; the codex that runs may replace them with its own built-in skills, so this skill"
+        )),
+        "{:?}",
+        r.signal
+    );
+    assert_eq!(
+        t.signals
+            .iter()
+            .filter(|s| s.starts_with("bundled skills:"))
+            .count(),
+        1
     );
 }
 

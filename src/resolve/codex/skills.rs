@@ -42,6 +42,15 @@
 //! descriptions round-robin (render.rs:331-453); that cut is not modelled: the rows keep their
 //! full size as an estimate and the listing says so.
 //!
+//! Bundled skills: when codex starts it compares the fingerprint of its embedded skill set with
+//! the one in `$CODEX_HOME/skills/.system/.codex-system-skills.marker`, and replaces the folder
+//! with its own set only when they differ (`skills/src/lib.rs:59-121`, the skip at `:84-99`). The
+//! set depends on the codex version, and every codex on a machine (an app, a daemon, the CLI)
+//! shares the folder, so it holds the set of the last codex whose fingerprint differed. harn
+//! cannot know a codex's embedded set without its binary: each `.system` row carries a
+//! [`BUNDLED_SKILL`] signal, the tree one note ([`bundled_note`]), and verify does not count a
+//! `.system` difference as a failure.
+//!
 //! Attribution (as the AGENTS.md message): each entry row costs its line + `\n`; the
 //! `skills_instructions` row costs the rest of the block (tags, intro, roots table, usage), so a
 //! sum over rows counts every byte once. The `skills` listing row is a container (its cost is the
@@ -49,7 +58,7 @@
 
 use super::config::Source;
 use super::plugins::Plugin;
-use super::{config_knobs, new_item, Ctx};
+use super::{config_knobs, new_item, Ctx, Installed};
 use crate::model::{item_id, Agent, Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use crate::resolve::claude::{cost_na, frontmatter, fs};
 use serde_json::{json, Value};
@@ -59,6 +68,25 @@ use std::path::{Path, PathBuf};
 /// Pushed to `Tree.warnings` when the budget cannot be computed (the window is unknown to harn).
 pub const CAP_STATE_UNKNOWN: &str =
     "codex skill listing budget unknown (the model's context window is unknown: see the model: signal); fit state unknown until a capture";
+
+/// Signal prefix of a skill row found in `$CODEX_HOME/skills/.system` (see the module docs): its
+/// presence and listing line are what the folder holds now, which the codex that runs replaces
+/// with its own set when it starts if that set's fingerprint differs. Verify treats `item.signal.starts_with(BUNDLED_SKILL)`
+/// as not checkable when codex lists it otherwise or not at all.
+pub const BUNDLED_SKILL: &str = "bundled-skill:";
+
+/// What the `.system` folder holds, after its path; shared by the rows' signal, the tree note and
+/// verify's reasons.
+pub const BUNDLED_SKILLS_WHY: &str =
+    "holds the built-in skills last written there by Codex (skills/src/lib.rs:59-121)";
+
+/// The `origin.why` prefix under which the framing row records each line of the roots table it
+/// predicts (`` - `rN` = `<dir>` ``).
+pub const ROOT_PREFIX: &str = "rendered root: ";
+
+/// The `origin.why` prefix under which the framing row names the roots-table value that is the
+/// bundled root (`$CODEX_HOME/skills/.system` resolved), when the table it predicts has it.
+pub const BUNDLED_ROOT_PREFIX: &str = "bundled root: ";
 
 /// The listing container's id name and the framing row's id name.
 pub(crate) const LISTING: &str = "skills";
@@ -1200,6 +1228,11 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
             (SkillScope::System, None) => {
                 knobs.extend(bundled_knob.iter().cloned());
                 item.origin.why.extend(bundled_bad.clone());
+                item.signal = Some(format!(
+                    "{BUNDLED_SKILL} {} {BUNDLED_SKILLS_WHY}; {}, so this skill and its listing line can change",
+                    ctx.display(&ctx.codex_home.join("skills/.system")),
+                    writes_at_start(ctx)
+                ));
             }
             _ => {}
         }
@@ -1258,6 +1291,45 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
     out
 }
 
+/// What happens to the `.system` folder when codex starts, as far as harn knows which codex:
+/// codex reinstalls its embedded set when the folder's marker (a fingerprint of the embedded set)
+/// differs from its own (`skills/src/lib.rs:84-99`) — not when the files differ, and not on every
+/// version change (two versions with the same set share a fingerprint).
+fn writes_at_start(ctx: &Ctx) -> String {
+    let replaces = "may replace them with its own built-in skills";
+    match &ctx.installed {
+        Installed::Version(v) => format!("when codex {v} starts it {replaces}"),
+        Installed::Unversioned => format!("when the installed codex starts it {replaces}"),
+        Installed::NotFound => format!("the codex that runs {replaces}"),
+    }
+}
+
+/// The tree's one note on the `.system` folder, when a listing row came from it.
+pub(crate) fn bundled_note(ctx: &Ctx, items: &[Item]) -> Option<String> {
+    let rows = items
+        .iter()
+        .filter(|i| i.kind == Kind::SkillListing)
+        .flat_map(|l| &l.children)
+        .filter(|c| {
+            c.signal
+                .as_deref()
+                .is_some_and(|g| g.starts_with(BUNDLED_SKILL))
+        })
+        .count();
+    (rows > 0).then(|| {
+        let these = if rows == 1 {
+            "this skill and its listing line".to_string()
+        } else {
+            format!("these {rows} skills and their listing lines")
+        };
+        format!(
+            "bundled skills: {} {BUNDLED_SKILLS_WHY}; {}, so {these} can change. `harn verify --run --agent codex` shows the ones Codex lists",
+            ctx.display(&ctx.codex_home.join("skills/.system")),
+            writes_at_start(ctx),
+        )
+    })
+}
+
 /// The block minus its entry lines: tags, intro, roots table, usage section.
 fn framing_row(ctx: &Ctx, r: &Rendered, knobs: Vec<Knob>) -> Item {
     let entries: usize = r.lines.iter().map(|l| l.len() + 1).sum();
@@ -1274,6 +1346,20 @@ fn framing_row(ctx: &Ctx, r: &Rendered, knobs: Vec<Knob>) -> Item {
     item.origin.why = vec![
         "`<skills_instructions>` developer block around the listing: `## Skills`, the intro, the roots table when used, `### Available skills` (ext/skills/src/catalog_prompt.rs:81-106)".to_string(),
     ];
+    // The roots table as rendered, and which of its lines is the bundled root: verify compares it
+    // with codex's when the bundled root's line is on one side only.
+    item.origin
+        .why
+        .extend(r.roots.iter().map(|line| format!("{ROOT_PREFIX}{line}")));
+    let bundled = slash(&ctx.fs.realpath(&ctx.codex_home.join("skills/.system")));
+    if r.roots
+        .iter()
+        .any(|line| line.ends_with(&format!(" = `{bundled}`")))
+    {
+        item.origin
+            .why
+            .push(format!("{BUNDLED_ROOT_PREFIX}{bundled}"));
+    }
     match ctx.catalog_flag("include_skills_usage_instructions") {
         Ok(usage) => {
             item.cost = Cost {

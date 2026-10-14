@@ -46,7 +46,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 mod codex;
-pub use codex::{verify_codex, CATALOG_GATED, OUTSIDE_THE_DUMP, RUNTIME_DECIDED};
+pub use codex::{
+    verify_codex, ACCOUNT_PLUGIN, BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CATALOG_GATED,
+    OUTSIDE_THE_DUMP, RUNTIME_DECIDED,
+};
 
 /// Bytes a reproducible contribution may differ by (a trailing newline the agent adds or drops).
 pub const CONTENT_TOLERANCE: u64 = 2;

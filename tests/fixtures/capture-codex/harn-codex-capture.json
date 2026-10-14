@@ -11,6 +11,7 @@
     "captured_at": "2026-10-14T00:00:00Z"
   },
   "env": {"CODEX_HOME": null, "HARN_CODEX_PROFILE": null},
+  "bundled_root": "@HOME@/.codex/skills/.system",
   "steps": [
     {"args": ["--version"], "stdout": "version.txt", "stderr": "version.stderr", "exit": 0},
     {"args": ["-C", "@REPO@/sub", "debug", "prompt-input"], "stdout": "prompt-input.json", "stderr": "prompt-input.stderr", "exit": 0},

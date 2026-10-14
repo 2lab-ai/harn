@@ -56,7 +56,9 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub use config::PROFILE_ENV;
-pub use skills::CAP_STATE_UNKNOWN;
+pub use skills::{
+    BUNDLED_ROOT_PREFIX, BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, ROOT_PREFIX,
+};
 
 /// Signal prefix of a row whose presence the model's catalog entry decides while harn does not
 /// know what codex will read there ([`Ctx::catalog_entry`]: no model in config, `model_catalog_json`
@@ -75,6 +77,9 @@ pub(crate) struct Ctx<'a> {
     pub config: Config,
     /// The effective model and context window (C2 needs the window for the skills cap).
     pub model: ModelFacts,
+    /// The codex on the target's `PATH`: the one whose embedded set lands in `.system` when it
+    /// starts ([`skills::BUNDLED_SKILL`]).
+    pub installed: Installed,
     pub warnings: Vec<String>,
 }
 
@@ -602,6 +607,7 @@ pub(crate) fn resolve_with(
         system_dir: system_dir.to_path_buf(),
         config,
         model,
+        installed,
         warnings,
     };
 
@@ -648,14 +654,15 @@ pub(crate) fn resolve_with(
     tree.trust = Some(trust);
     tree.codex = Some(codex_facts(&ctx));
     tree.signals.push(model_signal(&ctx));
+    tree.signals.extend(skills::bundled_note(&ctx, &tree.items));
     if let Some(profile) = &ctx.config.profile {
         tree.signals.push(format!(
             "profile: {profile} ({} = {profile}, as `codex --profile {profile}`)",
             config::PROFILE_ENV
         ));
     }
-    tree.agent_version = match installed {
-        Installed::Version(v) => Some(v),
+    tree.agent_version = match &ctx.installed {
+        Installed::Version(v) => Some(v.clone()),
         Installed::NotFound | Installed::Unversioned => None,
     };
     let mut warnings = ctx.warnings;
