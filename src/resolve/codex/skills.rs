@@ -1229,7 +1229,7 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
                 knobs.extend(bundled_knob.iter().cloned());
                 item.origin.why.extend(bundled_bad.clone());
                 item.signal = Some(format!(
-                    "{BUNDLED_SKILL} {} {BUNDLED_SKILLS_WHY}; {}, so this skill and its listing line can change",
+                    "{BUNDLED_SKILL} {} {BUNDLED_SKILLS_WHY}; {}, so the skills there and their listing lines can change",
                     ctx.display(&ctx.codex_home.join("skills/.system")),
                     writes_at_start(ctx)
                 ));

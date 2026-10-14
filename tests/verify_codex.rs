@@ -1720,7 +1720,7 @@ const SYS_PLUGIN: &str = "- plugin-creator: Create plugins. (file: r2/plugin-cre
 /// The resolver's signal on a `.system` row (`src/resolve/codex/skills.rs`).
 fn bundled_signal() -> String {
     format!(
-        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; when codex 0.160.1 starts it may replace them with its own built-in skills, so this skill and its listing line can change"
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; when codex 0.160.1 starts it may replace them with its own built-in skills, so the skills there and their listing lines can change"
     )
 }
 

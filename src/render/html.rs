@@ -3,8 +3,8 @@
 
 use super::common::{
     cost_column, default_action, denominator, facts, freed_cell, kb, label_with_count,
-    origin_short, partition, percent, request_bytes, share_tenths, sorted, step_text, Glyphs,
-    UNICODE,
+    origin_short, partition, percent, request_bytes, share_tenths, sorted, step_text, Footnotes,
+    Glyphs, UNICODE,
 };
 use crate::model::{Document, Item, Tree};
 
@@ -51,7 +51,8 @@ table.rows td:empty{display:none}
 "#;
 
 /// The page: header, one section per agent (facts, the main rows, the runtime block, the signal
-/// notes), a footer with `doc.generated_at` and the `harn --version` line.
+/// notes, one per distinct signal), a footer with `doc.generated_at` and the `harn --version`
+/// line.
 pub fn html(doc: &Document) -> String {
     let g = &UNICODE;
     let mut dirs: Vec<String> = Vec::new();
@@ -129,13 +130,14 @@ fn section(out: &mut Vec<String>, tree: &Tree, g: &Glyphs) {
             "predicted"
         },
     };
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes = Footnotes::default();
     let (main, trailing) = partition(tree);
     table(out, &main, &mut notes, &ctx);
     if !trailing.is_empty() {
         out.push("<h3>runtime / no first-request cost</h3>".to_string());
         table(out, &trailing, &mut notes, &ctx);
     }
+    let notes = notes.lines();
     if !notes.is_empty() {
         out.push("<ol class=\"notes\">".to_string());
         out.extend(notes.iter().map(|n| format!("<li>{}</li>", esc(n))));
@@ -160,7 +162,7 @@ const COLUMNS: [&str; 7] = [
     "default action",
 ];
 
-fn table(out: &mut Vec<String>, items: &[&Item], notes: &mut Vec<String>, ctx: &Ctx) {
+fn table(out: &mut Vec<String>, items: &[&Item], notes: &mut Footnotes, ctx: &Ctx) {
     let head: Vec<String> = COLUMNS
         .iter()
         .map(|c| {
@@ -179,7 +181,7 @@ fn table(out: &mut Vec<String>, items: &[&Item], notes: &mut Vec<String>, ctx: &
 }
 
 /// The item's row, then every child (all expanded: a file has no width budget).
-fn rows(out: &mut Vec<String>, item: &Item, depth: usize, notes: &mut Vec<String>, ctx: &Ctx) {
+fn rows(out: &mut Vec<String>, item: &Item, depth: usize, notes: &mut Footnotes, ctx: &Ctx) {
     let g = ctx.g;
     let tenths = share_tenths(request_bytes(&item.cost), ctx.denominator);
     let share = match tenths {
@@ -192,8 +194,8 @@ fn rows(out: &mut Vec<String>, item: &Item, depth: usize, notes: &mut Vec<String
     };
     let mut label = esc(&label_with_count(&item.label, item.children.len(), g));
     if let Some(signal) = &item.signal {
-        notes.push(format!("{}: {signal}", item.label));
-        label.push_str(&format!(" <span class=\"signal\">[{}]</span>", notes.len()));
+        let n = notes.mark(&item.label, signal);
+        label.push_str(&format!(" <span class=\"signal\">[{n}]</span>"));
     }
     let cells = [
         ("freed (pred)", "num", esc(&freed_cell(item, g, kb))),
