@@ -161,7 +161,7 @@ prefixes `mcp__<server>__` / `mcp__plugin_<p>_<s>__`, skill and agent names, fil
 
 | what | where |
 |---|---|
-| official knob | the agent's own file in the chosen scope (`.claude/settings.local.json`, `~/.claude/settings.json`, `~/.claude.json#projects[cwd]`, `.codex/config.toml`, `~/.codex/config.toml`, `~/.codex/hooks.json` state) — a git-tracked team file only after a printed warning; a file the agent itself rewrites (`~/.claude.json`) only after a warning when an agent process is running |
+| official knob | the agent's own file in the chosen scope (Claude Code: `.claude/settings.local.json`, `~/.claude/settings.json`, `~/.claude.json#projects[cwd]`; Codex: the folder's `.codex/config.toml` and the user `config.toml` in `$CODEX_HOME`, or the profile file that already sets a hook's state or re-enables a skill) — a git-tracked team file only after a printed warning; a file the agent itself rewrites (`~/.claude.json`) only after a warning when an agent process is running |
 | quarantine | `<discovery-root-parent>/harn-off/<kind>/<name>` (`.claude/harn-off/…` for project items, `~/.claude/harn-off/…` for user items — outside `.claude/agents/**` and `.claude/skills/`; relocated per Open question 3 if the agent proves to scan it) + `manifest.json` (origin, date, loaders) |
 | journal + snapshots | harn's state dir (above) — never inside `~/.claude` or `~/.codex`; snapshot files keep the source file's mode; retention: journal entries are never auto-deleted (`harn history --prune` is the user's call) |
 

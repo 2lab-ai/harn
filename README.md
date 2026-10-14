@@ -71,10 +71,11 @@ agent with nothing in this directory (Codex never ran on this machine) gets no t
 ## Codex
 
 `harn --agent codex [DIR]` shows what the Codex CLI loads in `DIR`: the AGENTS.md files (your
-global `~/.codex/AGENTS.md`, then the project's, root to `DIR`; only the project's files share the
-`project_doc_max_bytes` budget, 32 KiB by default), the skill listing, plugins (each with its
-skills, MCP servers and hooks), your own hooks and MCP servers, rules files and the blocks Codex
-writes itself (base instructions, permissions, environment, …). The header
+global one in `$CODEX_HOME`, `~/.codex` by default: `AGENTS.override.md`, else `AGENTS.md`; then
+the project's, root to `DIR`; only the project's files share the `project_doc_max_bytes` budget,
+32 KiB by default), the skill listing, plugins (each with its skills, MCP servers and hooks), your
+own hooks and MCP servers, rules files and the blocks Codex writes itself (base instructions,
+permissions, environment, …). The header
 says whether Codex trusts the folder, because that decides whether the project's
 `.codex/config.toml`, hooks and rules load at all; `i` explains it.
 
