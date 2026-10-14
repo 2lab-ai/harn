@@ -2,9 +2,9 @@
 //! §resolve). A resolver never starts the agent and never spawns a process.
 
 pub mod claude;
+pub mod codex;
 
 use crate::model::{Agent, Item, Knob, Overlay, Target, Tree};
-use anyhow::anyhow;
 
 /// `Send + Sync`: `plan::annotate_freed` re-resolves distinct overlays on several threads.
 pub trait Resolver: Send + Sync {
@@ -49,27 +49,32 @@ impl Resolver for ClaudeCode {
     }
 }
 
-/// Codex is P0.5; until its resolver lands, selecting it explicitly fails with this.
-struct CodexPending;
+/// Codex resolver (P0.5). Reads only files; never spawns a process.
+pub struct Codex;
 
-impl Resolver for CodexPending {
+impl Codex {
+    /// codex-cli version `research/02` and the resolver were checked against (tag `rust-v0.160.1`).
+    pub const VERIFIED_AGAINST: &'static str = "0.160.1";
+}
+
+impl Resolver for Codex {
     fn agent(&self) -> Agent {
         Agent::Codex
     }
 
     fn rules_verified_against(&self) -> &'static str {
-        "unverified"
+        Self::VERIFIED_AGAINST
     }
 
-    fn resolve(&self, _target: &Target, _overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
-        Err(anyhow!("not implemented: codex resolver (P0.5)"))
+    fn resolve(&self, target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tree> {
+        codex::resolve(target, overlay)
     }
 }
 
 pub fn for_agent(agent: Agent) -> Box<dyn Resolver> {
     match agent {
         Agent::ClaudeCode => Box::new(ClaudeCode),
-        Agent::Codex => Box::new(CodexPending),
+        Agent::Codex => Box::new(Codex),
     }
 }
 

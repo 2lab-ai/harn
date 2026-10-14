@@ -18,7 +18,7 @@
 mod agents;
 mod builtins;
 mod frontmatter;
-mod fs;
+pub(crate) mod fs;
 mod glob;
 mod hooks;
 mod instructions;
