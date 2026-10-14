@@ -21,14 +21,14 @@ machines and P0.5 (Codex) is shipped; what is open is P1 (§P1 below). The site 
 
 ## Problem
 
-A fresh Claude Code 2.1.296 session in `~/2lab.ai/zbrain` sends a first request of 332,548 bytes
-before reading the user's instruction, which is 2 of those bytes (`hi`) (`research/04` §E, measured
-2026-10-13 with Claude Code's own raw-body capture). The bytes come from the four places the user
-named — the agent's built-in prompt and tools, the `~/.claude` harness, the working folder's
-harness, then the instruction — and Codex assembles its own request from `~/.codex` and `AGENTS.md`
-the same way. Nothing today shows the effective harness for a directory **without starting a
-session**, with the **file or setting that produced each item**, the **cost** it adds to the
-request, and the **switch** that removes it. Claude Code's `/context` is the closest thing
+A fresh Claude Code 2.1.296 session in a real working folder (`~/work/project` below) sends a first
+request of 332,548 bytes before reading the user's instruction, which is 2 of those bytes (`hi`)
+(`research/04` §E, measured 2026-10-13 with Claude Code's own raw-body capture). The bytes come from
+the four places the user named — the agent's built-in prompt and tools, the `~/.claude` harness, the
+working folder's harness, then the instruction — and Codex assembles its own request from `~/.codex`
+and `AGENTS.md` the same way. Nothing today shows the effective harness for a directory **without
+starting a session**, with the **file or setting that produced each item**, the **cost** it adds to
+the request, and the **switch** that removes it. Claude Code's `/context` is the closest thing
 (`research/04` §A): an estimate, inside a live session, no hooks, no paths, no action. Trimming the
 harness today means grepping six config layers and guessing.
 
@@ -300,7 +300,7 @@ until a bound capture turns it into `observed`.
 
 Every command takes the target directory as `--dir <path>`; the listing commands — `harn [DIR]`,
 `harn --json [DIR]`, `harn trim [DIR]`, `harn report [DIR]` — also accept it as the positional `[DIR]` the user's
-statement uses (`harn ~/2lab.ai/zbrain`). Both normalize to the
+statement uses (`harn ~/work/project`). Both normalize to the
 same canonical target; giving both is a usage error. Default: cwd. `--agent claude-code|codex`
 selects one agent (default: all, one table each).
 
@@ -381,7 +381,7 @@ unknown)`, the MCP schema rows and the hook row show `?`, and `share` is compute
 sum only.
 
 ```
-harn ~/2lab.ai/zbrain                                     claude-code 2.1.296 (rules verified 2.1.296)
+harn ~/work/project                                       claude-code 2.1.296 (rules verified 2.1.296)
 first request: observed 332.5 KB (capture 2026-10-13) = attributed 322.6 + parameters 7.8 + framing 2.1   sort: freed ▼
 tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → 48 MCP schemas eager, 142.3 KB
     knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]       freed: ?
@@ -416,7 +416,7 @@ skill listing: OVER CAP — 146 of 216 descriptions dropped (observed); those sk
 ### Detail pane — `harn why plugin:slack`
 
 ```
-plugin:slack:slack   (claude-code/mcp-server/plugin/plugin:slack:slack)        target: ~/2lab.ai/zbrain
+plugin:slack:slack   (claude-code/mcp-server/plugin/plugin:slack:slack)        target: ~/work/project
   27 MCP tools · observed 77,536 B schemas (capture 2026-10-13) · 0 B instructions · mode always (tool search off)
   why loaded
     ~/.claude/settings.json        enabledPlugins["slack@claude-plugins-official"] = true
@@ -497,27 +497,28 @@ ignore trust entirely), and `-c plugins."x@y".enabled=false` being silently igno
 ## Acceptance scenarios
 
 Each row: run → what must be observed. "Both machines" = the author's macOS and `cachy-z13`.
+`~/work/project` stands for the real working folder the receipts were taken in.
 **P0 gate = A1–A6, A9–A15 on both machines. P0.5 = A7–A8 on the author's macOS, and A9 for the
 Codex tree.**
 
 | # | run | observed |
 |---|---|---|
-| A1 | `harn --dir ~/2lab.ai/zbrain --json --agent claude-code` | every statically discoverable name in that session's `init` event (`skills`, `agents`, `plugins`, `mcp_servers` with `source`) appears exactly once in the tree with the same `source`; MCP tool names and hook stdout are `?` rows, not omissions; no session was started (no new file under `~/.claude/projects/<slug>/`, no child process) |
-| A2 | `harn ~/2lab.ai/zbrain` (and the same with `--dir`) | one table per agent, sorted by freed; every row has origin + mode + cost tag + default action; the header names the cost tag, the attributed/framing split and the tool-search state; runtime < 1 s on both machines |
-| A3 | `harn verify --run --dir ~/2lab.ai/zbrain --agent claude-code` | prints what it will execute, makes one headless run; within the Claude Code projection (modes `runtime`/`none` excluded, capture-only children attached under their `?` parent) the report lists 0 `predicted-not-seen` and 0 `seen-not-predicted` **among statically discoverable ids (the A1 set)** and 0 content-conformance failures on reproducible static contributions; `?` rows become `observed`; the header switches to `observed` for the matched regions only |
+| A1 | `harn --dir ~/work/project --json --agent claude-code` | every statically discoverable name in that session's `init` event (`skills`, `agents`, `plugins`, `mcp_servers` with `source`) appears exactly once in the tree with the same `source`; MCP tool names and hook stdout are `?` rows, not omissions; no session was started (no new file under `~/.claude/projects/<slug>/`, no child process) |
+| A2 | `harn ~/work/project` (and the same with `--dir`) | one table per agent, sorted by freed; every row has origin + mode + cost tag + default action; the header names the cost tag, the attributed/framing split and the tool-search state; runtime < 1 s on both machines |
+| A3 | `harn verify --run --dir ~/work/project --agent claude-code` | prints what it will execute, makes one headless run; within the Claude Code projection (modes `runtime`/`none` excluded, capture-only children attached under their `?` parent) the report lists 0 `predicted-not-seen` and 0 `seen-not-predicted` **among statically discoverable ids (the A1 set)** and 0 content-conformance failures on reproducible static contributions; `?` rows become `observed`; the header switches to `observed` for the matched regions only |
 | A3b | `just check` | the fixture suite includes before/after `freed` cases, each fixture defining **both** renderings (before and after) so the assertion is against the fixture's actual byte difference and never against a rule such as "at cap → 0": a token-budgeted listing (asserts `Δ?` statically and the exact delta when the fixture supplies the after-listing), a plugin whose skills leave with it, an item shared by two origins (counted once), and an excluded `CLAUDE.md` taking its `@imports` along |
-| A4 | `harn off plugin:slack --dir ~/2lab.ai/zbrain` then `claude -p hi --output-format stream-json --verbose` in that directory | the plan showed target dir, diff, freed and side effects; `.claude/settings.local.json` gained `enabledPlugins["slack@claude-plugins-official"]: false`; the new `init` event lists no `plugin:slack:slack` and none of its 8 skills; `harn history` shows the op with its `RunContext`; `harn undo` restores the file byte-for-byte |
+| A4 | `harn off plugin:slack --dir ~/work/project` then `claude -p hi --output-format stream-json --verbose` in that directory | the plan showed target dir, diff, freed and side effects; `.claude/settings.local.json` gained `enabledPlugins["slack@claude-plugins-official"]: false`; the new `init` event lists no `plugin:slack:slack` and none of its 8 skills; `harn history` shows the op with its `RunContext`; `harn undo` restores the file byte-for-byte |
 | A5 | `harn off <item>` on an item with no knob | `builtin` → refused with the reason (exit 3); `--scope` was never widened silently (refused, exit 3). Quarantine half: every Claude Code item the resolver emits today has an official knob (skills and commands → `skillOverrides`, plugin items → `enabledPlugins`), so no row reaches the quarantine path; it stays covered by the plan/journal unit tests (move, manifest, undo) until an item without a knob exists |
-| A6 | `harn edit rules/DEV.md --dir ~/2lab.ai/zbrain` | `$EDITOR` opened the realpath; on exit the diff was printed and journaled; `harn undo` restores the previous bytes |
-| A7 | `harn --dir <dir> --agent codex --json`, `<dir>` a real working folder | the AGENTS.md chain, the skill listing with its roots, MCP servers and plugins match `codex -C … debug prompt-input` + `codex mcp list --json` + `codex plugin list --json`; hooks and rules files are rows of their own, which no Codex dump shows; the three trust gates are reflected (the folder is `trusted`) |
-| A8 | `harn verify --run --agent codex --dir <dir>`, the same folder | prints what it will run (no model request); 0 `predicted-not-seen`, 0 `seen-not-predicted` and 0 `content-mismatch` on instructions, the skill listing, blocks, MCP servers and plugins; every other row is `not-checkable` with its reason (§Source of truth); the report states what is outside Codex's dump; `passed: yes`, exit 0 |
+| A6 | `harn edit rules/DEV.md --dir ~/work/project` | `$EDITOR` opened the realpath; on exit the diff was printed and journaled; `harn undo` restores the previous bytes |
+| A7 | `harn --dir ~/work/project --agent codex --json` | the AGENTS.md chain, the skill listing with its roots, MCP servers and plugins match `codex -C … debug prompt-input` + `codex mcp list --json` + `codex plugin list --json`; hooks and rules files are rows of their own, which no Codex dump shows; the three trust gates are reflected (the folder is `trusted`) |
+| A8 | `harn verify --run --agent codex --dir ~/work/project` | prints what it will run (no model request); 0 `predicted-not-seen`, 0 `seen-not-predicted` and 0 `content-mismatch` on instructions, the skill listing, blocks, MCP servers and plugins; every other row is `not-checkable` with its reason (§Source of truth); the report states what is outside Codex's dump; `passed: yes`, exit 0 |
 | A9 | same binary on `cachy-z13` (`harn --version`, A1, A2; A2 with `--agent codex`) | identical columns and semantics, for the Codex tree too; Linux paths (`/etc/claude-code/CLAUDE.md`, XDG state dir) resolved; the Codex tree resolves from files, never by running `codex` |
 | A10 | `harn --readonly off anything` · `harn --readonly verify --run` | both exit non-zero without writing or running |
 | A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target (exit 1, the verify family, with the mismatch named) |
-| A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
-| A13 | `harn report --dir ~/2lab.ai/zbrain --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
-| A14 | `harn ~/2lab.ai/zbrain` in an 80×24 and a 120×40 terminal (tmux capture) | the TUI opens with the header, the tree in table order with children folded, a key bar; `j/k` move, `l`/Enter unfold the skill listing (216 children) and `h` folds it, `/` filters keeping the hierarchy, `w` shows the why pane for the cursor row, `d` on the slack plugin row stages a plan whose side-effects pane lists its 8 skills, `a` + `y` applies and the journal has one entry, `u` restores the file byte-for-byte; `q` (and an external SIGTERM/SIGINT) leaves the terminal as it was; `harn --table` and a piped `harn` print the full table; at 80 columns the item column wins (share, mode, then origin are dropped first) and a label that still does not fit is cut from the left so its tail — the file name — stays visible, with the full name on the first line of the `w` pane |
-| A15 | `harn trim ~/2lab.ai/zbrain --dry-run` with `--agent-cmd` pointing at a script that returns a canned `harn-plan/1`, and once for real with `claude -p` | prints the validated plan with reasons, freed, side effects and diff and writes nothing; `trim --yes` applies, journals each reason and prints the `harn undo` line; a rejected plan names the offending op (exit 3); a missing agent binary reports the `/harn-trim` fallback (exit 1). The human typed no item name at any point |
+| A12 | `harn brief --dir ~/work/project` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
+| A13 | `harn report --dir ~/work/project --html out.html` | one self-contained HTML file; the same rows, totals and signals as the table; no element writes anything; renders at 400 px width without horizontal scroll |
+| A14 | `harn ~/work/project` in an 80×24 and a 120×40 terminal (tmux capture) | the TUI opens with the header, the tree in table order with children folded, a key bar; `j/k` move, `l`/Enter unfold the skill listing (216 children) and `h` folds it, `/` filters keeping the hierarchy, `w` shows the why pane for the cursor row, `d` on the slack plugin row stages a plan whose side-effects pane lists its 8 skills, `a` + `y` applies and the journal has one entry, `u` restores the file byte-for-byte; `q` (and an external SIGTERM/SIGINT) leaves the terminal as it was; `harn --table` and a piped `harn` print the full table; at 80 columns the item column wins (share, mode, then origin are dropped first) and a label that still does not fit is cut from the left so its tail — the file name — stays visible, with the full name on the first line of the `w` pane |
+| A15 | `harn trim ~/work/project --dry-run` with `--agent-cmd` pointing at a script that returns a canned `harn-plan/1`, and once for real with `claude -p` | prints the validated plan with reasons, freed, side effects and diff and writes nothing; `trim --yes` applies, journals each reason and prints the `harn undo` line; a rejected plan names the offending op (exit 3); a missing agent binary reports the `/harn-trim` fallback (exit 1). The human typed no item name at any point |
 
 **P0 receipt (2026-10-13):** every P0 gate row observed on macOS (release build, zbrain) and A1/A2/A9
 on cachy-z13; A5's quarantine half is unreachable while every emitted item has a knob. Per-row

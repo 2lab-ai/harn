@@ -4,17 +4,19 @@ Status: done (2026-10-13; receipts in `loop.done.md`)
 
 ## User statement (verbatim, 2026-10-13, zbrain session, `/goal … /using-dotprd`)
 
+(The home path in the quotes is replaced with a neutral one, `~/work/project`, 2026-10-15.)
+
 > 이거 프로그램으로 만들어줘 /using-dotprd
 >
 > 목표:
-> - 실행: {프로그램이름} ~/2lab.ai/zbrain
+> - 실행: {프로그램이름} ~/work/project
 > - 하는일: 해당 위치에서 실행되는 ai agent의 하네스를 모두 리스트업해주고 편집할수 있는 cli 혹은 툴
 > - 실행환경: (cachy-z13 리눅스환경과 로컬 macos 환경에서 실행)
 > - 아마도 TUI 혹은 gui (필요시), 시스템 툴이니
 > - 2lab-ai/{프로그램이름} 으로 repository를 만듬 (llmux repo 참조해서 빌드와 배포 등 같은 오픈소스 방식으로 처리)
 >
 > 문맥:
-> - ~/2lab.ai/zbrain 워킹 폴더에서 claude code를 실행하면
+> - ~/work/project 워킹 폴더에서 claude code를 실행하면
 > 1. claude code의 빌트인 프롬프트와 빌트인 스킬들이 로드됨 (로컬에 llmux를 설치했으므로 llmux를 사용하면 이것도 편집할 수 있음)
 > 2. ~/.claude 안에 하네스가 로드됨 (프롬프트, 에이전트 스킬, 훅등)
 > 3. {워킹폴더}안의 하네스가 로드됨
@@ -54,7 +56,7 @@ costs one `gh repo rename` plus a tap formula; the user vetoes by saying so.
 
 ## Fixed facts the PRD may cite (measured 2026-10-02, zbrain `scratchpad/harness-observe-20261002/inventory.md`)
 
-- Fresh Claude Code 2.1.287 session in `~/2lab.ai/zbrain`, first API request ≈ 231 KB; the user's instruction was 6–61 B of it.
+- Fresh Claude Code 2.1.287 session in a real working folder, first API request ≈ 231 KB; the user's instruction was 6–61 B of it.
 - `tools` array 109 KB / 61 tools; 36 tools are MCP server `blender` (no local config names it — origin unresolved).
 - `messages[0]` user blocks: CLAUDE.md ×2 + rules ×2 + MEMORY.md = 45.9 KB; userEmail+gitStatus 3.5 KB; attribution 0.6 KB; instruction last.
 - `messages[1]` system text 56 KB: SessionStart hook stdout 3.4 KB, agent roster 16.9 KB, MCP instructions 2 KB, skill list 31 KB (210 skills, 68 with descriptions), Advisor 2 KB.

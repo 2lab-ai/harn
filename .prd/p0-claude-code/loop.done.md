@@ -98,7 +98,7 @@ User-held pieces left: `TAP_DISPATCH_TOKEN` on 2lab-ai/harn (immediate tap bump 
 
 - A14 macOS (release, zbrain, tmux 80×24 and 120×40): TUI opens with header + folded tree (345 items, skill listing `▸ 229`), j/k, `l` unfolds the listing, `h` folds, `/slack@` filters keeping the hierarchy, `w` why pane, `d` stages the slack plugin with its skills as side effects, `a`+`y` applies (journal a3c5a0d9 / 0c065c36), `u`+`y` restores — settings.local.json byte-identical after each size; `q` → EXIT=0, `stty` shows cooked mode back; every frame fits its width (display columns); item labels cut from the left with the tail kept, full id in `w`.
 - A14 cachy-z13 (Linux): TUI test suite 27/27 on Linux (frames via TestBackend); `--table` and piped output 82 rows; no tmux there, so no live frames. The pty probe (no emulator answering queries) exposed a startup cursor-position query (ESC[6n) that times out and exits 1 with the terminal restored → WU-P opened (below).
-- A15: `harn trim ~/2lab.ai/zbrain --dry-run` with the real `claude -p --output-format json --tools '' --max-turns 1` (prompt on stdin, fresh scratch cwd outside the repo): run 1 (branch) 69 s, 2 ops with reasons, nothing written; run 2 (merged main) 52 s, 2 ops (zworkflow 32 KB, cowork-plugin-management), `predicted 149,609 B → 116,848 B`, nothing written, 0 scratch dirs left. Fake-agent rows: 18 tests incl. rejected knob exit 3, missing binary → `/harn-trim` hint, readonly exit 3, non-TTY without `--yes`, TMPDIR-inside-target and sibling-in-repo isolation, > 64 KiB prompt no-deadlock.
+- A15: `harn trim ~/work/project --dry-run` with the real `claude -p --output-format json --tools '' --max-turns 1` (prompt on stdin, fresh scratch cwd outside the repo): run 1 (branch) 69 s, 2 ops with reasons, nothing written; run 2 (merged main) 52 s, 2 ops (zworkflow 32 KB, cowork-plugin-management), `predicted 149,609 B → 116,848 B`, nothing written, 0 scratch dirs left. Fake-agent rows: 18 tests incl. rejected knob exit 3, missing binary → `/harn-trim` hint, readonly exit 3, non-TTY without `--yes`, TMPDIR-inside-target and sibling-in-repo isolation, > 64 KiB prompt no-deadlock.
 - Distribution: previews `preview-2026-10-13-0834-e04441a02be6` and `…-0840-3f6844340e4a`; tap `Formula/harn-preview.rb` rendered → tap master 08c57c5; `brew upgrade harn-preview` → 2026.10.13.0840; `/opt/homebrew/bin/harn --version` = `harn 0.1.0 (preview 3f6844340e4a)`, `harn --help` lists `trim`; the installed binary opened the TUI on zbrain in tmux and quit with EXIT=0.
 
 ## R5 — closed (2026-10-13) — startup never waits on a terminal reply
@@ -118,3 +118,7 @@ Follow-ups filed: #2 structured leaving list on ActionPlan · #3 allowManagedHoo
 ## Follow-ups — closed (2026-10-14)
 
 The three follow-ups filed at R6 close were fixed and merged on `main` on 2026-10-14: #2 structured leaving list on ActionPlan → PR #10 (07ea3e5) · #3 allowManagedHooksOnly rows → PR #11 (088946a) · #4 search shows each listed entry once → PR #9 (de33f9a).
+
+## Redaction — 2026-10-15
+
+Home paths were removed from this public repo's docs: line 101 (R4, A15) named the author's home folder and now reads `~/work/project`, as the spec's acceptance rows do. This is the only edit above this block; everything else is unchanged.

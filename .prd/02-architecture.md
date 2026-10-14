@@ -16,10 +16,18 @@ and this file is fixed.
 - Deliberately absent: a Trash crate (harn deletes nothing), tokenizers (all costs are bytes;
   `~tok` is a later optional feature), `clap_mangen` (`--help` covers eight subcommands).
 - Tests: `cargo test` unit tests on fixture directories (a miniature `~/.claude`, `~/.codex`, and
-  project trees with every discovery rule exercised), plus **differential conformance tests** that
-  run the real `claude`/`codex` binaries when present (`research/03` §A, cclint): compare the
-  static tree with `stream-json init` / `debug prompt-input` on a fixture directory and fail on any
-  presence or content-conformance diff within the oracle's projection; plus `freed` fixtures
+  project trees with every discovery rule exercised), plus **differential conformance tests**
+  against the agents' own output (`research/03` §A, cclint), which run only when asked:
+  `tests/differential.rs` compares the static Claude Code tree of a real directory with the
+  `system/init` event of a session started there and needs `HARN_DIFFERENTIAL=<dir>` and
+  `HARN_DIFFERENTIAL_INIT=<stream.jsonl>` (an existing capture; it starts nothing);
+  `tests/differential_codex.rs` runs the `codex` on `PATH` (`debug prompt-input`, `debug models`,
+  `mcp list --json`, `plugin list --json`) through `verify_codex` and needs
+  `HARN_DIFFERENTIAL_CODEX=<dir>`. Without its variables (or, for Codex, without `codex` on
+  `PATH`) each test skips and passes, saying why. When they run, the Claude Code test fails on any
+  presence diff for skills, agents, plugins and MCP servers (or an MCP server whose `source` is not
+  its row's layer), the Codex test on any `predicted-not-seen`, `seen-not-predicted` or
+  `content-mismatch`; plus `freed` fixtures
   (listing at cap, plugin side effects, shared items, `@imports`), each fixture defining both the
   before and the after rendering so the assertion is the fixture's own byte difference. Gate = `just check` (`cargo fmt --check`, `cargo clippy --all-targets --locked
   -- -D warnings`, `cargo test --locked`), the llmux justfile shape. Each resolver carries a
@@ -161,7 +169,8 @@ agent's prose; a reply without a valid plan is an error that quotes the reply's 
 ## Distribution (the llmux pattern, unchanged)
 
 - `.github/workflows/ci.yml` — fmt, clippy `-D warnings`, test on `ubuntu-latest` + `macos-latest`;
-  the differential tests are skipped when the agent binaries are absent (CI) and run locally.
+  CI sets none of the differential tests' variables, so they skip there (passing) and run locally
+  when asked.
 - `.github/workflows/release.yml` — on `v*` tag: verify tag == `Cargo.toml` version; the llmux
   build matrix (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
   `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`); bare binaries named `harn-<os>-<arch>` +
@@ -187,4 +196,4 @@ agent's prose; a reply without a valid plan is an error that quotes the reply's 
 3. P0 rows A1–A6, A9–A11 run by hand on macOS and on `cachy-z13`, each with its command output
    captured into the workstream's `loop.done.md`; P0.5 adds A7–A8.
 4. One stable tag → release assets on GitHub → `brew install 2lab-ai/tap/harn` on macOS and the
-   binary on `cachy-z13` → `harn --dir ~/2lab.ai/zbrain` runs on both.
+   binary on `cachy-z13` → `harn --dir ~/work/project` (a real working folder) runs on both.

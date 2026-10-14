@@ -6,19 +6,19 @@ Verbatim statement: [`../prd-rewrite/ssot.md`](../prd-rewrite/ssot.md).
 
 ## Problem
 
-When Claude Code starts in `~/2lab.ai/zbrain`, the model's first request is already ≈231 KB
-before the user's instruction (6–61 B) is read. That payload is assembled from four places the
-user listed — Claude Code's built-in prompt and built-in skills, the `~/.claude` harness
-(prompts, agents, skills, hooks), the working folder's harness, and then the instruction — and
-the same happens in Codex with its own files. Nothing shows the user that list, how large each
-item is, where it came from, or how to remove it. Optimizing the harness today means guessing.
+When Claude Code starts in `~/work/project` (a real working folder), the model's first request is
+already ≈231 KB before the user's instruction (6–61 B) is read. That payload is assembled from four
+places the user listed — Claude Code's built-in prompt and built-in skills, the `~/.claude` harness
+(prompts, agents, skills, hooks), the working folder's harness, and then the instruction — and the
+same happens in Codex with its own files. Nothing shows the user that list, how large each item is,
+where it came from, or how to remove it. Optimizing the harness today means guessing.
 
 ## Goal
 
 One system tool, run as
 
 ```
-harn ~/2lab.ai/zbrain
+harn ~/work/project
 ```
 
 that lists every harness item an AI agent loads when started in that directory and lets the
@@ -57,7 +57,7 @@ layer list is to be established by research).
 
 | # | run | expected observation |
 |---|---|---|
-| A1 | `harn ~/2lab.ai/zbrain` on macOS | a list of every harness item Claude Code loads for that directory |
+| A1 | `harn ~/work/project` on macOS | a list of every harness item Claude Code loads for that directory |
 | A2 | same on cachy-z13 | same list shape and the items that exist on that machine |
 | A3 | pick an item and remove/disable it | the next Claude Code session in that directory no longer loads it |
 | A4 | the same for Codex | the Codex-side list and edits |
