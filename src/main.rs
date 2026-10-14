@@ -14,7 +14,7 @@ use harn::resolve::{self, Resolver};
 use harn::{oracle, trim, verify, writers};
 use serde::Serialize;
 use std::ffi::OsString;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -228,7 +228,9 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("harn: {err:#}");
+            // Not eprintln!: it panics (exit 101) when stderr is gone, as it is once the
+            // terminal the view ran on hung up.
+            let _ = writeln!(std::io::stderr(), "harn: {err:#}");
             ExitCode::from(exit_code_for(&err))
         }
     }
