@@ -37,7 +37,11 @@
 //! (`core/src/context_manager/updates.rs:12-30`); the kind names the block. Without it (or for a
 //! kind not in [`BLOCKS`]) the block's opening marker decides; an unmarked first part of the
 //! first developer message is `developer_instructions` (`core/src/session/mod.rs:4321-4328`).
-//! Anything else is kept under its kind (or position) so `verify` can report it. A region is one
+//! Anything else is kept under its kind (or position) so `verify` can report it. Both fail
+//! closed, with a capture warning: a message whose kinds are not one per content item is named
+//! as if it had none (paired by index, a kind would name another item), and a part whose kind
+//! names one block while its text opens with another block's marker is named by neither — it is
+//! kept as an unknown block that shows both. A region is one
 //! block: `input[<i>] <role> · <block>`, its bytes the UTF-8 length of the text; the regions
 //! partition the text of the input list, not a wire body (instructions and tools are absent).
 
@@ -197,7 +201,7 @@ pub struct Block {
     pub role: String,
     /// Index inside the message's content.
     pub part: usize,
-    /// `content_item_kinds[part]`, when the message carries it.
+    /// `content_item_kinds[part]`, when the message carries one kind per content item.
     pub content_kind: Option<String>,
     /// A [`BlockSpec::name`], or for an unknown block its content kind or `input[i].part[j]`.
     pub name: String,
@@ -726,7 +730,12 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
             warnings.join("; ")
         )
     })?;
-    let blocks = parse_prompt_input(&prompt).context("prompt-input.json")?;
+    let (blocks, naming) = parse_prompt_input(&prompt).context("prompt-input.json")?;
+    warnings.extend(
+        naming
+            .into_iter()
+            .map(|w| format!("prompt-input.json: {w}")),
+    );
     let mcp_servers = read("mcp-list.json", &mut warnings)?.and_then(|t| {
         parse_mcp_list(&t)
             .map_err(|e| warnings.push(format!("mcp-list.json: {e:#}")))
@@ -861,13 +870,15 @@ pub fn derived_cwd(blocks: &[Block]) -> Vec<(PathBuf, &'static str)> {
 }
 
 /// The input list (`codex debug prompt-input` stdout: a JSON array of `ResponseItem`s, see
-/// `protocol/src/models.rs`) cut into blocks.
-pub fn parse_prompt_input(text: &str) -> anyhow::Result<Vec<Block>> {
+/// `protocol/src/models.rs`) cut into blocks, and warnings for what could not be named by its
+/// kind (a message whose kinds are not one per content item, a kind and a marker that disagree).
+pub fn parse_prompt_input(text: &str) -> anyhow::Result<(Vec<Block>, Vec<String>)> {
     let items: Value = serde_json::from_str(text.trim()).context("not JSON")?;
     let items = items
         .as_array()
         .ok_or_else(|| anyhow!("not a JSON array of response items"))?;
     let mut blocks = Vec::new();
+    let mut warnings = Vec::new();
     let mut first_developer: Option<usize> = None;
     for (i, item) in items.iter().enumerate() {
         let role = item["role"].as_str().unwrap_or_default().to_string();
@@ -886,11 +897,10 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<Vec<Block>> {
         if role == "developer" && first_developer.is_none() {
             first_developer = Some(i);
         }
-        let kinds: Vec<Option<&str>> = item["internal_chat_message_metadata_passthrough"]
+        let kinds: Option<Vec<Option<&str>>> = item["internal_chat_message_metadata_passthrough"]
             ["content_item_kinds"]
             .as_array()
-            .map(|a| a.iter().map(Value::as_str).collect())
-            .unwrap_or_default();
+            .map(|a| a.iter().map(Value::as_str).collect());
         let Some(content) = item["content"].as_array() else {
             // Not the `ResponseItem::Message` shape (`content` is a list): kept, so verify
             // reports it rather than losing it.
@@ -905,6 +915,18 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<Vec<Block>> {
             });
             continue;
         };
+        // Kinds pair with content items by index only when there is one per item.
+        let kinds = match kinds {
+            Some(kinds) if kinds.len() != content.len() => {
+                warnings.push(format!(
+                    "input[{i}] has {} content items but {} content_item_kinds; its blocks are named by their markers, not their kinds",
+                    content.len(),
+                    kinds.len()
+                ));
+                Vec::new()
+            }
+            kinds => kinds.unwrap_or_default(),
+        };
         for (j, part) in content.iter().enumerate() {
             let content_kind = kinds.get(j).copied().flatten();
             let text = match part["text"].as_str() {
@@ -912,7 +934,8 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<Vec<Block>> {
                 None => serde_json::to_string(part).unwrap_or_default(),
             };
             let unmarked_first = first_developer == Some(i) && j == 0;
-            let (name, known) = classify(content_kind, &text, unmarked_first, i, j);
+            let (name, known) =
+                classify(content_kind, &text, unmarked_first, (i, j), &mut warnings);
             blocks.push(Block {
                 input: i,
                 role: role.clone(),
@@ -924,26 +947,41 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<Vec<Block>> {
             });
         }
     }
-    Ok(blocks)
+    Ok((blocks, warnings))
 }
 
 /// The block's name: by content kind, else by marker, else `developer_instructions` for the
-/// unmarked first part of the first developer message, else its kind or position (unknown).
+/// unmarked first part of the first developer message, else its kind or position (unknown). A
+/// kind naming one block on a text that opens with another block's marker names neither: the
+/// block is unknown, named by its position with both shown, and a warning says so.
 fn classify(
     kind: Option<&str>,
     text: &str,
     unmarked_first: bool,
-    input: usize,
-    part: usize,
+    (input, part): (usize, usize),
+    warnings: &mut Vec<String>,
 ) -> (String, bool) {
-    if let Some(spec) = kind.and_then(|k| BLOCKS.iter().find(|b| b.kinds.contains(&k))) {
-        return (spec.name.to_string(), true);
-    }
-    if let Some(spec) = BLOCKS
+    let by_kind = kind.and_then(|k| BLOCKS.iter().find(|b| b.kinds.contains(&k)));
+    let by_marker = BLOCKS
         .iter()
-        .find(|b| !b.marker.is_empty() && text.starts_with(b.marker))
-    {
-        return (spec.name.to_string(), true);
+        .find(|b| !b.marker.is_empty() && text.starts_with(b.marker));
+    match (by_kind, by_marker) {
+        (Some(a), Some(b)) if a.name != b.name => {
+            let kind = kind.unwrap_or_default();
+            warnings.push(format!(
+                "input[{input}].part[{part}]: its content kind {kind} names {}, but its text opens with the marker of {} ({}); named by neither, kept as an unknown block",
+                a.name, b.name, b.marker
+            ));
+            return (
+                format!(
+                    "input[{input}].part[{part}] (kind {kind}, marker {})",
+                    b.marker
+                ),
+                false,
+            );
+        }
+        (Some(spec), _) | (None, Some(spec)) => return (spec.name.to_string(), true),
+        (None, None) => {}
     }
     if kind.is_none() && unmarked_first {
         return (names::DEVELOPER_INSTRUCTIONS.to_string(), true);
@@ -1253,7 +1291,8 @@ mod tests {
                 false,
             ),
         ]);
-        let blocks = parse_prompt_input(&input.to_string()).unwrap();
+        let (blocks, warnings) = parse_prompt_input(&input.to_string()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         let names: Vec<(&str, bool)> = blocks.iter().map(|b| (b.name.as_str(), b.known)).collect();
         assert_eq!(
             names,
@@ -1280,13 +1319,105 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_and_a_marker_that_disagree_name_neither_and_warn() {
+        // One kind per item, but the permissions and plugins kinds are swapped.
+        let permissions = "<permissions instructions>\nx\n</permissions instructions>";
+        let plugins = "<plugins_instructions>\ny\n</plugins_instructions>";
+        let input = json!([msg(
+            "developer",
+            &[
+                ("be brief", Some("generic.developer_instructions")),
+                (plugins, Some("permissions.instructions")),
+                (permissions, Some("plugins.usage_instructions")),
+                (LISTING, Some("host_skills.instructions")),
+            ],
+            true,
+        )]);
+        let (blocks, warnings) = parse_prompt_input(&input.to_string()).unwrap();
+        let names: Vec<(&str, bool)> = blocks.iter().map(|b| (b.name.as_str(), b.known)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("developer_instructions", true),
+                ("input[0].part[1] (kind permissions.instructions, marker <plugins_instructions>)", false),
+                ("input[0].part[2] (kind plugins.usage_instructions, marker <permissions instructions>)", false),
+                ("skills_instructions", true),
+            ]
+        );
+        assert_eq!(
+            blocks[1].content_kind.as_deref(),
+            Some("permissions.instructions")
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "input[0].part[1]: its content kind permissions.instructions names permissions_instructions, but its text opens with the marker of plugins_instructions (<plugins_instructions>); named by neither, kept as an unknown block",
+                "input[0].part[2]: its content kind plugins.usage_instructions names plugins_instructions, but its text opens with the marker of permissions_instructions (<permissions instructions>); named by neither, kept as an unknown block",
+            ]
+        );
+        // A kind on a text that opens with no block's marker still names it; the
+        // developer-instructions kind (it has no marker) on a marked text disagrees.
+        let input = json!([msg(
+            "developer",
+            &[
+                (permissions, Some("generic.developer_instructions")),
+                ("plain", Some("permissions.instructions")),
+            ],
+            true,
+        )]);
+        let (blocks, warnings) = parse_prompt_input(&input.to_string()).unwrap();
+        assert_eq!(
+            blocks[0].name,
+            "input[0].part[0] (kind generic.developer_instructions, marker <permissions instructions>)"
+        );
+        assert!(!blocks[0].known);
+        assert_eq!(blocks[1].name, "permissions_instructions");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn kinds_not_one_per_content_item_are_set_aside_with_a_warning() {
+        let mut input = json!([msg(
+            "developer",
+            &[
+                ("be brief", Some("generic.developer_instructions")),
+                (
+                    "<plugins_instructions>\ny\n</plugins_instructions>",
+                    Some("permissions.instructions")
+                ),
+            ],
+            true,
+        )]);
+        input[0]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("plugins.usage_instructions"));
+        let (blocks, warnings) = parse_prompt_input(&input.to_string()).unwrap();
+        let names: Vec<(&str, bool, Option<&str>)> = blocks
+            .iter()
+            .map(|b| (b.name.as_str(), b.known, b.content_kind.as_deref()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("developer_instructions", true, None),
+                ("plugins_instructions", true, None),
+            ]
+        );
+        assert_eq!(
+            warnings,
+            vec!["input[0] has 2 content items but 3 content_item_kinds; its blocks are named by their markers, not their kinds"]
+        );
+    }
+
+    #[test]
     fn without_kinds_an_unmarked_first_developer_part_is_developer_instructions() {
         let input = json!([msg(
             "developer",
             &[("plain text", None), ("other plain", None)],
             false
         )]);
-        let blocks = parse_prompt_input(&input.to_string()).unwrap();
+        let (blocks, _) = parse_prompt_input(&input.to_string()).unwrap();
         assert_eq!(blocks[0].name, "developer_instructions");
         assert_eq!(blocks[1].name, "input[0].part[1]");
         assert!(!blocks[1].known);
@@ -1332,7 +1463,7 @@ mod tests {
                 true
             ),
         ]);
-        let blocks = parse_prompt_input(&input.to_string()).unwrap();
+        let (blocks, _) = parse_prompt_input(&input.to_string()).unwrap();
         let context = RunContext {
             cwd: PathBuf::from("/synthetic/repo"),
             agent: Agent::Codex,
@@ -1451,7 +1582,7 @@ mod tests {
     #[test]
     fn a_message_whose_content_is_not_an_array_is_kept_as_unknown() {
         let input = json!([{"type": "message", "role": "developer", "content": "loose"}]);
-        let blocks = parse_prompt_input(&input.to_string()).unwrap();
+        let (blocks, _) = parse_prompt_input(&input.to_string()).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].name, "input[0].content");
         assert!(!blocks[0].known);

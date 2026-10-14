@@ -157,6 +157,7 @@ fn pristine_block(f: &Fx, name: &str) -> String {
         .replace("@HOME@", &f.home.display().to_string());
     oracle::parse_prompt_input(&text)
         .unwrap()
+        .0
         .into_iter()
         .find(|b| b.name == name)
         .unwrap()
@@ -783,6 +784,108 @@ fn a_catalog_gated_block_codex_did_not_render_is_not_a_miss() {
         ),
         Some(RowVerdict::NotCheckable { .. })
     ));
+}
+
+/// Removes the `<permissions instructions>` content item of message 0 (and its kind, when
+/// `with_kind`); the item's index.
+fn drop_permissions(items: &mut Value, with_kind: bool) -> usize {
+    let content = items[0]["content"].as_array_mut().unwrap();
+    let at = content
+        .iter()
+        .position(|part| {
+            part["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("<permissions instructions>"))
+        })
+        .expect("the permissions block is in the fixture");
+    content.remove(at);
+    if with_kind {
+        let kinds = items[0]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+            .as_array_mut()
+            .unwrap();
+        assert_eq!(kinds.remove(at), "permissions.instructions");
+    }
+    at
+}
+
+#[test]
+fn a_predicted_block_codex_did_not_render_is_predicted_not_seen() {
+    // The negative control for the catalog-gated case above: a block harn predicts without any
+    // catalog condition (permissions) that is missing from the capture is a miss. A real capture
+    // without the block has no kind for it either.
+    let f = fx();
+    let c = capture(&f, |items| {
+        drop_permissions(items, true);
+    });
+    assert!(
+        !c.warnings
+            .iter()
+            .any(|w| w.starts_with("prompt-input.json")),
+        "{:?}",
+        c.warnings
+    );
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(
+                Kind::SystemPrompt,
+                Layer::Builtin,
+                "permissions_instructions"
+            )
+        ),
+        Some(&RowVerdict::PredictedNotSeen)
+    );
+    assert!(!report.passed);
+}
+
+#[test]
+fn a_message_whose_kinds_do_not_pair_with_its_content_is_named_by_markers_with_a_warning() {
+    // The content item is gone but its kind is not: paired by index, the plugins text would
+    // carry the permissions kind. The kinds are set aside for the message instead.
+    let f = fx();
+    let c = capture(&f, |items| {
+        drop_permissions(items, false);
+    });
+    let warning = "prompt-input.json: input[0] has 3 content items but 4 content_item_kinds; its blocks are named by their markers, not their kinds";
+    assert!(c.warnings.iter().any(|w| w == warning), "{:?}", c.warnings);
+    let names: Vec<(&str, bool, Option<&str>)> = c
+        .blocks
+        .iter()
+        .filter(|b| b.input == 0)
+        .map(|b| (b.name.as_str(), b.known, b.content_kind.as_deref()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("developer_instructions", true, None),
+            ("skills_instructions", true, None),
+            ("plugins_instructions", true, None),
+        ]
+    );
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(
+                Kind::SystemPrompt,
+                Layer::Builtin,
+                "permissions_instructions"
+            )
+        ),
+        Some(&RowVerdict::PredictedNotSeen)
+    );
+    assert_eq!(
+        verdict(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "plugins_instructions")
+        ),
+        Some(&RowVerdict::Seen)
+    );
+    assert!(report.notes.contains(&format!("warning: {warning}")));
+    assert!(!report.passed);
 }
 
 #[test]
