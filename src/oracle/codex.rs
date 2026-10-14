@@ -37,10 +37,15 @@
 //! ([`CodexCapture::bundled_root`]): the manifest's `bundled_root` (written by [`run_codex`]:
 //! `CODEX_HOME` resolved against the run's cwd, canonicalised after the run) when present and
 //! absolute; for a manifest without it (an optional field: older captures read unchanged, the
-//! schema stays `/1`) the fallback touches no file: the root is rebuilt lexically from the
-//! recorded env and bound only if codex listed that exact path in its `### Skill roots` table
-//! ([`legacy_bundled_root`]). A home reached through a symlink cannot be proven that way, so such
-//! a capture binds nothing and says so.
+//! schema stays `/1`) the fallback touches no file ([`legacy_bundled_root`]).
+//!
+//! LEGACY RULE: an old capture binds a bundled root only when the recorded `CODEX_HOME` is unset
+//! (then `.codex` under the target's home) or is an absolute path with no `.` or `..` component,
+//! and only when codex listed exactly `<that home>/skills/.system` in its `### Skill roots`
+//! table. In every other case — a relative `CODEX_HOME` included — it binds nothing and warns.
+//! The reason: without the filesystem as it was at capture time, harn cannot prove what a
+//! relative or dotted home resolved to (`link/..` cancelled lexically is not where codex went
+//! when `link` was a symlink), nor whether a home was reached through a symlink.
 //!
 //! Trust boundary: a capture directory is trusted data written by harn (`run_codex`, in a private
 //! `0700` dir). harn checks its shape (schema, artifact names, regular files, the working
@@ -522,25 +527,39 @@ fn bind_bundled_root(
     root
 }
 
-/// The bundled root of a capture that records none, without touching a file: `CODEX_HOME` of the
-/// recorded env joined to the recorded cwd (else `.codex` in the target's home: the manifest
-/// records no home), then `skills/.system`, `.` and `..` resolved lexically — bound only if codex
-/// listed exactly that path in its `### Skill roots` table. Otherwise None, and a warning when
-/// codex listed any skill (one it may have taken from its bundled root stays unexempted).
+/// The bundled root of a capture that records none, by the LEGACY RULE (module docs), without
+/// touching a file: `<home>/skills/.system`, where home is `.codex` in the target's home (the
+/// manifest records no home) when the recorded `CODEX_HOME` is unset, else that `CODEX_HOME`
+/// when it is absolute with no `.` or `..` component — bound only if codex listed exactly that
+/// path in its `### Skill roots` table. Otherwise None, and a warning when codex listed any skill
+/// (one it may have taken from its bundled root stays unexempted).
 fn legacy_bundled_root(
     capture: &CodexCapture,
     target: &Target,
 ) -> (Option<PathBuf>, Option<String>) {
-    let home = match capture
+    let warn = |why: String| (None, (!capture.skills.is_empty()).then_some(why));
+    let recorded = capture
         .env
         .get("CODEX_HOME")
         .and_then(Option::as_deref)
-        .filter(|v| !v.is_empty())
-    {
-        Some(v) => capture.context.cwd.join(v),
+        .filter(|v| !v.is_empty());
+    let home = match recorded {
         None => target.home.join(".codex"),
+        Some(v) => PathBuf::from(v),
     };
-    let rebuilt = crate::resolve::claude::fs::normalize_lexical(&home.join(BUNDLED_DIR));
+    if !plain_absolute(&home) {
+        let which = match recorded {
+            Some(v) => format!("its CODEX_HOME ({v:?})"),
+            None => format!(
+                "the codex home under the target's home ({:?})",
+                home.display().to_string()
+            ),
+        };
+        return warn(format!(
+            "bundled skills: this capture records no bundled root, and {which} is relative or has a `.` or `..` component, which harn cannot resolve without the filesystem as it was at capture time; no listed skill is treated as bundled (a capture from `harn verify --run --agent codex` records the root)"
+        ));
+    }
+    let rebuilt = home.join(BUNDLED_DIR);
     let written = rebuilt.to_string_lossy();
     let listed = capture.block(names::SKILLS_FRAMING).is_some_and(|b| {
         parse_skill_roots(&b.text)
@@ -550,12 +569,19 @@ fn legacy_bundled_root(
     if listed {
         return (Some(rebuilt), None);
     }
-    let warning = (!capture.skills.is_empty()).then(|| {
-        format!(
-            "bundled skills: this capture records no bundled root, and the one harn rebuilds from its env ({written}) is not a skill root codex listed; no listed skill is treated as bundled (a home reached through a symlink cannot be proven from an old capture: a capture from `harn verify --run --agent codex` records the root)"
-        )
-    });
-    (None, warning)
+    warn(format!(
+        "bundled skills: this capture records no bundled root, and the one harn rebuilds from its env ({written}) is not a skill root codex listed; no listed skill is treated as bundled (a home reached through a symlink cannot be proven from an old capture: a capture from `harn verify --run --agent codex` records the root)"
+    ))
+}
+
+/// An absolute path with no `.` or `..` segment, read from its text (`Path::components` drops an
+/// inner `.`).
+fn plain_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .to_string_lossy()
+            .split(std::path::is_separator)
+            .any(|segment| segment == "." || segment == "..")
 }
 
 /// [`BINDING_ENV`] from the target's environment.
@@ -1609,6 +1635,22 @@ mod tests {
         assert_eq!(blocks[0].name, "developer_instructions");
         assert_eq!(blocks[1].name, "input[0].part[1]");
         assert!(!blocks[1].known);
+    }
+
+    #[test]
+    fn only_a_plain_absolute_home_is_provable() {
+        assert!(plain_absolute(Path::new("/h/.codex")));
+        assert!(plain_absolute(Path::new("/h/codex-home/")));
+        for p in [
+            "rel/home",
+            ".codex",
+            "/h/link/..",
+            "/h/./x",
+            "/h/x/.",
+            "/../h",
+        ] {
+            assert!(!plain_absolute(Path::new(p)), "{p}");
+        }
     }
 
     #[test]

@@ -2699,8 +2699,15 @@ fn listed_from(items: &mut Value, root: &Path, name: &str) {
 
 const RECONSTRUCTED: &str = "bundled skills: this capture records no bundled root, and the one harn rebuilds from its env (";
 
+/// The warning of an old capture whose CODEX_HOME harn cannot resolve without the filesystem.
+fn unprovable_home(v: &str) -> String {
+    format!(
+        "bundled skills: this capture records no bundled root, and its CODEX_HOME ({v:?}) is relative or has a `.` or `..` component, which harn cannot resolve without the filesystem as it was at capture time; no listed skill is treated as bundled (a capture from `harn verify --run --agent codex` records the root)"
+    )
+}
+
 #[test]
-fn a_relative_codex_home_resolves_against_the_capture_cwd_not_the_verifier() {
+fn a_relative_codex_home_binds_only_through_the_recorded_root() {
     // Codex ran in `sub` with CODEX_HOME=.codex-home; harn verifies from its own cwd.
     let f = fx();
     let home = f.sub.join(".codex-home");
@@ -2709,29 +2716,34 @@ fn a_relative_codex_home_resolves_against_the_capture_cwd_not_the_verifier() {
     let mut t = target(&f);
     t.env
         .insert("CODEX_HOME".to_string(), ".codex-home".to_string());
+    let imagegen = id(Kind::Skill, Layer::Unresolved, "imagegen");
+    // The run recorded the root it resolved: bound, wherever harn verifies from.
     let dir = capture_dir(&f, |items| {
         listed_from(items, &home.join("skills/.system"), "imagegen")
     });
     edit_manifest(&dir, |m| {
         m["env"]["CODEX_HOME"] = Value::from(".codex-home");
+        m["bundled_root"] = Value::from(home.join("skills/.system").display().to_string());
+    });
+    let c = oracle::read_capture_dir(&dir, &t).unwrap();
+    assert_eq!(c.bundled_root, Some(home.join("skills/.system")));
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    let report = verify_codex(&mut statics(&f), &c);
+    assert!(matches!(
+        verdict(&report, &imagegen),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    // An old capture: a relative home cannot be proven, so nothing is bound.
+    edit_manifest(&dir, |m| {
         m.as_object_mut().unwrap().remove("bundled_root");
     });
     let c = oracle::read_capture_dir(&dir, &t).unwrap();
-    assert!(
-        !c.warnings.iter().any(|w| w.starts_with(RECONSTRUCTED)),
-        "{:?}",
-        c.warnings
-    );
-    assert_eq!(c.bundled_root, Some(home.join("skills/.system")));
-    let mut tree = statics(&f);
-    let report = verify_codex(&mut tree, &c);
-    assert!(
-        matches!(
-            verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
-            Some(RowVerdict::NotCheckable { .. })
-        ),
-        "{:?}",
-        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen"))
+    assert_eq!(c.bundled_root, None);
+    assert_eq!(c.warnings, vec![unprovable_home(".codex-home")]);
+    let report = verify_codex(&mut statics(&f), &c);
+    assert_eq!(
+        verdict(&report, &imagegen),
+        Some(&RowVerdict::SeenNotPredicted)
     );
 }
 
@@ -2946,4 +2958,42 @@ fn a_legacy_capture_never_binds_a_bundled_root_through_todays_symlink() {
             .as_str()
         )
     );
+}
+
+#[test]
+fn a_dotted_codex_home_in_an_old_capture_binds_nothing() {
+    // CODEX_HOME=`link/..` where `link` was a symlink at capture time: cancelling `..` lexically
+    // lands on `<dir>/skills/.system`, here a genuine ordinary root of codex's table.
+    let f = fx();
+    let ordinary = f.root.join("skills/.system");
+    for home in [
+        f.root.join("link/..").display().to_string(),
+        format!("{}/./link/..", f.root.display()),
+    ]
+    .into_iter()
+    .chain(
+        // Relative: against the capture's cwd (`sub`).
+        std::iter::once("link/..".to_string()),
+    ) {
+        let root = if home.starts_with('/') {
+            ordinary.clone()
+        } else {
+            f.sub.join("skills/.system")
+        };
+        let dir = legacy_capture_dir(&f, |items| listed_from(items, &root, "gamma"));
+        edit_manifest(&dir, |m| {
+            m["env"]["CODEX_HOME"] = Value::from(home.as_str())
+        });
+        let mut t = target(&f);
+        t.env.insert("CODEX_HOME".to_string(), home.clone());
+        let c = oracle::read_capture_dir(&dir, &t).unwrap();
+        assert_eq!(c.bundled_root, None, "{home}");
+        assert_eq!(c.warnings, vec![unprovable_home(&home)], "{home}");
+        let report = verify_codex(&mut statics(&f), &c);
+        assert_eq!(
+            verdict(&report, &id(Kind::Skill, Layer::Unresolved, "gamma")),
+            Some(&RowVerdict::SeenNotPredicted),
+            "{home}"
+        );
+    }
 }
