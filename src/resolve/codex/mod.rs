@@ -248,7 +248,7 @@ pub(crate) fn resolve_with(
             profile,
         },
         &mut warnings,
-    );
+    )?;
     let model = model_facts(&fs, target, &codex_home, &config, &mut warnings);
     let mut ctx = Ctx {
         target,
@@ -300,7 +300,7 @@ pub(crate) fn resolve_with(
 }
 
 /// `CODEX_HOME` when set and non-empty, else `~/.codex` (`utils/home-dir/src/lib.rs:13-17`).
-fn codex_home(target: &Target) -> PathBuf {
+pub fn codex_home(target: &Target) -> PathBuf {
     match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
         Some(v) => {
             let path = PathBuf::from(v);
