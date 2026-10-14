@@ -49,7 +49,7 @@ it executable and put it on your `PATH` as `harn`. A preview release is publishe
 | `harn [DIR]` | The interactive view on a terminal; the table when piped. `DIR` defaults to the current directory. Every agent gets its own tab (Claude Code first; `Tab` switches) or table; `--agent claude-code` or `--agent codex` picks one. |
 | `harn trim` | The AI picks what to turn off, shows the plan, applies on `y`. Journaled; `harn undo` puts it back. |
 | `harn report --html harn.html` | The same picture as a shareable read-only page. |
-| `harn verify --run` | Measures one real session: starts the agent once, runs your hooks and MCP servers, may cost one model request. |
+| `harn verify --run` | Measures one real Claude Code session: starts it once, runs your hooks and MCP servers, may cost one model request. For Codex it is `harn verify --agent codex --run`, with no model request (see [Codex](#codex)). |
 
 The header names the directory, how many items load, the total and the biggest groups. Items are
 grouped by kind, each group with its size, a bar and its share. The panel below explains the cursor
@@ -91,13 +91,19 @@ says whether Codex trusts the folder, because that decides whether the project's
   layouts: npm and Homebrew. A Codex installed any other way, such as a Linux distribution's own
   package, reads "the installed codex's version could not be determined", and catalog facts stay
   unknown.
-- `d` writes the item's own Codex config key (a hook's `[hooks.state]` entry, a skill's
-  `[[skills.config]]` entry, a block's `include_*` key — never a wider switch such as
-  `features.hooks`) with `toml_edit`, comments and order kept, in the narrowest file where Codex
-  reads it: the folder's `.codex/config.toml` when Codex trusts the folder (this project only),
-  else `~/.codex/config.toml` (every project). The card names the file and the key
-  (`include_environment_context = false`, `plugins."x@y".enabled = false`,
-  `hooks.state."…".enabled = false`, a `[[skills.config]]` entry). `u` restores it byte for byte.
+- `d` writes the item's own Codex config key, never a wider switch such as `features.hooks`, with
+  `toml_edit`, comments and order kept, in the narrowest file where Codex reads that key. The card
+  names the file and the key (`include_environment_context = false`,
+  `plugins."x@y".enabled = false`, `hooks.state."…".enabled = false`, a `[[skills.config]]`
+  entry), and `u` restores it byte for byte.
+  - A plugin's or MCP server's `enabled`, a block's `include_*` and any other key Codex also reads
+    from the project go to the folder's `.codex/config.toml` when Codex trusts the folder and no
+    managed config sets the key (this project only), else to your user `config.toml` in
+    `$CODEX_HOME` (default `~/.codex`; every project). When a layer Codex reads later overrides
+    every file harn could write, there is no switch, and the card names the file that decides.
+  - A hook's `[hooks.state]` entry and a skill's `[[skills.config]]` entry go to your user
+    `config.toml` in `$CODEX_HOME` (or the profile file that already sets them), because Codex
+    reads those tables only from user and profile config: every project, whatever the trust.
 - `harn why`, `off`, `on`, `undo`, `brief`, `apply` and `report --html` work on the Codex tree;
   `harn off` without `--scope` uses the same file as `d`. `harn trim --agent codex` is not
   implemented yet (it refuses, exit 3).
@@ -108,9 +114,11 @@ says whether Codex trusts the folder, because that decides whether the project's
   `harn verify --agent codex --capture <dir>` re-checks them offline. Each item Codex's output can
   show (the AGENTS.md files, the skill listing and its entries, the blocks, MCP servers and
   plugins) must be on both sides. The AGENTS.md message must match byte for byte and each skill
-  listing line must match as text; every other row harn predicts exactly must match in size, to
-  the byte, so a change of the same length there is not detected. Some rows cannot be checked; the
-  report lists each one with its reason instead of failing:
+  listing line harn predicts exactly must match as text; every other row harn predicts exactly
+  must match in size, to the byte, so a change of the same length there is not detected. A row
+  whose prediction is an estimate (for example the skill lines when the listing is over its
+  budget) gets the presence check only. Some rows cannot be checked; the report lists each one
+  with its reason instead of failing:
   - tool schemas, the base instructions and hook output, because Codex's dump does not contain
     them;
   - an AGENTS file, when the AGENTS.md message's opening or closing framing is not where harn
@@ -138,8 +146,8 @@ says whether Codex trusts the folder, because that decides whether the project's
   hooks, MCP servers and built-ins.
 - Sizes each item in bytes as it lands in the first request. What files cannot tell (built-ins,
   hook output, MCP tool schemas) reads `unmeasured` until `harn verify --run` measures a real
-  session (for Codex, only what its dump contains; see [Codex](#codex)), so the screen's total
-  covers only what files can size.
+  session (for Codex, `harn verify --agent codex --run` measures only what its dump contains; see
+  [Codex](#codex)), so the screen's total covers only what files can size.
 - Turns things off only through the agent's official switches: a settings key, written to
   `.claude/settings.local.json` by default for Claude Code (this project only), and for Codex to
   the narrowest `config.toml` where the key takes effect; never a wider scope silently.

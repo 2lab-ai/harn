@@ -341,7 +341,7 @@
       <span class="num" aria-hidden="true">01</span>
       <div class="row-copy">
         <h3>See everything it loads.</h3>
-        <p>harn reads your agent's config without starting a session, Claude Code's settings layers or Codex's <code>config.toml</code> layers, and groups what lands in the first request by kind: the skill listing, project files, plugins, hooks, built-ins and more, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code>; <code>harn verify --run</code> measures what the agent's own view of the first request shows.</p>
+        <p>harn reads your agent's config without starting a session, Claude Code's settings layers or Codex's <code>config.toml</code> layers, and groups what lands in the first request by kind: the skill listing, project files, plugins, hooks, built-ins and more, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code>; <code>harn verify --run</code> (with <code>--agent codex</code> for Codex) measures what the agent's own view of the first request shows.</p>
       </div>
       <figure class="ev">
         <figcaption>First screen · excerpt</figcaption>
@@ -370,7 +370,7 @@ contributes 8 skills · 5 commands · 1 MCP server</pre>
       <span class="num" aria-hidden="true">03</span>
       <div class="row-copy">
         <h3>Turn one off with one card.</h3>
-        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches, never a wider scope silently. For Claude Code it writes a settings key to <code>.claude/settings.local.json</code>, for this project. For Codex it writes the item's own key to the narrowest <code>config.toml</code> Codex reads: the folder's <code>.codex/config.toml</code> when Codex trusts the folder, otherwise <code>~/.codex/config.toml</code>, which every project reads. The card names the file and the key.</p>
+        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches, never a wider scope silently. For Claude Code it writes a settings key to <code>.claude/settings.local.json</code>, for this project. For Codex it writes the item's own key to the narrowest <code>config.toml</code> where Codex reads that key. For a plugin, MCP server or block, that is the folder's <code>.codex/config.toml</code> when Codex trusts the folder; otherwise it is your user config in <code>$CODEX_HOME</code> (<code>~/.codex</code> by default), which every project reads. A hook's or skill's entry goes there too, whatever the trust, because Codex reads those only from your user config. The card names the file and the key.</p>
       </div>
       <figure class="ev">
         <figcaption>Turn off · Claude Code excerpt</figcaption>
@@ -418,7 +418,7 @@ apply? [y/N]</pre>
     <li><strong>Official switches only</strong><span>A settings key the agent already reads, never a wider scope silently.</span></li>
     <li><strong>Reversible byte for byte</strong><span>A snapshot before every write; <code>harn undo</code> puts it back.</span></li>
     <li><strong><code>--readonly</code> refuses every write</strong><span>And every active verify. The screen says so in its header.</span></li>
-    <li><strong>Looks without starting a session</strong><span>It reads files. Your agent starts only on <code>harn trim</code> or <code>harn verify --run</code>.</span></li>
+    <li><strong>Looks without starting a session</strong><span>It reads files. Your agent starts only on <code>harn trim</code> or <code>harn verify --run</code> (<code>--agent codex</code> for Codex).</span></li>
     <li><strong>No network from harn itself</strong><span>The binary has no network code.</span></li>
   </ul>
 </section>
@@ -431,7 +431,7 @@ apply? [y/N]</pre>
   <div class="faq-grid">
     <div class="qa">
       <h3>What does it change on disk?</h3>
-      <p>Nothing until you ask. When you turn something off, harn sets one official key, never a wider scope silently. For Claude Code it is a settings key, by default in <code>.claude/settings.local.json</code> for this project only. For Codex it is the item's own key in the folder's <code>.codex/config.toml</code> when Codex trusts the folder, else in <code>~/.codex/config.toml</code>. It snapshots the file first and journals the change (<code>harn history</code>).</p>
+      <p>Nothing until you ask. When you turn something off, harn sets one official key, never a wider scope silently. For Claude Code it is a settings key, by default in <code>.claude/settings.local.json</code> for this project only. For Codex it is the item's own key in the narrowest <code>config.toml</code> where Codex reads it: for a plugin, MCP server or block, the folder's <code>.codex/config.toml</code> when Codex trusts the folder; otherwise, and for every hook or skill, your user config in <code>$CODEX_HOME</code> (<code>~/.codex</code> by default), which every project reads. It snapshots the file first and journals the change (<code>harn history</code>).</p>
     </div>
     <div class="qa">
       <h3>How do I undo?</h3>
@@ -439,11 +439,11 @@ apply? [y/N]</pre>
     </div>
     <div class="qa">
       <h3>Does it start your agent?</h3>
-      <p>No. It reads the config layers and sizes what files can size. Claude Code starts on two commands: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request). For Codex, <code>harn verify --run</code> runs four of Codex's inspection commands: no model request, but <code>codex debug prompt-input</code> starts your MCP servers and may write into <code>~/.codex</code>.</p>
+      <p>No. It reads the config layers and sizes what files can size. Claude Code starts on two commands: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request). For Codex, <code>harn verify --agent codex --run</code> runs four of Codex's inspection commands: no model request, but <code>codex debug prompt-input</code> starts your MCP servers and may write into <code>$CODEX_HOME</code> (<code>~/.codex</code> by default).</p>
     </div>
     <div class="qa">
       <h3>Does it send anything anywhere?</h3>
-      <p>harn itself has no network code. <code>harn trim</code> and <code>harn verify --run</code> start your own agent, which talks to its provider the way it always does.</p>
+      <p>harn itself has no network code. The commands above that start your agent let it talk to its provider the way it always does.</p>
     </div>
     <div class="qa">
       <h3>What about Codex?</h3>

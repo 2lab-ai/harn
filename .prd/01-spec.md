@@ -118,8 +118,9 @@ request**. Details and URLs: `research/03`.
 5. **Verify against the agent's own ground truth, bound to a run context.** A capture is usable
    only if its context (canonical cwd, agent and version, model, launch options, settings
    fingerprint, time) matches the tree being verified. `harn verify --capture <path>` reads an
-   existing capture and never writes; `harn verify --run` starts the agent once under its official
-   capture (Claude Code: `OTEL_LOG_RAW_API_BODIES=file:<dir>` request body + the `stream-json`
+   existing capture and never writes; `harn verify --run` (`--agent codex` for Codex; without it,
+   Claude Code) starts the agent once under its official capture (Claude Code:
+   `OTEL_LOG_RAW_API_BODIES=file:<dir>` request body + the `stream-json`
    `system/init` provenance event; Codex: `codex debug prompt-input` + `codex debug models` +
    `codex mcp list --json` + `codex plugin list --json`, no model request), states before running
    what it will execute (Claude Code: hooks and MCP servers, and possibly one model request;
@@ -243,10 +244,12 @@ until a bound capture turns it into `observed`.
   MCP servers and may write into `CODEX_HOME`. Gate 1 is presence by id over the AGENTS.md message
   and each AGENTS file, `developer_instructions`, the skill listing and its entries, the built-in
   blocks, the environment block, MCP servers and plugins; gate 2 is content: the AGENTS.md message
-  as harn assembles it from the files must match byte for byte, and each skill listing line must
-  match as text; every other row with an exact prediction must match in size, to the byte
-  (tolerance 0), so a change of the same length there is not detected (the listing's total is a
-  size check that passes when its entries' own rows explain the whole difference). A row Codex's
+  as harn assembles it from the files must match byte for byte, and each skill listing line harn
+  predicts exactly must match as text; every other row with an exact prediction must match in
+  size, to the byte (tolerance 0), so a change of the same length there is not detected (the
+  listing's total is a size check that passes when its entries' own rows explain the whole
+  difference). A row whose prediction is an estimate (for example the skill lines when the
+  listing is over its budget) gets gate 1 only. A row Codex's
   output cannot settle is `not-checkable` — a row of its own with its reason, never a failure — so
   a Codex verify is partial by construction and every report says what is outside Codex's dump
   (`research/02` §8). The classes:
@@ -326,7 +329,7 @@ selects one agent (default: all, one table each).
 | `harn --json` | the full model | `{"schema":"harn/1", "agents":[…]}` |
 | `harn why <item>` | admission chain, realpath, knob candidates by scope, the freed bytes of each | text |
 | `harn path <item>` | the resolved realpath, one line | path |
-| `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + what leaves (by mode) + side effects + warnings, then apply the official knob in the given scope (default per agent: Claude Code `local`; Codex the item's own key — its first knob — in the narrowest `config.toml` where it takes effect: the folder's `.codex/config.toml` while Codex trusts it, else `~/.codex/config.toml`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
+| `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + what leaves (by mode) + side effects + warnings, then apply the official knob in the given scope (default per agent: Claude Code `local`; Codex the item's own key — its first knob — in the narrowest `config.toml` where Codex reads it: for a plugin, MCP server, block or other key Codex also reads from the project, the folder's `.codex/config.toml` while Codex trusts it and no managed layer sets the key, else the user `config.toml` in `$CODEX_HOME`, and no knob when a later layer overrides both; for a hook's `[hooks.state]` and a skill's `[[skills.config]]`, the user `config.toml` (or the profile that sets them), since Codex reads those only from user and profile config); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
 | `harn on <item>` / `harn undo [N]` / `harn history [--prune <age>]` | reverse journal ops; stale targets reported, not forced; `--prune` is the only way journal entries are ever deleted | text |
 | `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; a JSON/TOML/frontmatter file that no longer parses is journaled and warned about, not reverted; refused for `builtin`/`managed` items | diff + journal id |
 | `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted` / `content-mismatch`; exit 1 on any presence diff or content-conformance mismatch within the projection |

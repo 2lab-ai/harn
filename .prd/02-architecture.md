@@ -108,9 +108,11 @@ src/
   verify/codex.rs    the Codex projection over codex's inspection output: gate 1 presence (AGENTS
                      message and files, developer_instructions, skill listing and entries, blocks,
                      environment, MCP servers, plugins), gate 2 content (the AGENTS message byte
-                     for byte, each skill listing line as text, every other exactly predicted row
-                     by size only, to the byte: a change of the same length there is not
-                     detected); not-checkable rows with their reason, never a failure: outside the
+                     for byte, each exactly predicted skill listing line as text, every other
+                     exactly predicted row by size only, to the byte: a change of the same length
+                     there is not detected; an estimated row, such as the skill lines when the
+                     listing is over its budget, gets gate 1 only); not-checkable rows with their
+                     reason, never a failure: outside the
                      dump (tools[], base instructions, hook output), AGENTS files whose place in
                      the message cannot be established because its framing is not where predicted
                      (the framing row still fails), rules files, runtime-decided blocks,
