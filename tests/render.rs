@@ -856,17 +856,15 @@ fn unique_signals_keep_one_footnote_per_row() {
     .join("\n");
     assert_eq!(render::table(&t, &unicode()), expected);
 
+    // The whole page, byte for byte; only the footer's `harn --version` line is masked, since
+    // it carries the build channel and id.
     let html = render::html(&doc(vec![t]));
-    let notes = [
-        "<ol class=\"notes\">",
-        "<li>mcp plugin:atlassian: off: managed settings turn the plugin off</li>",
-        "<li>rules/PRINCIPLES.md: off: imported from outside the project</li>",
-        "<li>skill listing: over cap: 146 of 216 descriptions dropped</li>",
-        "<li>hooks PreToolUse runtime: off: disableAllHooks = true</li>",
-        "</ol>",
-    ]
-    .join("\n");
-    assert!(html.contains(&notes), "{html}");
+    let version = harn::version_line();
+    assert_eq!(html.matches(&version).count(), 1, "{html}");
+    assert_eq!(
+        format!("{}\n", html.replace(&version, "@VERSION@")),
+        include_str!("fixtures/render-html/unique-signals.html")
+    );
 }
 
 const SHARED_SIGNAL: &str = "bundled-skill: the folder holds the built-in skills last written there by the agent; the one that runs may replace them, so the skills there and their listing lines can change";
@@ -927,8 +925,23 @@ fn rows_with_the_same_signal_share_one_footnote() {
         "{out}"
     );
 
-    // The html report numbers its notes the same way.
-    let html = render::html(&doc(vec![t]));
+    // The html report numbers its notes the same way, each row with its own marker.
+    let html = render::html(&doc(vec![t.clone()]));
+    for (label, n) in [
+        ("plugin-creator", 1),
+        ("notes", 2),
+        ("openai-docs", 1),
+        ("imagegen", 1),
+    ] {
+        let id = &t.items.iter().find(|i| i.label == label).unwrap().id;
+        let row = line_with(&html, &format!("<code class=\"id\">{id}</code>"));
+        assert!(
+            row.contains(&format!(
+                ">{label} <span class=\"signal\">[{n}]</span><code class=\"id\">{id}</code>"
+            )),
+            "{row}"
+        );
+    }
     assert_eq!(
         html.matches("<span class=\"signal\">[1]</span>").count(),
         3,

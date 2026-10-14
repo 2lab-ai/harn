@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>harn report — /Users/test/2lab.ai/zbrain</title>
+<style>:root{--fg:#1d1f23;--muted:#5d6470;--line:#d9dce1;--track:#eceef1;--bar:#3b6fd8;--warn:#9a5b00;--bg:#fff}
+@media (prefers-color-scheme:dark){:root{--fg:#e3e5e8;--muted:#9aa1ab;--line:#3a3f47;--track:#2a2e35;--bar:#6e9bf0;--warn:#e0a84a;--bg:#16181c}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0 auto;max-width:80rem;padding:1rem;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--fg);background:var(--bg);overflow-wrap:break-word}
+h1{font-size:1.3rem;margin:0 0 .25rem}
+h2{font-size:1.1rem;margin:1.5rem 0 .25rem}
+h3{font-size:.95rem;margin:1rem 0 .25rem;color:var(--muted)}
+code,.id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85em;overflow-wrap:anywhere;word-break:break-all}
+.meta,.id,footer{color:var(--muted)}
+ul.facts{list-style:none;padding:0;margin:.5rem 0}
+ul.facts li{margin:.15rem 0}
+.warn,.signal{color:var(--warn)}
+table.rows{border-collapse:collapse;width:100%;table-layout:auto}
+table.rows th,table.rows td{text-align:left;vertical-align:top;padding:.3rem .5rem;border-bottom:1px solid var(--line)}
+table.rows th{font-weight:600;color:var(--muted);white-space:nowrap}
+table.rows td.num{text-align:right;white-space:nowrap}
+table.rows td.share,table.rows td.mode{white-space:nowrap}
+table.rows td.item{padding-left:calc(.5rem + var(--d,0) * 1.2rem)}
+td.item .id{display:block}
+details.why{color:var(--muted);font-size:.85em}
+details.why summary{cursor:pointer}
+details.why ol{margin:.2rem 0;padding-left:1.2rem}
+details.why li{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere;word-break:break-all}
+.bar{display:inline-block;width:5rem;height:.6rem;background:var(--track);vertical-align:middle;margin-right:.35rem}
+.bar i{display:block;height:100%;background:var(--bar)}
+ol.notes{color:var(--muted);padding-left:1.5rem}
+footer{margin-top:2rem;font-size:.85em}
+@media (max-width:600px){
+table.rows,table.rows tbody,table.rows tr,table.rows td{display:block;width:auto}
+table.rows thead{display:none}
+table.rows tr{border:1px solid var(--line);border-radius:6px;margin:.5rem 0 .5rem calc(var(--d,0) * .8rem);padding:.35rem .6rem}
+table.rows td{border:0;padding:.1rem 0;text-align:left;white-space:normal}
+table.rows td.item{padding-left:0}
+table.rows td.num{text-align:left}
+table.rows td::before{content:attr(data-l);display:inline-block;min-width:6.5rem;color:var(--muted)}
+table.rows td.item::before{display:none}
+table.rows td:empty{display:none}
+}</style>
+</head>
+<body>
+<header><h1>harn report</h1><p class="meta"><code>/Users/test/2lab.ai/zbrain</code> · read-only view of the current loadout; change it with <code>harn off</code> / <code>harn apply</code></p></header>
+<main>
+<section class="agent" id="claude-code">
+<h2>claude-code 2.1.300 (rules verified 2.1.296)</h2><p class="meta">target <code>/Users/test/2lab.ai/zbrain</code></p>
+<ul class="facts">
+<li class="warn">drift: installed claude-code 2.1.300, rules verified against 2.1.296 — rows may be wrong until `harn verify` passes</li>
+<li>first request: predicted 229.7 KB + ? (4 rows unknown)</li>
+<li>tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → MCP tool schemas load eagerly</li>
+<li>knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]  freed: ?</li>
+</ul>
+<table class="rows">
+<thead><tr><th>freed (pred)</th><th>predicted</th><th>share</th><th>item</th><th>origin</th><th>mode</th><th>default action</th></tr></thead>
+<tbody>
+<tr style="--d:0"><td class="num" data-l="freed (pred)">67.3 KB</td><td class="num" data-l="predicted">64.7 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:28.2%"></i></span>28.2%</td><td class="item" data-l="item">mcp plugin:atlassian <span class="signal">[1]</span><code class="id">claude-code/mcp-server/plugin/plugin:atlassian:atlassian</code><details class="why"><summary>why loaded</summary><ol><li>&quot;atlassian&quot; (http) https://example.invalid/mcp?a=1&amp;b=2</li></ol></details></td><td class="origin" data-l="origin">plugin atlassian@claude-plugins-official</td><td class="mode" data-l="mode">always</td><td class="action" data-l="default action">enabledPlugins → false (local)</td></tr>
+<tr style="--d:0"><td class="num" data-l="freed (pred)">20.5 KB</td><td class="num" data-l="predicted">6.8 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:3.0%"></i></span>3.0%</td><td class="item" data-l="item">CLAUDE.md project · 2<code class="id">claude-code/instruction/project//Users/test/2lab.ai/zbrain/CLAUDE.md</code><details class="why"><summary>why loaded</summary><ol><li>/Users/test/2lab.ai/zbrain/CLAUDE.md</li></ol></details></td><td class="origin" data-l="origin">project</td><td class="mode" data-l="mode">always</td><td class="action" data-l="default action">claudeMdExcludes (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)">9.4 KB</td><td class="num" data-l="predicted">9.4 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:4.1%"></i></span>4.1%</td><td class="item" data-l="item">rules/DEV.md<code class="id">claude-code/instruction/project//Users/test/2lab.ai/zbrain/rules/DEV.md</code><details class="why"><summary>why loaded</summary><ol><li>/Users/test/2lab.ai/zbrain/CLAUDE.md</li><li>@rules/DEV.md</li></ol></details></td><td class="origin" data-l="origin">project</td><td class="mode" data-l="mode">always</td><td class="action" data-l="default action">claudeMdExcludes (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)">4.3 KB</td><td class="num" data-l="predicted">4.3 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:1.9%"></i></span>1.9%</td><td class="item" data-l="item">rules/PRINCIPLES.md <span class="signal">[2]</span><code class="id">claude-code/instruction/project//Users/test/2lab.ai/zbrain/rules/PRINCIPLES.md</code><details class="why"><summary>why loaded</summary><ol><li>/Users/test/2lab.ai/zbrain/CLAUDE.md</li><li>@rules/PRINCIPLES.md</li></ol></details></td><td class="origin" data-l="origin">project</td><td class="mode" data-l="mode">always</td><td class="action" data-l="default action">claudeMdExcludes (local)</td></tr>
+<tr style="--d:0"><td class="num" data-l="freed (pred)">0.7 KB</td><td class="num" data-l="predicted">0.7 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.3%"></i></span>0.3%</td><td class="item" data-l="item">~/.claude/CLAUDE.md<code class="id">claude-code/instruction/user//Users/test/.claude/CLAUDE.md</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">always</td><td class="action" data-l="default action">claudeMdExcludes (local)</td></tr>
+<tr style="--d:0"><td class="num" data-l="freed (pred)">Δ?</td><td class="num" data-l="predicted">~31.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:13.6%"></i></span>13.6%</td><td class="item" data-l="item">skill listing · 14 <span class="signal">[3]</span><code class="id">claude-code/skill-listing/builtin/skills</code></td><td class="origin" data-l="origin">builtin</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-13<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-13</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-12<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-12</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-11<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-11</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-10<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-10</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-09<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-09</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-08<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-08</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-07<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-07</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-06<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-06</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-05<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-05</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-04<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-04</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-03<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-03</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-02<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-02</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-01<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-01</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+<tr style="--d:1"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">0.2 KB</td><td class="share" data-l="share"><span class="bar"><i style="width:0.1%"></i></span>0.1%</td><td class="item" data-l="item">skill-00<code class="id">claude-code/skill/user//Users/test/.claude/skills/skill-00</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">advertised</td><td class="action" data-l="default action">skillOverrides (local)</td></tr>
+</tbody>
+</table>
+<h3>runtime / no first-request cost</h3>
+<table class="rows">
+<thead><tr><th>freed (pred)</th><th>predicted</th><th>share</th><th>item</th><th>origin</th><th>mode</th><th>default action</th></tr></thead>
+<tbody>
+<tr style="--d:0"><td class="num" data-l="freed (pred)"></td><td class="num" data-l="predicted">—</td><td class="share" data-l="share"></td><td class="item" data-l="item">hooks PreToolUse runtime <span class="signal">[4]</span><code class="id">claude-code/hook/user/PreToolUse</code></td><td class="origin" data-l="origin">user</td><td class="mode" data-l="mode">runtime</td><td class="action" data-l="default action">disableAllHooks → true (local)</td></tr>
+</tbody>
+</table>
+<ol class="notes">
+<li>mcp plugin:atlassian: off: managed settings turn the plugin off</li>
+<li>rules/PRINCIPLES.md: off: imported from outside the project</li>
+<li>skill listing: over cap: 146 of 216 descriptions dropped</li>
+<li>hooks PreToolUse runtime: off: disableAllHooks = true</li>
+</ol>
+</section>
+</main>
+<footer>generated 2026-10-13T04:05:06Z by @VERSION@</footer>
+</body>
+</html>
