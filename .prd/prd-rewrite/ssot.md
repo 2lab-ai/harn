@@ -1,6 +1,6 @@
 # ssot — PRD authoring drive for `harn` (fixed 2026-10-13)
 
-Status: in-progress
+Status: done (2026-10-13; receipts in `loop.done.md`)
 
 ## User statement (verbatim, 2026-10-13, zbrain session, `/goal … /using-dotprd`)
 

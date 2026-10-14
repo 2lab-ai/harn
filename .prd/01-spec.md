@@ -15,9 +15,8 @@ art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see 
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
 [`prd-rewrite/ssot.md`](prd-rewrite/ssot.md). Reviewed by the three-engine panel (grok-4.7,
 gpt-6-astra, fable): unanimous APPROVE on this text at round 5 of 5, 2026-10-13, no blocking
-items; round-by-round changes are in the [§Revision log](#revision-log). This document is a
-target, not a description of shipped behavior; it moves to **shipped** only when
-[§Acceptance](#acceptance-scenarios) P0 is green on both machines.
+items; round-by-round changes are in the [§Revision log](#revision-log). P0 is green on both
+machines; the open part is P0.5 (Codex, A7–A8). The site is [`05-landing.md`](05-landing.md).
 
 ## Problem
 
@@ -282,6 +281,12 @@ every active verify), `--no-unicode`, `--color`.
 
 ### P0.5 — Codex resolver (same commands; acceptance A7–A8)
 
+The same commands with `--agent codex`: the tree, `why`, `off`/`on`/`undo`, `brief`, `verify`.
+What Codex loads and each item's off switch are in [§Codex coverage](#codex-coverage-condensed-from-research02)
+(full rules with sources: [`research/02`](research/02-codex-loading-rules.md)); module boundaries
+in [`02-architecture.md`](02-architecture.md) (`resolve/codex/`, `oracle/codex.rs`). Codex never
+gates P0. `harn trim --agent codex` stays P1.
+
 ### P1 — beyond `harn trim`
 
 The operator loop itself is P0 (`harn trim`, moved here from P1 on the user's 2026-10-13 correction:
@@ -290,8 +295,8 @@ The `/harn-trim` skill (`.claude/skills/harn-trim/SKILL.md`) is the same loop ru
 interactive Claude Code session, for when the agent is already there; the skill is text, the
 contract is the CLI. P1 adds: usage evidence in the brief (which skills/agents were actually
 invoked in this directory's session logs, so the agent's reasons cite use, not size alone);
-`harn trim --agent codex`; a `harn report` before/after pair. No TUI is planned; the former TUI
-section was removed on the user's direction.
+`harn trim --agent codex`; a `harn report` before/after pair. The human's view is the TUI, which
+is P0 ([`04-tui-design.md`](04-tui-design.md), A16).
 
 Carried over from the P0 drive (`p0-claude-code/loop.md` G3, G7), both P1:
 - pointer-level undo for `harn on` — today `on A` after `off A; off B` on the same file reports
@@ -493,10 +498,17 @@ release on `v*` tags, rolling preview on every `main` push; two Homebrew formula
 `2lab-ai/homebrew-tap` (`harn`, `harn-preview`) — the llmux asset shape and matrix exactly, so the
 tap's existing bump job applies unchanged. `harn --version` prints version, build channel, 12-char
 revision and the agent versions the rules were verified against. Mechanics:
-[`02-architecture.md`](02-architecture.md).
+[`02-architecture.md`](02-architecture.md). The project site is https://harn.2lab.ai, served from
+`docs/landing` by Cloudflare Pages on every `main` push that touches it
+([`05-landing.md`](05-landing.md)).
 
 ## Revision log
 
+- **v3.10 (2026-10-14, docs refresh)** — status paragraph no longer calls the shipped document a
+  target; §P0.5 points at the Codex coverage, `research/02` and the architecture; §P1's "no TUI is
+  planned" removed (the TUI is P0, A16); the site and its deploy recorded in `05-landing.md`.
+  Linux re-check: the installed binary on `cachy-z13` at `0de8dcd` opens, renders and quits clean
+  (frames read; TUI tests 57/57).
 - **v3.9 (2026-10-13, A16 observed — the TUI as a screen)** — WU-Q rebuilt the interactive view
   per `04-tui-design.md`; the dispatcher read every captured frame at every round (r4–r10, 26 → 54
   frames at 80×24 and 120×40) and an independent ui-ux reading passed on the third pass; external
