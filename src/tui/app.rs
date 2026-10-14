@@ -91,6 +91,10 @@ fn t(text: impl Into<String>) -> Part {
     Part::Text(text.into())
 }
 
+/// What `d` and `o` say on a hook a managed policy keeps off, after its name.
+const OFF_BY_POLICY_SAYS: &str =
+    " is off by policy: your organisation allows only its own hooks (allowManagedHooksOnly)";
+
 /// A card over the list.
 #[derive(Debug, Clone)]
 pub(crate) enum Card {
@@ -914,8 +918,11 @@ impl App {
                 .id
                 .as_ref()
                 .is_some_and(|id| self.tab().journaled.contains_key(id));
+            let by_policy = self.cursor_item().is_some_and(model::off_by_policy);
             parts.push(t(if by_harn {
                 " is already off here; o turns it back on"
+            } else if by_policy {
+                OFF_BY_POLICY_SAYS
             } else {
                 " is already off: your settings turn every hook off (disableAllHooks)"
             }));
@@ -1044,11 +1051,15 @@ impl App {
             return;
         };
         let Some(entry_id) = self.tab().journaled.get(&id).cloned() else {
-            let parts = vec![
-                t("o: harn did not turn "),
-                self.item(&id),
-                t(" off here (`harn history` lists its changes)"),
-            ];
+            let parts = if self.cursor_item().is_some_and(model::off_by_policy) {
+                vec![self.item(&id), t(OFF_BY_POLICY_SAYS)]
+            } else {
+                vec![
+                    t("o: harn did not turn "),
+                    self.item(&id),
+                    t(" off here (`harn history` lists its changes)"),
+                ]
+            };
             self.say(Tone::Error, parts);
             return;
         };

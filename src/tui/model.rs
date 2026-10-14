@@ -26,6 +26,8 @@ pub struct OffItem {
 pub const ALL_HOOKS: &str = "/disableAllHooks";
 /// What a hook row that switch turned off says instead of a size.
 const OFF_WITH_HOOKS: &str = "off, with every other hook";
+/// What a hook row a managed policy keeps off says instead of a size.
+const OFF_BY_POLICY: &str = "off by policy";
 
 /// Row order inside a group; `s` toggles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -264,7 +266,7 @@ pub struct Group {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     On,
-    /// Turned off: by harn here (journaled), or with every other hook.
+    /// Turned off: by harn here (journaled), with every other hook, or by a managed policy.
     Off,
     /// No switch: it cannot be turned off.
     Fixed,
@@ -1604,6 +1606,8 @@ impl Builder<'_> {
             None
         } else if switched_off(item) {
             Some(OFF_WITH_HOOKS)
+        } else if off_by_policy(item) {
+            Some(OFF_BY_POLICY)
         } else if self.journaled.contains_key(&item.id) {
             // Turned off here and still listed (a disabled MCP server): the word place_off
             // rows say.
@@ -1617,10 +1621,10 @@ impl Builder<'_> {
     }
 
     /// Off when harn turned it off here (even if it still resolves: a denied agent stays in
-    /// the roster) or it went off with every other hook, else On with a switch, Fixed without
-    /// one.
+    /// the roster), it went off with every other hook or a managed policy keeps it off, else On
+    /// with a switch, Fixed without one.
     fn state(&self, item: &Item) -> State {
-        if self.journaled.contains_key(&item.id) || switched_off(item) {
+        if self.journaled.contains_key(&item.id) || switched_off(item) || off_by_policy(item) {
             State::Off
         } else if any_knob(item).is_some() {
             State::On
@@ -1707,7 +1711,10 @@ impl Builder<'_> {
                 .or_else(|| common_absent(None, &children))
                 .or(Some("not loaded")),
         };
-        let counts = facet_counts(facets);
+        // A hook a managed policy keeps off is not brought: it gets its own sentence.
+        let (policy_off, brought): (Vec<&Item>, Vec<&Item>) =
+            facets.iter().partition(|f| off_by_policy(f));
+        let counts = facet_counts(&brought);
         let brings_list = and_list(&counts);
         let what_with = |version: Option<String>| {
             format!(
@@ -1726,6 +1733,11 @@ impl Builder<'_> {
                 format!("Brings {brings_list}; it runs later and costs nothing up front.")
             }
             _ => format!("Brings {brings_list}."),
+        };
+        let brings = match policy_off.len() {
+            0 => brings,
+            1 => format!("{brings} Its hook is off by policy."),
+            n => format!("{brings} Its {n} hooks are off by policy."),
         };
         let mut detail = Detail {
             what,
@@ -1965,8 +1977,20 @@ impl Builder<'_> {
             .unwrap_or(detail)
     }
 
-    /// The detail of a hook that went off with every other hook.
+    /// The detail of a hook that went off with every other hook, or that a managed policy keeps
+    /// off.
     fn hooks_off(&self, item: &Item, name: &str) -> Option<Detail> {
+        if off_by_policy(item) {
+            return Some(Detail {
+                what: format!("{name} · off by policy"),
+                brings: "Your organisation's managed policy allows only its own hooks \
+                         (allowManagedHooksOnly), so this one does not run."
+                    .to_string(),
+                action: "No setting of yours overrides that policy, so d and o cannot change it."
+                    .to_string(),
+                ..Detail::default()
+            });
+        }
         if !switched_off(item) {
             return None;
         }
@@ -2284,6 +2308,11 @@ fn switched_off(item: &Item) -> bool {
     item.signal.as_deref() == Some(OFF_ALL_HOOKS)
 }
 
+/// A hook a managed policy keeps off (`allowManagedHooksOnly`): no switch turns it back on.
+pub fn off_by_policy(item: &Item) -> bool {
+    item.signal.as_deref() == Some(crate::resolve::claude::OFF_MANAGED_HOOKS_ONLY)
+}
+
 /// Name and source of an item known only by its id (`<agent>/<kind>/<layer>/<name>`): a plugin
 /// without its marketplace, a file home-relative, a hook by its event, else the name's last
 /// `:` part. The source is worded as a live row's (`~/.claude`, not `user`).
@@ -2317,6 +2346,9 @@ fn common_absent(bytes: Option<u64>, rows: &[Row]) -> Option<&'static str> {
     // Rows harn turned off say so themselves; the others decide the word.
     let on: Vec<&Row> = rows.iter().filter(|r| r.state != State::Off).collect();
     let Some(first) = on.first().map(|r| r.absent) else {
+        if rows.iter().all(|r| r.absent == Some(OFF_BY_POLICY)) {
+            return Some(OFF_BY_POLICY);
+        }
         return Some("off");
     };
     if on.iter().all(|r| r.absent == first) {
@@ -2362,10 +2394,12 @@ fn descendants(item: &Item) -> usize {
     item.children.iter().map(|c| 1 + descendants(c)).sum()
 }
 
-/// Some row (or a row under it) has a switch `d` or `o` can use.
+/// Some row (or a row under it) has a switch `d` or `o` can use; a hook off by policy has none.
 fn any_on(rows: &[Row]) -> bool {
-    rows.iter()
-        .any(|r| (r.state != State::Fixed && r.id.is_some()) || any_on(&r.children))
+    rows.iter().any(|r| {
+        (r.state != State::Fixed && r.id.is_some() && r.absent != Some(OFF_BY_POLICY))
+            || any_on(&r.children)
+    })
 }
 
 /// `over cap: 146 of 216 descriptions dropped` → (146, 216).

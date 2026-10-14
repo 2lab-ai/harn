@@ -473,7 +473,19 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Some(Cmd::On { selector }) => {
             let target = target(cli, None)?;
             let mut journal = open_journal()?;
-            let entry = journal::on(&mut journal, &target, selector)?;
+            let entry = match journal::on(&mut journal, &target, selector) {
+                Ok(entry) => entry,
+                // Not harn's change: a hook a managed policy keeps off is refused by name.
+                Err(err) if matches!(err.downcast_ref(), Some(SelectError::NotFound(_))) => {
+                    let refused = resolve_trees(cli, &target).ok().and_then(|trees| {
+                        pick(&trees, selector)
+                            .ok()
+                            .and_then(|(_, item)| plan::on_refusal(item))
+                    });
+                    return Err(refused.map_or(err, Into::into));
+                }
+                Err(err) => return Err(err),
+            };
             print_entries(cli, std::slice::from_ref(&entry))?;
         }
         Some(Cmd::Edit { selector }) => {

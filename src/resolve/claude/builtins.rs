@@ -10,11 +10,13 @@
 //! `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`; attribution reminder → `attribution: {commit: "", pr:
 //! ""}`; a tool → a bare `permissions.deny` entry (removes it from context) or its
 //! `CLAUDE_CODE_DISABLE_*` variable; prompt / environment / date / userEmail → none. Output style
-//! (`outputStyle`), `statusLine` (mode none: runs locally; `disableAllHooks` stops it, said in its
+//! (`outputStyle`), `statusLine` (mode none: runs locally; `disableAllHooks` stops it, and so does
+//! a managed `allowManagedHooksOnly` when it is set outside managed settings, said in its
 //! `signal`) and permission rule lists (mode none) come from the merged settings.
 
 use super::fs::file_name;
-use super::hooks::OFF_ALL_HOOKS;
+use super::hooks::{managed_hooks_only, OFF_ALL_HOOKS, OFF_MANAGED_HOOKS_ONLY};
+use super::settings::Source;
 use super::{cost_na, env_knob, frontmatter, json_string, new_item, setting_knob, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use serde_json::{json, Value};
@@ -305,13 +307,24 @@ pub(crate) fn settings_rows(ctx: &Ctx) -> Vec<Item> {
         item.origin.path = Some(file.path.clone());
         item.origin.setting = Some(setting.clone());
         item.origin.why = vec![setting, "runs locally; never reaches the model".to_string()];
-        if let Some(set_at) = hooks_off {
-            item.origin.why.push(set_at);
-            item.signal = Some(OFF_ALL_HOOKS.to_string());
-        }
         item.knobs = vec![Knob::None {
             reason: "not in the request".to_string(),
         }];
+        if let Some(set_at) = hooks_off {
+            item.origin.why.push(set_at);
+            item.signal = Some(OFF_ALL_HOOKS.to_string());
+        } else if let (Some(set_at), false) =
+            (managed_hooks_only(ctx), file.source == Source::Managed)
+        {
+            // `allowManagedHooksOnly` reads the status line from managed settings only.
+            item.origin.why.push(set_at);
+            item.signal = Some(OFF_MANAGED_HOOKS_ONLY.to_string());
+            item.knobs = vec![Knob::None {
+                reason: "managed policy allowManagedHooksOnly runs a status line from managed \
+                         settings only; no user setting overrides it"
+                    .to_string(),
+            }];
+        }
         out.push(item);
     }
 

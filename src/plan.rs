@@ -492,6 +492,24 @@ fn choose_knob(item: &Item, scope: Option<Scope>) -> anyhow::Result<&Knob> {
     .into())
 }
 
+/// `harn on` for an item no live journal entry turned off: a hook a managed policy keeps off
+/// (signal `OFF_MANAGED_HOOKS_ONLY`) is refused with its `Knob::None` reason — no setting harn
+/// writes overrides that policy. None for anything else: not found stays not found.
+pub fn on_refusal(item: &Item) -> Option<Refused> {
+    if item.signal.as_deref() != Some(crate::resolve::claude::OFF_MANAGED_HOOKS_ONLY) {
+        return None;
+    }
+    let reason = item
+        .knobs
+        .iter()
+        .find_map(|k| match k {
+            Knob::None { reason } => Some(reason.as_str()),
+            _ => None,
+        })
+        .unwrap_or("no knob");
+    Some(Refused(format!("{}: {reason}", item.id)))
+}
+
 struct Pick<'a> {
     item: &'a Item,
     knob: &'a Knob,

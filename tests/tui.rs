@@ -3107,6 +3107,123 @@ fn hooks_your_own_settings_turned_off_are_listed_and_not_offered_to_o() {
 }
 
 #[test]
+fn hooks_a_managed_policy_turns_off_read_off_by_policy_and_offer_neither_d_nor_o() {
+    let f = fixture();
+    let words = forbidden(&f);
+    // Managed settings are outside the fixture: the overlay patch stands in for the file.
+    let overlay = model::Overlay {
+        ops: vec![model::OverlayOp::SetJson {
+            file: PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
+            pointer: "/allowManagedHooksOnly".to_string(),
+            value: serde_json::json!(true),
+        }],
+    };
+    let tree = ClaudeCode
+        .resolve(&target(&f), Some(&overlay))
+        .expect("resolve");
+    let mut app = app_on(&f, tree, false, true);
+    let hook = |app: &App, plugin: bool| {
+        model::walk(app.tree())
+            .find(|i| {
+                i.kind == Kind::Hook
+                    && i.origin.plugin.is_some() == plugin
+                    && (plugin || i.label.starts_with("SessionStart hook"))
+            })
+            .unwrap()
+            .id
+            .clone()
+    };
+    let id = hook(&app, false);
+    assert!(app.select(&id));
+    let (g, path) = app.screen().find(&id).unwrap();
+    let row = app.screen().row(g, &path).unwrap();
+    assert_eq!((row.state, row.absent), (State::Off, Some("off by policy")));
+    let frame = screen(&app, 80, 24);
+    let all = frame.join("\n");
+    let rows: Vec<&String> = frame
+        .iter()
+        .filter(|l| l.starts_with("     ") && l.contains(" hook "))
+        .collect();
+    assert_eq!(rows.len(), 2, "{all}");
+    assert!(
+        rows.iter()
+            .all(|r| r.trim_end().ends_with("—  off by policy")),
+        "{all}"
+    );
+    // No switch of the user's reaches it: neither key in the bar.
+    assert!(!frame[23].contains("turn off"), "{}", frame[23]);
+    assert!(!frame[23].contains("turn back on"), "{}", frame[23]);
+    let said = panel(&frame);
+    assert_eq!(said[0], " SessionStart hook · off by policy", "{all}");
+    let sentences = said
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        sentences.contains(
+            "Your organisation's managed policy allows only its own hooks \
+             (allowManagedHooksOnly), so this one does not run."
+        ),
+        "{sentences}"
+    );
+    let policy = "SessionStart hook is off by policy: your organisation allows only its own hooks \
+                  (allowManagedHooksOnly)";
+    for key in ['d', 'o'] {
+        press(&mut app, KeyCode::Char(key));
+        assert!(!app.has_card(), "{key}");
+        assert_eq!(message(&app), policy, "{key}");
+    }
+    // `w`: where the hook is, and the managed setting that keeps it off.
+    press(&mut app, KeyCode::Char('w'));
+    let inside = card(&screen(&app, 120, 40), "Where SessionStart hook comes from")
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        inside.contains(
+            "managed-settings.json › allowManagedHooksOnly = true (by your organisation)"
+        ),
+        "{inside}"
+    );
+    press(&mut app, KeyCode::Esc);
+    clean_both(&app, &words, "a hook a managed policy turned off");
+    // The group line: every hook in it off by policy, so no `d` there either.
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    let frame = screen(&app, 80, 24);
+    let group = frame.iter().find(|l| l.starts_with(" ▾ Hooks")).unwrap();
+    assert!(group.trim_end().ends_with("—  off by policy"), "{group}");
+    assert!(cursor_line(&draw(&app, 80, 24)).is_some_and(|l| l.starts_with(" ▾ Hooks")));
+    assert!(!frame[23].contains("turn off"), "{}", frame[23]);
+    // A plugin's hook the same, under its plugin.
+    let id = hook(&app, true);
+    assert!(app.select(&id));
+    let (g, path) = app.screen().find(&id).unwrap();
+    let row = app.screen().row(g, &path).unwrap();
+    assert_eq!((row.state, row.absent), (State::Off, Some("off by policy")));
+    let frame = screen(&app, 80, 24);
+    assert!(!frame[23].contains("turn off"), "{}", frame[23]);
+    assert!(!frame[23].contains("turn back on"), "{}", frame[23]);
+    clean_both(&app, &words, "a plugin hook a managed policy turned off");
+    // Its plugin does not count it as brought: it says the hook is off by policy.
+    assert!(app.select(ALPHA));
+    let frame = screen(&app, 120, 40);
+    let said = panel(&frame).join(" ");
+    assert!(
+        said.contains("Brings 2 skills and 1 MCP server. Its hook is off by policy."),
+        "{said}"
+    );
+    assert!(!said.contains("1 hook"), "{said}");
+    clean_both(
+        &app,
+        &words,
+        "a plugin whose hook a managed policy turned off",
+    );
+}
+
+#[test]
 fn a_server_turned_off_that_stays_listed_says_off_and_why() {
     let f = fixture();
     let mut app = app(&f);
