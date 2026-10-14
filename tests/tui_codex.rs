@@ -1781,6 +1781,52 @@ fn base_instructions_say_where_their_size_comes_from_and_that_verify_cannot_chec
     assert!(!body.contains("capture"), "{body}");
 }
 
+/// The tool-search note points to the model note only when the facts say the catalog entry
+/// cannot be used; a tree where it can (the resolver never builds one undecided, see
+/// `tests/resolve_codex.rs`) gets the resolver's own cause instead of a pointer to nothing.
+#[test]
+fn the_tool_search_note_points_to_the_model_note_only_when_that_note_says_why() {
+    let f = fx_full();
+    let mut tree = f.tree(&Codex);
+    let notes = |tree: &Tree| -> Vec<String> {
+        vm::build(tree, &[], &HashMap::new(), vm::Sort::Size)
+            .notes
+            .into_iter()
+            .map(|n| n.text)
+            .filter(|n| n.contains("ool search"))
+            .collect()
+    };
+    tree.tool_search = None;
+    tree.tool_search_cause = Some("the server said nothing".to_string());
+    assert_eq!(
+        notes(&tree),
+        [
+            "Tool search cannot be decided from the files (the server said nothing): MCP servers \
+          are shown as loading up front."
+        ]
+    );
+    // Refused: the pointer, and the model note above it says why.
+    let target = Target {
+        env: BTreeMap::new(),
+        ..f.target()
+    };
+    let refused = Codex.resolve(&target, None).expect("resolve");
+    let all: Vec<String> = vm::build(&refused, &[], &HashMap::new(), vm::Sort::Size)
+        .notes
+        .into_iter()
+        .map(|n| n.text)
+        .collect();
+    let at = all
+        .iter()
+        .position(|n| n.starts_with("Tool search cannot be decided: it comes from"))
+        .unwrap_or_else(|| panic!("{all:#?}"));
+    assert!(all[at - 1].starts_with("The model is gpt-test"), "{all:#?}");
+    assert!(
+        all[at - 1].contains("is not used: codex is not on PATH"),
+        "{all:#?}"
+    );
+}
+
 #[test]
 fn an_undecidable_tool_search_is_one_note_in_words() {
     let f = fx_unknown_model();

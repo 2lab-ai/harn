@@ -1472,6 +1472,74 @@ fn codex_facts_name_the_home_the_model_and_the_catalog_state() {
     assert_eq!(moved.catalog.state, CatalogState::Missing);
 }
 
+/// Tool search is undecided exactly when harn cannot use the model's catalog entry — an
+/// accepted snapshot that lists a set model always decides it (a missing
+/// `supports_search_tool` is false) — so the TUI's tool-search note can point to the model note
+/// for why. Checked across the states the facts name.
+#[test]
+fn tool_search_is_undecided_exactly_when_the_catalog_entry_cannot_be_used() {
+    use model::CatalogState;
+    let mcp = "[mcp_servers.github]\ncommand = \"gh-mcp\"\n";
+    let entry_usable = |t: &Tree| {
+        let c = t.codex.as_ref().expect("facts");
+        matches!(c.catalog.state, CatalogState::Used { .. })
+            && c.catalog.lists_model
+            && c.model.slug.is_some()
+    };
+    // Accepted and listed: decided, whatever the entry says about search.
+    for (said, decided) in [(Some(true), true), (Some(false), false), (None, false)] {
+        let f = fx();
+        let mut m = json!({"slug": "m"});
+        if let Some(v) = said {
+            m["supports_search_tool"] = json!(v);
+        }
+        cache(&f, json!([m]));
+        user_config(&f, None, &format!("model = \"m\"\n{mcp}"));
+        let t = resolve(&ctarget(&f), None);
+        assert!(entry_usable(&t), "{said:?}");
+        assert_eq!(t.tool_search, Some(decided), "{said:?}");
+    }
+    // Every way the entry cannot be used: undecided.
+    let f = fx();
+    cache(&f, json!([{"slug": "m", "supports_search_tool": true}]));
+    let cases: Vec<(&str, String, Target)> = vec![
+        ("no model", mcp.to_string(), ctarget(&f)),
+        (
+            "model not listed",
+            format!("model = \"other\"\n{mcp}"),
+            ctarget(&f),
+        ),
+        ("model not text", format!("model = 3\n{mcp}"), ctarget(&f)),
+        (
+            "no codex on PATH",
+            format!("model = \"m\"\n{mcp}"),
+            target(&f),
+        ),
+        (
+            "another codex",
+            format!("model = \"m\"\n{mcp}"),
+            with_codex(&f, target(&f), "0.159.0"),
+        ),
+        (
+            "catalog elsewhere",
+            format!("model = \"m\"\nmodel_catalog_json = \"/srv/catalog.json\"\n{mcp}"),
+            ctarget(&f),
+        ),
+    ];
+    for (case, config, t) in cases {
+        user_config(&f, None, &config);
+        let tree = resolve(&t, None);
+        assert!(!entry_usable(&tree), "{case}");
+        assert_eq!(tree.tool_search, None, "{case}");
+    }
+    // No snapshot at all.
+    std::fs::remove_file(f.codex.join("models_cache.json")).unwrap();
+    user_config(&f, None, &format!("model = \"m\"\n{mcp}"));
+    let tree = resolve(&ctarget(&f), None);
+    assert!(!entry_usable(&tree));
+    assert_eq!(tree.tool_search, None);
+}
+
 #[test]
 fn without_codex_on_path_the_cache_is_not_trusted() {
     const NOT_FOUND: &str =
