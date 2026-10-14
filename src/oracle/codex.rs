@@ -529,7 +529,11 @@ fn run_step(
             Ok(Some(status)) => return Ok(status.code()),
             Ok(None) => {}
             Err(e) => {
-                kill_all(&mut child);
+                // ECHILD: the child was reaped elsewhere, so its pid — the group id — may
+                // already name another process; neither is signalled then.
+                if !reaped_elsewhere(&e) {
+                    kill_all(&mut child);
+                }
                 return Err(anyhow::Error::from(e).context(format!(
                     "waiting for {} {}",
                     codex_bin.display(),
@@ -558,6 +562,17 @@ fn kill_group(pid: u32) {
 
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
+
+/// `try_wait` failed because the child is no longer ours to wait for (ECHILD).
+#[cfg(unix)]
+fn reaped_elsewhere(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ECHILD)
+}
+
+#[cfg(not(unix))]
+fn reaped_elsewhere(_e: &std::io::Error) -> bool {
+    false
+}
 
 /// `sha256:<hex>` over the config files that decide what codex loads for `target`, in a fixed
 /// order, each hashed as `path NUL contents NUL` (`<absent>` for a missing file):
@@ -601,9 +616,10 @@ pub fn settings_fingerprint(target: &Target) -> String {
     format!("sha256:{hex}")
 }
 
-/// Reads a capture directory (or its manifest) and binds it to `target`: the working directory
-/// the input list itself names (`<environment_context>` `<cwd>`, else the AGENTS.md header) must
-/// be the manifest's and the target's, else Err naming the mismatch.
+/// Reads a capture directory (or its manifest) and binds it to `target`: every working directory
+/// the input list itself names (each `<environment_context>` `<cwd>`, each AGENTS.md header; at
+/// least one absolute) must be the manifest's, and that the target's, else Err naming the
+/// mismatch. The manifest and every artifact present must be regular files (not followed).
 pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCapture> {
     let dir = if path.is_file() {
         path.parent().unwrap_or(Path::new(".")).to_path_buf()
@@ -611,8 +627,15 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
         path.to_path_buf()
     };
     let manifest_path = dir.join(MANIFEST);
-    if std::fs::symlink_metadata(&manifest_path).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!("{}: a symlink, refused", manifest_path.display());
+    // Not followed, and checked before opening: a FIFO or device would block or misread.
+    match std::fs::symlink_metadata(&manifest_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("{}: a symlink, refused", manifest_path.display())
+        }
+        Ok(meta) if !meta.is_file() => {
+            bail!("{}: not a regular file, refused", manifest_path.display())
+        }
+        _ => {}
     }
     let text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
@@ -772,7 +795,7 @@ fn artifact(dir: &Path, name: &str) -> anyhow::Result<Option<PathBuf>> {
 fn bind(capture: &CodexCapture, target: &Target) -> anyhow::Result<()> {
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let evidence = derived_cwd(&capture.blocks);
-    if evidence.is_empty() {
+    if !evidence.iter().any(|(p, _)| p.is_absolute()) {
         bail!(
             "the input list names no working directory (no <environment_context> <cwd>, no `# AGENTS.md instructions for <dir>` header); it cannot be bound to {}",
             target.dir.display()
@@ -798,30 +821,28 @@ fn bind(capture: &CodexCapture, target: &Target) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Every working directory the input list names, with where: the `<environment_context>`
-/// `<cwd>`, and the `# AGENTS.md instructions for <dir>` header. Only absolute paths count.
+/// Every working directory the input list names, with where: each `<cwd>` of every
+/// `<environment_context>` block, and the `# AGENTS.md instructions for <dir>` header of every
+/// AGENTS.md message. All of them are returned, so a contradictory later one is not missed.
 pub fn derived_cwd(blocks: &[Block]) -> Vec<(PathBuf, &'static str)> {
     let mut out = Vec::new();
-    let env = blocks
-        .iter()
-        .find(|b| b.name == names::ENVIRONMENT)
-        .and_then(|env| {
-            let start = env.text.find("<cwd>")? + "<cwd>".len();
-            let end = env.text[start..].find("</cwd>")? + start;
-            Some(PathBuf::from(&env.text[start..end]))
-        });
-    out.extend(env.map(|p| (p, "<environment_context> <cwd>")));
-    let header = blocks
-        .iter()
-        .find(|b| b.name == names::AGENTS_MD)
-        .and_then(|agents| {
-            let first = agents.text.lines().next()?;
-            Some(PathBuf::from(
-                first.strip_prefix("# AGENTS.md instructions for ")?,
-            ))
-        });
-    out.extend(header.map(|p| (p, "AGENTS.md message header")));
-    out.retain(|(p, _)| p.is_absolute());
+    for env in blocks.iter().filter(|b| b.name == names::ENVIRONMENT) {
+        let mut rest = env.text.as_str();
+        while let Some(open) = rest.find("<cwd>") {
+            rest = &rest[open + "<cwd>".len()..];
+            let Some(close) = rest.find("</cwd>") else {
+                break;
+            };
+            out.push((PathBuf::from(&rest[..close]), "<environment_context> <cwd>"));
+            rest = &rest[close + "</cwd>".len()..];
+        }
+    }
+    for agents in blocks.iter().filter(|b| b.name == names::AGENTS_MD) {
+        let first = agents.text.lines().next().unwrap_or_default();
+        if let Some(dir) = first.strip_prefix("# AGENTS.md instructions for ") {
+            out.push((PathBuf::from(dir), "AGENTS.md message header"));
+        }
+    }
     out
 }
 
@@ -1444,6 +1465,17 @@ mod tests {
             "a symlink is not followed"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_child_reaped_elsewhere_is_not_signalled() {
+        assert!(reaped_elsewhere(&std::io::Error::from_raw_os_error(
+            libc::ECHILD
+        )));
+        assert!(!reaped_elsewhere(&std::io::Error::from_raw_os_error(
+            libc::EINTR
+        )));
     }
 
     #[test]

@@ -1267,3 +1267,180 @@ fn r13_a_catalog_gated_row_codex_did_not_render_is_not_checkable() {
     ));
     assert!(report.passed, "{:#?}", failing(&report));
 }
+
+// ---- review round 2: regressions ---------------------------------------------------------------
+
+/// An edit of the input list, for table-driven cases.
+type Edit = Box<dyn Fn(&mut Value)>;
+
+#[test]
+fn rr1_every_cwd_occurrence_must_agree() {
+    let env_block = "<environment_context>\n  <cwd>/elsewhere</cwd>\n</environment_context>";
+    let agents_block =
+        "# AGENTS.md instructions for /elsewhere\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>";
+    let cases: [(&str, Edit); 3] = [
+        (
+            "a second environment block",
+            Box::new(move |items: &mut Value| {
+                items[1]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"type": "input_text", "text": env_block}));
+                items[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(Value::String(
+                        "environments.environment_context".to_string(),
+                    ));
+            }),
+        ),
+        (
+            "a second <cwd> in the block",
+            Box::new(|items: &mut Value| {
+                replace_in(items, 1, 1, "</cwd>", "</cwd>\n  <cwd>/elsewhere</cwd>")
+            }),
+        ),
+        (
+            "a second AGENTS.md message",
+            Box::new(move |items: &mut Value| {
+                items[1]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"type": "input_text", "text": agents_block}));
+                items[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(Value::String("agents_md.instructions".to_string()));
+            }),
+        ),
+    ];
+    let mut accepted = Vec::new();
+    for (case, edit) in cases {
+        let f = fx();
+        let dir = capture_dir(&f, |items| edit(items));
+        match oracle::read_capture_dir(&dir, &target(&f)) {
+            Ok(_) => accepted.push(case),
+            Err(err) => assert!(err.to_string().contains("/elsewhere"), "{case}: {err}"),
+        }
+    }
+    assert!(accepted.is_empty(), "accepted: {accepted:?}");
+}
+
+#[test]
+fn rr2_a_file_is_attributed_only_inside_established_body_boundaries() {
+    // The closing framing is not at the end: the sub file's text after it is not the body.
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            1,
+            0,
+            "Root rules.\n\n\nSub rules.\n\n</INSTRUCTIONS>",
+            "Root rules.\n\n</INSTRUCTIONS>\n\n\nSub rules.\n",
+        )
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [message, global, root, sub] = agents(&f);
+    assert!(
+        matches!(
+            verdict(&report, &sub),
+            Some(RowVerdict::NotCheckable { .. })
+        ),
+        "{:?}",
+        verdict(&report, &sub)
+    );
+    assert_eq!(find(&tree, &sub).cost.observed, None);
+    assert_eq!(verdict(&report, &global), Some(&RowVerdict::Seen));
+    assert_eq!(verdict(&report, &root), Some(&RowVerdict::Seen));
+    assert!(matches!(
+        verdict(&report, &message),
+        Some(RowVerdict::ContentMismatch { .. })
+    ));
+
+    // The opening framing differs (same length): no file after it is attributed.
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(items, 1, 0, "\n\n<INSTRUCTIONS>\n", "\n\n<INSTRUCTI0NS>\n")
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [message, global, root, sub] = agents(&f);
+    for file in [&global, &root, &sub] {
+        assert!(
+            matches!(
+                verdict(&report, file),
+                Some(RowVerdict::NotCheckable { .. })
+            ),
+            "{file}: {:?}",
+            verdict(&report, file)
+        );
+    }
+    assert!(matches!(
+        verdict(&report, &message),
+        Some(RowVerdict::ContentMismatch { .. })
+    ));
+    assert!(!report.passed);
+}
+
+#[test]
+fn rr3_a_listing_total_with_its_own_residual_is_reported_beside_entry_differences() {
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(items, 0, 1, "The alpha skill.", "The alpha skills.")
+    });
+    // The entry differs by one byte and the total carries 7 bytes of its own.
+    let mut tree = statics(&f);
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    let entries = listing.cost.predicted.unwrap();
+    listing.cost.predicted = Some(entries + 7);
+    let report = verify_codex(&mut tree, &c);
+    assert!(matches!(
+        verdict(&report, &id(Kind::Skill, Layer::User, "alpha")),
+        Some(RowVerdict::ContentMismatch { .. })
+    ));
+    assert_eq!(
+        verdict(&report, &id(Kind::SkillListing, Layer::Builtin, "skills")),
+        Some(&RowVerdict::ContentMismatch {
+            predicted: entries + 7,
+            observed: Some(entries + 1)
+        })
+    );
+    // Without a residual of its own, the entry accounts for the whole difference.
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(&report, &id(Kind::SkillListing, Layer::Builtin, "skills")),
+        Some(&RowVerdict::Seen)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn rr4_a_fifo_manifest_is_refused_without_blocking() {
+    let f = fx();
+    let dir = capture_dir(&f, |_| {});
+    let manifest = dir.join(oracle::MANIFEST);
+    std::fs::remove_file(&manifest).unwrap();
+    let c_path = std::ffi::CString::new(manifest.display().to_string()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = target(&f);
+    let read_dir = dir.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(oracle::read_capture_dir(&read_dir, &t).map(|_| ()));
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+    if result.is_err() {
+        // Release the blocked reader before failing.
+        let _ = std::fs::OpenOptions::new().write(true).open(&manifest);
+    }
+    let err = result
+        .expect("read_capture_dir blocked on a FIFO")
+        .expect_err("a FIFO manifest is refused");
+    assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+}

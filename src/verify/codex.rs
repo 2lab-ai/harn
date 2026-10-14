@@ -22,8 +22,11 @@
 //! - **AGENTS files** carry no header in the message, so the capture cannot name them: harn
 //!   assembles the message it predicts from the rows (the files read now, cut to their predicted
 //!   bytes, the framing codex adds) and compares it byte for byte with the observed one. A file is
-//!   seen when its text is where predicted, or later in the message; the row holding the first
-//!   differing byte is `content-mismatch`, and the report names that offset.
+//!   seen when its text is where predicted, or later inside the message's body — between the
+//!   opening framing (matched in full) and the closing framing (the message's last bytes); when
+//!   either is not where predicted, a file past the first difference is not checkable and the
+//!   message's framing is a mismatch. The row holding the first differing byte is
+//!   `content-mismatch`, and the report names that offset.
 //! - **Content conformance** (exact predictions only, never `~` or `?`): the AGENTS.md message as
 //!   above; each listing entry's line against the line it joined (text compared when the row
 //!   carries its `rendered:` line, else bytes); the listing's total when its entries do not
@@ -264,12 +267,21 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                 Some((predicted, listed)) => predicted != listed,
                 // The listing's total, unless its entries' own rows explain the difference.
                 None if s.kind == Kind::SkillListing => {
-                    let entries: u64 = statics
+                    // Reported unless the entries' own discrepancy is the whole difference:
+                    // p - o == entries predicted - entries observed (observed = every entry).
+                    let entries_predicted: u64 = statics
                         .iter()
                         .filter(|e| e.parent == Some(si) && !absent(e))
                         .filter_map(|e| e.cost.predicted)
                         .sum();
-                    p != o && entries == o
+                    let entries_observed: u64 = observed
+                        .iter()
+                        .filter(|e| e.parent == Some(ci))
+                        .filter_map(|e| e.cost.observed)
+                        .sum();
+                    p != o
+                        && p as i128 - o as i128
+                            != entries_predicted as i128 - entries_observed as i128
                 }
                 None => p != o,
             };
@@ -596,14 +608,17 @@ fn agents_md(
         .flatten();
     // A framing span holds it, or the observed message only adds bytes at the end.
     let mut framing_mismatch = !equal && holder.is_none_or(|h| spans[h].row.is_none());
-    let body_start = find_bytes(obs, AGENTS_OPEN.as_bytes()).map_or(0, |at| at + AGENTS_OPEN.len());
-    let body_end = if obs.ends_with(AGENTS_CLOSE.as_bytes()) {
-        obs.len() - AGENTS_CLOSE.len()
-    } else {
-        obs.len()
-    };
+    // The body's boundaries, when established: the opening framing (the first span, the header)
+    // matched in full, and the message ends with the closing framing.
+    let header_end = spans[0].end;
+    let body_start = (d >= header_end || equal).then_some(header_end);
+    let body_end = obs
+        .ends_with(AGENTS_CLOSE.as_bytes())
+        .then(|| obs.len() - AGENTS_CLOSE.len());
+    let body = body_start.zip(body_end).filter(|(start, end)| start <= end);
     // Where each file's text sits in the observed message, when established.
     let mut placed: Vec<Option<(usize, usize)>> = vec![None; spans.len()];
+    let mut unestablished: Vec<usize> = Vec::new();
     let mut mismatched: Option<usize> = None;
     let mut cursor = 0usize;
     for (k, span) in spans.iter().enumerate() {
@@ -619,6 +634,12 @@ fn agents_md(
             mismatched = Some(k);
             cursor = d;
         } else {
+            let Some((body_start, body_end)) = body else {
+                // No established body to look in: where this file is cannot be told.
+                unestablished.push(k);
+                framing_mismatch = true;
+                continue;
+            };
             let from = cursor.max(d).max(body_start);
             let found = (!part.is_empty() && from <= body_end)
                 .then(|| find_bytes(&obs[from..body_end], part))
@@ -683,6 +704,14 @@ fn agents_md(
             out.rows.push((id, RowVerdict::Seen));
             out.promote.push((statics[f].path.clone(), len));
             files_observed = files_observed.map(|n| n + len);
+        } else if unestablished.contains(&k) {
+            out.rows.push((
+                id,
+                RowVerdict::NotCheckable {
+                    reason: "the AGENTS.md message's opening or closing framing is not where harn predicts, so where this file is in it cannot be established".to_string(),
+                },
+            ));
+            files_observed = None;
         } else {
             out.rows.push((id, RowVerdict::PredictedNotSeen));
         }
