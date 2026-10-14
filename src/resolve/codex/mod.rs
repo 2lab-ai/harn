@@ -24,6 +24,11 @@
 //! (`codex/mcp-server/plugin/<server>`) and hooks (`codex/hook/plugin/<state key>`), then one
 //! `codex/plugin/plugin/<name@marketplace>` row per configured plugin.
 //!
+//! Some built-in blocks render only when the model's catalog entry carries their text or flag
+//! (`<collaboration_mode>`, `<multi_agent_role>` + `<multi_agent_mode>`, `<plugins_instructions>`).
+//! With the entry in `$CODEX_HOME/models_cache.json` the row follows it; without it the row is
+//! listed with a [`CATALOG_GATED`] signal.
+//!
 //! Knobs are Codex's own config keys. Codex has no local-only config file: the target dir's
 //! `.codex/config.toml` is `project` scope (and takes effect only while that dir is trusted),
 //! `$CODEX_HOME/config.toml` is `user` scope. A knob is listed only where it would take effect
@@ -50,6 +55,14 @@ use std::path::{Path, PathBuf};
 
 pub use config::PROFILE_ENV;
 pub use skills::CAP_STATE_UNKNOWN;
+
+/// Signal prefix of a row whose presence the model's catalog entry decides while harn does not
+/// know that entry (no model in config, the model missing from `models_cache.json`,
+/// `model_catalog_json` set, or the entry silent on a field codex always writes). The row stays
+/// listed (`always`, its size if rendered in `why`), so a capture without it is not a prediction
+/// miss: verify treats `item.signal.starts_with(CATALOG_GATED)` as not checkable. The rest of the
+/// signal names the catalog condition and why the entry is unknown.
+pub const CATALOG_GATED: &str = "catalog-gated:";
 
 pub(crate) struct Ctx<'a> {
     pub target: &'a Target,
@@ -104,6 +117,30 @@ impl Ctx<'_> {
             return format!("~/{}", rel.display());
         }
         path.display().to_string()
+    }
+
+    /// Why harn does not know the model's catalog entry; None when `models_cache.json` has it.
+    pub fn catalog_unknown(&self) -> Option<String> {
+        let m = &self.model;
+        if m.catalog.is_some() {
+            return None;
+        }
+        let cache = self.display(&self.codex_home.join("models_cache.json"));
+        Some(match (&m.catalog_unread, &m.slug, &m.slug_unreadable) {
+            (Some(at), _, _) => format!("{at}: that catalog is not read"),
+            (None, Some(slug), _) => format!("{slug} is not in {cache}"),
+            (None, None, Some(at)) => format!("{at} is not a string"),
+            (None, None, None) => {
+                "no model in config: codex picks its default at startup".to_string()
+            }
+        })
+    }
+
+    /// The [`CATALOG_GATED`] signal: the row renders only if the catalog entry has `condition`.
+    pub fn catalog_gated(condition: &str, unknown: &str) -> String {
+        format!(
+            "{CATALOG_GATED} renders only if the model's catalog entry has {condition}; {unknown}"
+        )
     }
 
     pub fn user_config(&self) -> PathBuf {

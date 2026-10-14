@@ -9,9 +9,16 @@
 //! `include_apps_instructions`, `include_environment_context` (default true,
 //! `config/defaults.toml:2-5`; read at `core/src/config/mod.rs:4006-4019`), `agents.enabled`
 //! (default true, `core/src/config/mod.rs:3874-3878`). Knob = the key set to `false`.
+//!
+//! Two of them also need the model's catalog entry ([`collaboration_mode`], [`multi_agent`]);
+//! while harn does not know the entry the row carries a [`super::CATALOG_GATED`] signal. A known
+//! entry without multi-agent v2 leaves no row (no codex front end renders one); a known entry
+//! without the Default mode's text keeps the collaboration-mode row with mode `none`, because
+//! `codex exec` and `codex debug prompt-input` send nothing but the interactive TUI sends the
+//! bundled preset.
 
 use super::{config_knobs, new_item, Ctx};
-use crate::model::{Cost, Item, Kind, Knob, Layer};
+use crate::model::{Cost, Item, Kind, Knob, Layer, Mode};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -161,14 +168,7 @@ pub(crate) fn developer_blocks(ctx: &Ctx) -> Vec<Item> {
             "off: codex keeps only a compact tracker of approved command prefixes, which renders nothing in the first request (core/src/context/world_state/compact_permissions.rs:43-50, world_state/mod.rs:398-399); prefixes approved later arrive as runtime messages",
         ],
     ));
-    out.extend(block(
-        ctx,
-        Kind::SystemPrompt,
-        "collaboration_mode",
-        "collaboration mode",
-        "/include_collaboration_mode_instructions",
-        &["`<collaboration_mode>` developer block (core/src/session/world_state.rs:203-210)"],
-    ));
+    out.extend(collaboration_mode(ctx));
     out.extend(block(
         ctx,
         Kind::SystemPrompt,
@@ -180,18 +180,128 @@ pub(crate) fn developer_blocks(ctx: &Ctx) -> Vec<Item> {
             "rendered only when apps are on for the login and a connector is reachable — decided at runtime (core/src/session/world_state.rs:256-269)",
         ],
     ));
-    out.extend(block(
+    out.extend(multi_agent(ctx));
+    out
+}
+
+/// `<collaboration_mode>`. A fresh session is in Default mode with no text of its own
+/// (`core/src/session/mod.rs:802-809`; `codex exec` sends no mode, `exec/src/lib.rs:1177`, and
+/// `debug prompt-input` uses the default turn, `core/src/prompt_debug.rs:88`), so the block is
+/// the catalog's `model_messages.collaboration_modes.default` or nothing
+/// (`core/src/context/world_state/collaboration_mode.rs:30-42`, `:117-118`).
+fn collaboration_mode(ctx: &Ctx) -> Option<Item> {
+    const CONDITION: &str = "model_messages.collaboration_modes.default";
+    let mut item = block(
+        ctx,
+        Kind::SystemPrompt,
+        "collaboration_mode",
+        "collaboration mode",
+        "/include_collaboration_mode_instructions",
+        &["`<collaboration_mode>` developer block (core/src/session/world_state.rs:203-210)"],
+    )?;
+    let (Some(entry), Some(slug)) = (ctx.model.catalog.as_ref(), ctx.model.slug.as_deref()) else {
+        item.signal = ctx
+            .catalog_unknown()
+            .map(|why| Ctx::catalog_gated(CONDITION, &why));
+        return Some(item);
+    };
+    if entry
+        .pointer("/model_messages/collaboration_modes/default")
+        .is_some_and(Value::is_string)
+    {
+        item.origin.why.push(format!(
+            "models_cache.json: {slug} has {CONDITION}, the Default mode's text (core/src/context/world_state/collaboration_mode.rs:30-42)"
+        ));
+        return Some(item);
+    }
+    item.mode = Mode::None;
+    item.signal = Some(format!(
+        "{slug}'s catalog entry has no Default mode text: none from codex exec or debug prompt-input; the TUI sends the bundled preset"
+    ));
+    item.origin.why.push(format!(
+        "models_cache.json: {slug} has no {CONDITION}, so codex exec and codex debug prompt-input send no block (core/src/context/world_state/collaboration_mode.rs:36-42, :117-118)"
+    ));
+    item.origin.why.push(
+        "the interactive TUI attaches the Default mode to every turn and the app server fills in the bundled preset text, so it sends the block (tui/src/chatwidget/input_submission.rs:416-422, app-server/src/request_processors/turn_processor.rs:403-418); traced in source, not captured"
+            .to_string(),
+    );
+    Some(item)
+}
+
+/// `<multi_agent_role>` + `<multi_agent_mode>`: rendered for multi-agent v2 only
+/// (`core/src/session/multi_agents.rs:14-18`, `:77-82`). A fresh session's version
+/// (`core/src/session/mod.rs:4244-4256`, `core/src/config/mod.rs:1586-1612`):
+/// `features.multi_agent_v2 = true` → v2; else `agents.enabled = false` → disabled; else the
+/// catalog's `multi_agent_version`; else `features.multi_agent` → v1 or disabled. The catalog's
+/// `model_messages.multi_agent` changes the text, not whether it is sent.
+fn multi_agent(ctx: &Ctx) -> Option<Item> {
+    const CONDITION: &str = "multi_agent_version = \"v2\"";
+    const WHY: &[&str] = &[
+        "`<multi_agent_role>` + `<multi_agent_mode>` developer messages and the agent tools (research/02 §9)",
+        "`--disable multi_agent` did not remove the role block; agents.enabled = false did (research/02 L1 t11/t12): features.multi_agent only picks v1 or nothing when the catalog is silent (core/src/config/mod.rs:1596-1612)",
+    ];
+    if let Some(pointer) = multi_agent_v2_on(ctx) {
+        let at = ctx
+            .config
+            .get(pointer)
+            .map(|(_, layer)| layer.at(pointer))
+            .unwrap_or_else(|| pointer.to_string());
+        let mut item = new_item(
+            Kind::SystemPrompt,
+            Layer::Builtin,
+            "multi_agent",
+            "multi-agent role + mode",
+        );
+        item.origin.why = WHY.iter().map(|w| w.to_string()).collect();
+        item.origin.why.push(format!(
+            "{at} = true: multi-agent v2 whatever agents.enabled and the model's catalog say (core/src/config/mod.rs:1586-1593)"
+        ));
+        item.knobs = config_knobs(
+            ctx,
+            pointer,
+            json!(false),
+            Some("agents.enabled and the model's catalog decide then"),
+        );
+        return Some(item);
+    }
+    let mut item = block(
         ctx,
         Kind::SystemPrompt,
         "multi_agent",
         "multi-agent role + mode",
         "/agents/enabled",
-        &[
-            "`<multi_agent_role>` + `<multi_agent_mode>` developer messages and the agent tools (research/02 §9)",
-            "`--disable multi_agent` did not remove the role block; agents.enabled = false did (research/02 L1 t11/t12)",
-        ],
-    ));
-    out
+        WHY,
+    )?;
+    let (Some(entry), Some(slug)) = (ctx.model.catalog.as_ref(), ctx.model.slug.as_deref()) else {
+        item.signal = ctx
+            .catalog_unknown()
+            .map(|why| Ctx::catalog_gated(CONDITION, &why));
+        return Some(item);
+    };
+    // Absent from a known entry is `None` (`skip_serializing_if`,
+    // `protocol/src/openai_models.rs:502-507`), as is a value codex does not recognise
+    // (`deserialize_optional_model_selector`, `:352-361`).
+    (entry.get("multi_agent_version").and_then(Value::as_str) == Some("v2")).then(|| {
+        item.origin.why.push(format!(
+            "models_cache.json: {slug} {CONDITION} (core/src/session/mod.rs:4244-4256)"
+        ));
+        item
+    })
+}
+
+/// The pointer that turns `features.multi_agent_v2` on — the key itself as a boolean, or its
+/// table's `enabled` (`features/src/lib.rs:907-918`, `:861-863`) — when it is on (default off,
+/// `features/src/lib.rs:1337-1341`).
+fn multi_agent_v2_on(ctx: &Ctx) -> Option<&'static str> {
+    const FEATURE: &str = "/features/multi_agent_v2";
+    const ENABLED: &str = "/features/multi_agent_v2/enabled";
+    match ctx.config.get(FEATURE)?.0 {
+        Value::Bool(true) => Some(FEATURE),
+        Value::Object(_) => {
+            matches!(ctx.config.get(ENABLED), Some((Value::Bool(true), _))).then_some(ENABLED)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn environment_context(ctx: &Ctx) -> Option<Item> {

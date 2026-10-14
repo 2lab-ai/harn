@@ -4,7 +4,7 @@
 //! tests assume absent; the admin root (`/etc/codex/skills`) is covered in `src/resolve/codex`.
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
-use harn::resolve::codex::{CAP_STATE_UNKNOWN, PROFILE_ENV};
+use harn::resolve::codex::{CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV};
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -639,6 +639,67 @@ fn plugin_enabled_and_disabled() {
         row(&t, "codex/plugin/plugin/ghost@mkt").signal.as_deref(),
         Some("not installed")
     );
+}
+
+#[test]
+fn plugins_instructions_follow_the_catalog_flag() {
+    const ID: &str = "codex/system-prompt/builtin/plugins_instructions";
+    let f = fx();
+    let p = plugin(&f, "1.0.0", "demo");
+    skill(&p.join("skills"), "search", "Search the docs.");
+    let cache = json!({
+        "client_version": "0.160.1",
+        "models": [
+            {"slug": "on-model", "include_plugin_usage_instructions": true},
+            {"slug": "off-model", "include_plugin_usage_instructions": false},
+            {"slug": "silent-model"}
+        ]
+    });
+    write(
+        &f.codex.join("models_cache.json"),
+        &serde_json::to_string(&cache).unwrap(),
+    );
+    let config = |model: &str| format!("{model}[plugins.\"demo@mkt\"]\nenabled = true\n");
+
+    // true: rendered, the fixed text's exact size (available_plugins_instructions.rs:30-48).
+    user_config(&f, &config("model = \"on-model\"\n"));
+    let t = resolve(&target(&f), None);
+    let r = row(&t, ID);
+    assert_eq!((r.mode, r.signal.as_deref()), (Mode::Always, None));
+    assert_eq!(r.cost.predicted, Some(1014));
+    assert!(!r.cost.predicted_is_estimate);
+
+    // false: codex renders nothing (world_state.rs:271-272).
+    user_config(&f, &config("model = \"off-model\"\n"));
+    let t = resolve(&target(&f), None);
+    assert!(find(&t, ID).is_none());
+    assert!(find(&t, "codex/system-prompt/builtin/recommended_plugins").is_some());
+
+    // Unknown — the entry is silent (codex 0.160.1 always writes the flag), the model is not in
+    // the cache, or there is no model: listed, marked not checkable, size if rendered in `why`.
+    for (model, why) in [
+        ("model = \"silent-model\"\n", "silent-model"),
+        ("model = \"ghost-model\"\n", "ghost-model is not in"),
+        ("", "no model in config"),
+    ] {
+        user_config(&f, &config(model));
+        let t = resolve(&target(&f), None);
+        let r = row(&t, ID);
+        assert_eq!(r.mode, Mode::Always, "{model}");
+        assert_eq!(r.cost.predicted, None, "{model}");
+        let s = r.signal.as_deref().unwrap_or_default();
+        assert!(
+            s.starts_with(CATALOG_GATED)
+                && s.contains("include_plugin_usage_instructions = true")
+                && s.contains(why),
+            "{model}: {s}"
+        );
+        assert!(why_has(r, "1014 bytes if rendered"), "{:?}", r.origin.why);
+    }
+
+    // No plugin with a part: no block, whatever the catalog says.
+    user_config(&f, "model = \"on-model\"\n");
+    assert!(find(&resolve(&target(&f), None), ID).is_none());
 }
 
 #[test]

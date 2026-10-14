@@ -4,7 +4,7 @@
 //! settings). Layering with the system and managed files is covered in `src/resolve/codex`.
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
-use harn::resolve::codex::PROFILE_ENV;
+use harn::resolve::codex::{CATALOG_GATED, PROFILE_ENV};
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -190,6 +190,21 @@ fn builtin_rows_are_present_with_their_knobs() {
         Kind::EnvBlock,
         "environment is an env block"
     );
+    // No model, no catalog entry: the catalog-gated blocks stay listed, marked not checkable.
+    for name in ["collaboration_mode", "multi_agent"] {
+        let s = row(&t, &format!("/builtin/{name}")).signal.as_deref();
+        assert!(
+            s.is_some_and(|s| s.starts_with(CATALOG_GATED) && s.contains("no model in config")),
+            "{name}: {s:?}"
+        );
+    }
+    for name in [
+        "permissions_instructions",
+        "apps_instructions",
+        "environment_context",
+    ] {
+        assert_eq!(row(&t, &format!("/builtin/{name}")).signal, None, "{name}");
+    }
     // Request order: instructions, developer blocks, multi-agent, user message.
     let order: Vec<&str> = t
         .items
@@ -690,6 +705,197 @@ fn base_instructions_and_context_window_come_from_models_cache() {
 
     // The cache's writer is reported as a fact about the file, not as the installed codex.
     assert!(signal(&t, "model:").ends_with("models_cache.json written by codex 0.160.1"));
+}
+
+/// A `models_cache.json` with one entry per catalog shape (generic slugs).
+fn catalog(f: &Fx) {
+    let cache = json!({
+        "client_version": "0.160.1",
+        "models": [
+            {"slug": "plain-model", "model_messages": null},
+            {
+                "slug": "rich-model",
+                "multi_agent_version": "v2",
+                "model_messages": {
+                    "collaboration_modes": {"default": "Default mode text.", "plan": null},
+                    "multi_agent": {"role": {"root": "Root role."}}
+                }
+            },
+            {"slug": "v1-model", "multi_agent_version": "v1"},
+            {
+                "slug": "messages-only-model",
+                "model_messages": {
+                    "collaboration_modes": {"default": null, "plan": "Plan mode text."},
+                    "multi_agent": {"role": {"root": "Root role."}}
+                }
+            }
+        ]
+    });
+    write(
+        &f.codex.join("models_cache.json"),
+        &serde_json::to_string(&cache).unwrap(),
+    );
+}
+
+fn gated(item: &Item) -> bool {
+    item.signal
+        .as_deref()
+        .is_some_and(|s| s.starts_with(CATALOG_GATED))
+}
+
+#[test]
+fn catalog_decides_the_collaboration_mode_block() {
+    let f = fx();
+    catalog(&f);
+
+    // The entry carries the Default mode's text: rendered (collaboration_mode.rs:30-42).
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let t = resolve(&target(&f), None);
+    let c = row(&t, "/builtin/collaboration_mode");
+    assert_eq!((c.mode, c.signal.as_deref()), (Mode::Always, None));
+    assert!(
+        c.origin
+            .why
+            .iter()
+            .any(|w| w.contains("collaboration_modes.default")),
+        "{:?}",
+        c.origin.why
+    );
+
+    // No Default text (none at all, or only the Plan mode's): `codex exec` and
+    // `debug prompt-input` send no block; the row stays for the TUI, mode none.
+    for model in ["plain-model", "messages-only-model", "v1-model"] {
+        user_config(&f, None, &format!("model = \"{model}\"\n"));
+        let t = resolve(&target(&f), None);
+        let c = row(&t, "/builtin/collaboration_mode");
+        assert_eq!(c.mode, Mode::None, "{model}");
+        assert!(!gated(c), "{model}: the entry is known: {:?}", c.signal);
+        assert!(
+            c.signal.as_deref().is_some_and(|s| s.contains(model)),
+            "{model}: {:?}",
+            c.signal
+        );
+        assert!(
+            c.origin.why.iter().any(|w| w.contains("TUI")),
+            "{model}: {:?}",
+            c.origin.why
+        );
+        assert_eq!(c.knobs.len(), 1, "the switch still decides it in the TUI");
+    }
+
+    // Entry unknown: listed, marked not checkable, naming why.
+    for (config, why) in [
+        ("model = \"ghost-model\"\n", "ghost-model is not in"),
+        ("", "no model in config"),
+        ("model = 5\n", "config.toml#/model is not a string"),
+        (
+            "model = \"rich-model\"\nmodel_catalog_json = \"/nowhere/catalog.json\"\n",
+            "model_catalog_json",
+        ),
+    ] {
+        user_config(&f, None, config);
+        let t = resolve(&target(&f), None);
+        let c = row(&t, "/builtin/collaboration_mode");
+        assert_eq!(c.mode, Mode::Always, "{config}");
+        assert_eq!(c.cost, Default::default(), "{config}");
+        let s = c.signal.as_deref().unwrap_or_default();
+        assert!(gated(c) && s.contains(why), "{config}: {s}");
+        assert!(s.contains("collaboration_modes.default"), "{s}");
+    }
+
+    // The switch still removes the row whatever the catalog says.
+    user_config(
+        &f,
+        None,
+        "model = \"rich-model\"\ninclude_collaboration_mode_instructions = false\n",
+    );
+    assert!(find(&resolve(&target(&f), None), "/collaboration_mode").is_none());
+}
+
+#[test]
+fn catalog_decides_the_multi_agent_block() {
+    let f = fx();
+    catalog(&f);
+
+    // `multi_agent_version = "v2"`: role + mode rendered (session/multi_agents.rs:14-18, :77-82).
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let t = resolve(&target(&f), None);
+    let m = row(&t, "/builtin/multi_agent");
+    assert_eq!((m.mode, m.signal.as_deref()), (Mode::Always, None));
+    assert_eq!(setting(&m.knobs[0]).1, "/agents/enabled");
+    // The plugin blocks stay before it; without it they close the developer blocks.
+    let order: Vec<&str> = t
+        .items
+        .iter()
+        .map(|i| i.id.rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(
+        &order[order.len() - 3..],
+        ["recommended_plugins", "multi_agent", "environment_context"]
+    );
+
+    // Anything but v2 (v1, absent, role text without a version): no role or mode message.
+    for model in ["v1-model", "plain-model", "messages-only-model"] {
+        user_config(&f, None, &format!("model = \"{model}\"\n"));
+        let t = resolve(&target(&f), None);
+        assert!(find(&t, "/builtin/multi_agent").is_none(), "{model}");
+        assert_eq!(
+            t.items.last().map(|i| i.id.as_str()),
+            Some("codex/env-block/builtin/environment_context"),
+            "{model}"
+        );
+    }
+
+    // agents.enabled = false wins over the catalog (config/mod.rs:1586-1593).
+    user_config(
+        &f,
+        None,
+        "model = \"rich-model\"\n[agents]\nenabled = false\n",
+    );
+    assert!(find(&resolve(&target(&f), None), "/builtin/multi_agent").is_none());
+
+    // features.multi_agent_v2 = true wins over both, as a boolean or a table.
+    for (features, pointer) in [
+        (
+            "[features]\nmulti_agent_v2 = true\n",
+            "/features/multi_agent_v2",
+        ),
+        (
+            "[features.multi_agent_v2]\nenabled = true\n",
+            "/features/multi_agent_v2/enabled",
+        ),
+    ] {
+        user_config(
+            &f,
+            None,
+            &format!("model = \"plain-model\"\n[agents]\nenabled = false\n{features}"),
+        );
+        let t = resolve(&target(&f), None);
+        let m = row(&t, "/builtin/multi_agent");
+        assert_eq!(
+            (m.mode, m.signal.as_deref()),
+            (Mode::Always, None),
+            "{features}"
+        );
+        match m.knobs.as_slice() {
+            [knob] => {
+                let (_, p, value, _) = setting(knob);
+                assert_eq!((p, value), (pointer, &json!(false)), "{features}");
+            }
+            other => panic!("{features}: {other:?}"),
+        }
+    }
+
+    // Entry unknown: listed, marked not checkable.
+    user_config(&f, None, "model = \"ghost-model\"\n");
+    let t = resolve(&target(&f), None);
+    let m = row(&t, "/builtin/multi_agent");
+    assert_eq!(m.mode, Mode::Always);
+    let s = m.signal.as_deref().unwrap_or_default();
+    assert!(
+        gated(m) && s.contains("multi_agent_version") && s.contains("ghost-model is not in"),
+        "{s}"
+    );
 }
 
 #[test]
