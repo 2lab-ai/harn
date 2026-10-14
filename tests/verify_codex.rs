@@ -380,6 +380,7 @@ fn the_fixture_reads_into_blocks_regions_and_lists() {
     assert_eq!(c.models.as_deref(), Some(&["demo-model".to_string()][..]));
     assert_eq!(c.context.agent_version.as_deref(), Some("0.160.1"));
     assert_eq!(c.context.cwd, f.sub);
+    assert_eq!(c.bundled_root, Some(f.home.join(".codex/skills/.system")));
     assert!(c.warnings.is_empty(), "{:?}", c.warnings);
 }
 
@@ -2473,6 +2474,9 @@ fn user_skills_of_a_codex_home_under_a_skills_system_dir_are_still_checked() {
         1,
     );
     std::fs::write(&manifest, text).unwrap();
+    edit_manifest(&dir, |m| {
+        m["bundled_root"] = Value::from(nested.join("skills/.system").display().to_string())
+    });
     let c = oracle::read_capture_dir(&dir, &t).unwrap();
     assert!(c.warnings.is_empty(), "{:?}", c.warnings);
     let mut tree = statics_for(&f, &t, true);
@@ -2693,7 +2697,7 @@ fn listed_from(items: &mut Value, root: &Path, name: &str) {
     );
 }
 
-const RECONSTRUCTED: &str = "bundled skills: the bundled root harn reconstructs for this capture (";
+const RECONSTRUCTED: &str = "bundled skills: this capture records no bundled root, and the one harn rebuilds from its env (";
 
 #[test]
 fn a_relative_codex_home_resolves_against_the_capture_cwd_not_the_verifier() {
@@ -2709,7 +2713,8 @@ fn a_relative_codex_home_resolves_against_the_capture_cwd_not_the_verifier() {
         listed_from(items, &home.join("skills/.system"), "imagegen")
     });
     edit_manifest(&dir, |m| {
-        m["env"]["CODEX_HOME"] = Value::from(".codex-home")
+        m["env"]["CODEX_HOME"] = Value::from(".codex-home");
+        m.as_object_mut().unwrap().remove("bundled_root");
     });
     let c = oracle::read_capture_dir(&dir, &t).unwrap();
     assert!(
@@ -2777,15 +2782,40 @@ fn a_recorded_bundled_root_wins_over_where_codex_home_points_now() {
 
 #[test]
 fn a_capture_without_a_recorded_root_still_reads() {
-    // The fixture's manifest predates `bundled_root`.
+    // A manifest written before `bundled_root`. Codex listed no bundled root: nothing is bound,
+    // and the report says why.
     let f = fx();
-    let c = capture(&f, |_| {});
-    assert_eq!(c.bundled_root, None, "codex listed no bundled root");
-    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
-    // Codex listed the root harn rebuilds (`.codex` in the home, CODEX_HOME unset): bound.
-    let c = capture(&f, |items| system_root_added(&f, items));
+    let c = oracle::read_capture_dir(&legacy_capture_dir(&f, |_| {}), &target(&f)).unwrap();
+    assert_eq!(c.bundled_root, None);
+    assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+    assert!(c.warnings[0].starts_with(RECONSTRUCTED), "{:?}", c.warnings);
+    // Codex listed exactly the root harn rebuilds (`.codex` in the home, CODEX_HOME unset).
+    let f = fx();
+    let c = oracle::read_capture_dir(
+        &legacy_capture_dir(&f, |items| system_root_added(&f, items)),
+        &target(&f),
+    )
+    .unwrap();
     assert_eq!(c.bundled_root, Some(f.home.join(".codex/skills/.system")));
     assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+}
+
+#[test]
+fn a_malformed_recorded_root_is_ignored_with_a_warning() {
+    for bad in ["", "relative/skills/.system"] {
+        let f = fx();
+        let dir = capture_dir(&f, |items| system_root_added(&f, items));
+        edit_manifest(&dir, |m| m["bundled_root"] = Value::from(bad));
+        let c = oracle::read_capture_dir(&dir, &target(&f)).unwrap();
+        assert_eq!(
+            c.warnings,
+            vec![format!(
+                "bundled skills: the capture's recorded bundled_root {bad:?} is not an absolute path; ignored"
+            )]
+        );
+        // The lexical fallback binds what codex listed.
+        assert_eq!(c.bundled_root, Some(f.home.join(".codex/skills/.system")));
+    }
 }
 
 #[test]
@@ -2822,7 +2852,7 @@ fn a_reconstructed_root_codex_did_not_list_binds_nothing_and_says_why() {
     // the root harn reconstructs is not in codex's roots table, so nothing is bundled.
     let f = fx();
     let path = f.home.join(".codex/skills/.system/imagegen/SKILL.md");
-    let c = capture(&f, |items| {
+    let dir = legacy_capture_dir(&f, |items| {
         replace_in(
             items,
             0,
@@ -2834,6 +2864,7 @@ fn a_reconstructed_root_codex_did_not_list_binds_nothing_and_says_why() {
             ),
         )
     });
+    let c = oracle::read_capture_dir(&dir, &target(&f)).unwrap();
     let warning = c
         .warnings
         .iter()
@@ -2851,4 +2882,68 @@ fn a_reconstructed_root_codex_did_not_list_binds_nothing_and_says_why() {
     );
     assert!(report.notes.contains(&format!("warning: {warning}")));
     assert!(!report.passed);
+}
+
+// ---- review round 4: a legacy capture binds its bundled root lexically only -------------------
+
+/// A capture dir of the fixture as harn wrote it before `bundled_root` was recorded.
+fn legacy_capture_dir(f: &Fx, edit: impl FnOnce(&mut Value)) -> PathBuf {
+    let dir = capture_dir(f, edit);
+    edit_manifest(&dir, |m| {
+        m.as_object_mut().unwrap().remove("bundled_root");
+    });
+    dir
+}
+
+#[test]
+#[cfg(unix)]
+fn a_legacy_capture_never_binds_a_bundled_root_through_todays_symlink() {
+    // The old capture lists ordinary skills only (the plugin root is r1). Since then
+    // `.system` was made a symlink to that ordinary root: its entries must not become bundled.
+    let f = fx();
+    let plugin = f
+        .home
+        .join(".codex/plugins/cache/demo-mkt/demo-plugin/local/skills");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::create_dir_all(f.home.join(".codex/skills")).unwrap();
+    std::os::unix::fs::symlink(&plugin, f.home.join(".codex/skills/.system")).unwrap();
+    let dir = legacy_capture_dir(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            "- demo-plugin:gamma: Not in the tree. (file: r1/gamma/SKILL.md)\n### How to use skills",
+        )
+    });
+    let c = oracle::read_capture_dir(&dir, &target(&f)).unwrap();
+    let warning = c
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("bundled skills:"))
+        .cloned();
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(Kind::Skill, Layer::Unresolved, "demo-plugin:gamma")
+        ),
+        Some(&RowVerdict::SeenNotPredicted)
+    );
+    assert_eq!(
+        verdict(&report, &id(Kind::Skill, Layer::Plugin, "demo-plugin:beta")),
+        Some(&RowVerdict::Seen)
+    );
+    assert_eq!(c.bundled_root, None);
+    assert_eq!(
+        warning.as_deref(),
+        Some(
+            format!(
+                "{RECONSTRUCTED}{}) is not a skill root codex listed; no listed skill is treated as bundled (a home reached through a symlink cannot be proven from an old capture: a capture from `harn verify --run --agent codex` records the root)",
+                f.home.join(".codex/skills/.system").display()
+            )
+            .as_str()
+        )
+    );
 }

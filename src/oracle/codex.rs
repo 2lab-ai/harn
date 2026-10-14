@@ -35,10 +35,17 @@
 //! The bundled root (`<CODEX_HOME>/skills/.system`) decides which listed skills `verify` may
 //! exempt as codex's own, so it is bound to the run, never to the verifier's filesystem now
 //! ([`CodexCapture::bundled_root`]): the manifest's `bundled_root` (written by [`run_codex`]:
-//! `CODEX_HOME` resolved against the run's cwd, canonicalised after the run) when present; for a
-//! manifest without it (an optional field: older captures read unchanged, the schema stays
-//! `/1`), the root rebuilt from the recorded env (a relative `CODEX_HOME` against the recorded
-//! cwd) is used only if codex itself listed it in its `### Skill roots` table.
+//! `CODEX_HOME` resolved against the run's cwd, canonicalised after the run) when present and
+//! absolute; for a manifest without it (an optional field: older captures read unchanged, the
+//! schema stays `/1`) the fallback touches no file: the root is rebuilt lexically from the
+//! recorded env and bound only if codex listed that exact path in its `### Skill roots` table
+//! ([`legacy_bundled_root`]). A home reached through a symlink cannot be proven that way, so such
+//! a capture binds nothing and says so.
+//!
+//! Trust boundary: a capture directory is trusted data written by harn (`run_codex`, in a private
+//! `0700` dir). harn checks its shape (schema, artifact names, regular files, the working
+//! directory it is bound to) but does not authenticate it: a hand-edited manifest, a recorded
+//! `bundled_root` included, is believed.
 //!
 //! # How the prompt input is cut
 //!
@@ -493,12 +500,34 @@ pub fn run_bundled_root(target: &Target) -> PathBuf {
 /// The bundled root below `CODEX_HOME`.
 const BUNDLED_DIR: &str = "skills/.system";
 
-/// The bundled root of a capture whose manifest does not record one: rebuilt from the recorded
-/// env (a relative `CODEX_HOME` against the recorded cwd, else `.codex` in the target's home),
-/// as written and resolved, and kept only if codex listed it in its `### Skill roots` table.
-/// Otherwise None, with a warning when the capture names a skill under the rebuilt root (or a
-/// root spelled like a bundled one) that this leaves unexempted.
-fn rebuilt_bundled_root(
+/// The bundled root of a capture: the recorded one when it is an absolute path; else (none
+/// recorded, or a malformed one, ignored with a warning) [`legacy_bundled_root`]. Warnings go to
+/// `warnings`.
+fn bind_bundled_root(
+    recorded: Option<PathBuf>,
+    capture: &CodexCapture,
+    target: &Target,
+    warnings: &mut Vec<String>,
+) -> Option<PathBuf> {
+    match recorded {
+        Some(root) if root.is_absolute() => return Some(root),
+        Some(root) => warnings.push(format!(
+            "bundled skills: the capture's recorded bundled_root {:?} is not an absolute path; ignored",
+            root.display().to_string()
+        )),
+        None => {}
+    }
+    let (root, warning) = legacy_bundled_root(capture, target);
+    warnings.extend(warning);
+    root
+}
+
+/// The bundled root of a capture that records none, without touching a file: `CODEX_HOME` of the
+/// recorded env joined to the recorded cwd (else `.codex` in the target's home: the manifest
+/// records no home), then `skills/.system`, `.` and `..` resolved lexically — bound only if codex
+/// listed exactly that path in its `### Skill roots` table. Otherwise None, and a warning when
+/// codex listed any skill (one it may have taken from its bundled root stays unexempted).
+fn legacy_bundled_root(
     capture: &CodexCapture,
     target: &Target,
 ) -> (Option<PathBuf>, Option<String>) {
@@ -512,35 +541,18 @@ fn rebuilt_bundled_root(
         None => target.home.join(".codex"),
     };
     let rebuilt = crate::resolve::claude::fs::normalize_lexical(&home.join(BUNDLED_DIR));
-    let mut candidates = vec![rebuilt.clone()];
-    candidates.extend(std::fs::canonicalize(&rebuilt).ok());
-    candidates.extend(
-        std::fs::canonicalize(&home)
-            .ok()
-            .map(|h| h.join(BUNDLED_DIR)),
-    );
-    let listed: Vec<PathBuf> = capture
-        .block(names::SKILLS_FRAMING)
-        .map(|b| {
-            parse_skill_roots(&b.text)
-                .into_iter()
-                .map(|(_, root)| PathBuf::from(root))
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(root) = candidates.iter().find(|c| listed.contains(c)) {
-        return (Some(root.clone()), None);
-    }
-    let under = capture.skills.iter().any(|s| {
-        s.path
-            .as_deref()
-            .is_some_and(|p| candidates.iter().any(|c| p.starts_with(c)))
+    let written = rebuilt.to_string_lossy();
+    let listed = capture.block(names::SKILLS_FRAMING).is_some_and(|b| {
+        parse_skill_roots(&b.text)
+            .into_iter()
+            .any(|(_, root)| root == written)
     });
-    let spelled = listed.iter().any(|r| r.ends_with(BUNDLED_DIR));
-    let warning = (under || spelled).then(|| {
+    if listed {
+        return (Some(rebuilt), None);
+    }
+    let warning = (!capture.skills.is_empty()).then(|| {
         format!(
-            "bundled skills: the bundled root harn reconstructs for this capture ({}) is not one of the skill roots codex listed, and the capture does not record the one codex used; no listed skill is treated as bundled (a capture from `harn verify --run --agent codex` records it)",
-            rebuilt.display()
+            "bundled skills: this capture records no bundled root, and the one harn rebuilds from its env ({written}) is not a skill root codex listed; no listed skill is treated as bundled (a home reached through a symlink cannot be proven from an old capture: a capture from `harn verify --run --agent codex` records the root)"
         )
     });
     (None, warning)
@@ -862,14 +874,9 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
     );
     capture.dir = Some(dir);
     capture.warnings.extend(warnings);
-    capture.bundled_root = match manifest.bundled_root {
-        Some(root) => Some(root),
-        None => {
-            let (root, warning) = rebuilt_bundled_root(&capture, target);
-            capture.warnings.extend(warning);
-            root
-        }
-    };
+    let mut bound = Vec::new();
+    capture.bundled_root = bind_bundled_root(manifest.bundled_root, &capture, target, &mut bound);
+    capture.warnings.extend(bound);
     bind(&capture, target)?;
     capture.warnings.extend(drift(&capture, target));
     Ok(capture)
