@@ -143,6 +143,9 @@ agent's prose; a reply without a valid plan is an error that quotes the reply's 
   × `on_arm`/`on_intel`; both install `bin/harn`, one held at a time; `harn --version` prints
   `build_channel` (`release`|`preview`) + `build_revision` (xfx convention). On `cachy-z13`:
   Homebrew on Linux via the same tap, or the release binary copied to `~/.local/bin/harn`.
+- The project site: `docs/landing` → Cloudflare Pages project `harn-landing` (GitHub app,
+  watch path `docs/landing/*`) → https://harn.2lab.ai; `.github/workflows/landing.yml` only checks
+  the directory. Contract: [`05-landing.md`](05-landing.md).
 - `cargo install harn` from crates.io once published. No AUR package, no man page, no tarballs
   in this version — each is added on evidence of a second user, not before.
 
