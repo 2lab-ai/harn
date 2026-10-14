@@ -207,9 +207,9 @@ fn a_hung_up_controlling_terminal_stops_harn_with_sighup() {
     let mut child = hung_up(&f, true);
     let status = wait(&mut child, STOP).expect("harn outlived its controlling terminal");
     // Unless the close landed in the middle of a draw (one per tick): the write failed first and
-    // harn stopped with an error, which it prints to the closed terminal (exit 1 or 101).
+    // harn stopped with that error (exit 1).
     assert!(
-        matches!(status.code(), Some(c) if c == 128 + libc::SIGHUP || c == 1 || c == 101),
+        matches!(status.code(), Some(c) if c == 128 + libc::SIGHUP || c == 1),
         "{status}"
     );
 }

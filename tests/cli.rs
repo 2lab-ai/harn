@@ -363,3 +363,20 @@ fn columns_zero_is_unset_and_a_positive_columns_cuts_rows() {
         assert!(row.chars().count() <= 80, "{row}");
     }
 }
+
+#[test]
+fn an_error_keeps_its_exit_code_when_stderr_is_gone() {
+    let f = fixture();
+    // A pipe nobody reads: writing the error fails (EPIPE), as it does on a hung-up terminal (EIO).
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let status = Command::new(env!("CARGO_BIN_EXE_harn"))
+        .env("HOME", &f.home)
+        .env("XDG_STATE_HOME", f.root.join("state"))
+        .args(["--readonly", "off", "x"])
+        .stderr(writer)
+        .status()
+        .expect("run harn");
+    // 3 = refused (--readonly), not 101 from a panic while saying so.
+    assert_eq!(status.code(), Some(3), "{status}");
+}
