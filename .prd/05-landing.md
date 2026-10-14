@@ -46,7 +46,8 @@ colour), herdr.dev and the loadout landing page for layout. Nothing loads from a
 | domain | `harn.2lab.ai` — Pages custom domain; DNS = `CNAME harn → harn-landing.pages.dev` in the `2lab.ai` zone (hosted at Vercel) |
 | fallback address | https://harn-landing.pages.dev |
 
-`<link rel="canonical">`, `og:url` and `og:image` in `index.html` name `https://harn.2lab.ai/`.
+In `index.html`, `<link rel="canonical">` and `og:url` are the page address `https://harn.2lab.ai/`;
+`og:image` is the preview image on the same host, `https://harn.2lab.ai/og.png`.
 
 ## Check (CI)
 
