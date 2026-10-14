@@ -17,6 +17,9 @@ fn harn(f: &Fixture, envs: &[(&str, &Path)], args: &[&str]) -> Output {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ENABLE_TOOL_SEARCH")
         .env_remove("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        // The Codex tree is read from these; the caller's must not leak in either.
+        .env_remove("CODEX_HOME")
+        .env_remove("HARN_CODEX_PROFILE")
         // The table width comes from COLUMNS off a terminal; the caller's must not leak in.
         .env_remove("COLUMNS")
         .arg("--dir")
@@ -333,13 +336,22 @@ fn table_flag_is_for_the_listing_only() {
     );
 }
 
-/// Rows of the table (between the column header and the footnotes), as printed.
+/// Rows of every table (after each column header, up to the blank line before the next agent's
+/// header lines), footnotes left out, as printed.
 fn table_rows(text: &str) -> Vec<&str> {
-    text.lines()
-        .skip_while(|l| !l.contains("freed(pred)"))
-        .skip(1)
-        .filter(|l| !l.contains("more (harn why") && !l.trim_start().starts_with('['))
-        .collect()
+    let mut rows = Vec::new();
+    let mut in_rows = false;
+    for line in text.lines() {
+        if line.contains("freed(pred)") {
+            in_rows = true;
+        } else if line.is_empty() {
+            in_rows = false;
+        } else if in_rows && !line.contains("more (harn why") && !line.trim_start().starts_with('[')
+        {
+            rows.push(line);
+        }
+    }
+    rows
 }
 
 #[test]

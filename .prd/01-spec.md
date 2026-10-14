@@ -264,7 +264,7 @@ selects one agent (default: all, one table each).
 | `harn --json` | the full model | `{"schema":"harn/1", "agents":[…]}` |
 | `harn why <item>` | admission chain, realpath, knob candidates by scope, the freed bytes of each | text |
 | `harn path <item>` | the resolved realpath, one line | path |
-| `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + what leaves (by mode) + side effects + warnings, then apply the official knob in the given scope (default `local`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
+| `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + what leaves (by mode) + side effects + warnings, then apply the official knob in the given scope (default per agent: Claude Code `local`; Codex the item's own key — its first knob — in the narrowest `config.toml` where it takes effect: the folder's `.codex/config.toml` while Codex trusts it, else `~/.codex/config.toml`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
 | `harn on <item>` / `harn undo [N]` / `harn history [--prune <age>]` | reverse journal ops; stale targets reported, not forced; `--prune` is the only way journal entries are ever deleted | text |
 | `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; a JSON/TOML/frontmatter file that no longer parses is journaled and warned about, not reverted; refused for `builtin`/`managed` items | diff + journal id |
 | `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted` / `content-mismatch`; exit 1 on any presence diff or content-conformance mismatch within the projection |
@@ -286,7 +286,15 @@ The same commands with `--agent codex`: the tree, `why`, `off`/`on`/`undo`, `bri
 What Codex loads and each item's off switch are in [§Codex coverage](#codex-coverage-condensed-from-research02)
 (full rules with sources: [`research/02`](research/02-codex-loading-rules.md)); module boundaries
 in [`02-architecture.md`](02-architecture.md) (`resolve/codex/`, `oracle/codex.rs`). Codex never
-gates P0. `harn trim --agent codex` stays P1.
+gates P0. `harn trim --agent codex` stays P1 (refused, exit 3).
+
+Status 2026-10-14 (built on `main`, receipts open): the Codex resolver (config layers, profiles
+and the three trust gates, the AGENTS chain, the built-in blocks, skills and plugins, hooks,
+rules, MCP servers), Codex switches as TOML writes with undo byte for byte, and the wiring: without
+`--agent` every command lists both agents (one table, one TUI tab, one brief/report section each;
+`apply` takes the agent whose tree has the plan's selectors), the TUI words Codex rows per
+[`04-tui-design.md`](04-tui-design.md) §Codex, `harn --version` names both rule versions. Open:
+`verify --agent codex` and the A7–A8 receipts.
 
 ### P1 — beyond `harn trim`
 

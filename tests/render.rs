@@ -395,6 +395,7 @@ fn tree() -> Tree {
         home: None,
         observed_regions: Vec::new(),
         tool_search_cause: None,
+        trust: None,
     }
 }
 
@@ -726,7 +727,10 @@ fn html_footer_is_the_version_line_of_the_lib() {
         line.starts_with(&format!("harn {} (", env!("CARGO_PKG_VERSION"))),
         "{line}"
     );
-    assert!(line.ends_with(") rules: claude-code 2.1.296"), "{line}");
+    assert!(
+        line.ends_with(") rules: claude-code 2.1.296, codex 0.160.1"),
+        "{line}"
+    );
     let html = render::html(&doc(vec![tree()]));
     assert!(html.contains(&format!("by {line}</footer>")), "{html}");
 }

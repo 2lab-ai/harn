@@ -548,6 +548,7 @@ pub(crate) fn resolve_with(
         home: Some(target.home.clone()),
         observed_regions: Vec::new(),
         tool_search_cause: None,
+        trust: None,
     };
     if !fs.is_dir(&codex_home) {
         let why = match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
@@ -628,7 +629,9 @@ pub(crate) fn resolve_with(
     tree.tool_search = tool_search;
     tree.tool_search_cause = Some(tool_search_cause);
 
-    tree.signals.push(trust_signal(&ctx));
+    let trust = trust(&ctx);
+    tree.signals.push(trust_signal(&trust));
+    tree.trust = Some(trust);
     tree.signals.push(model_signal(&ctx));
     if let Some(profile) = &ctx.config.profile {
         tree.signals.push(format!(
@@ -667,46 +670,64 @@ pub fn codex_home(target: &Target) -> PathBuf {
     }
 }
 
-/// `trust: <state> (<where>)` for the target dir: the AGENTS.md gate and the project-config gate,
-/// which look the entry up differently (`config.rs` module docs).
-fn trust_signal(ctx: &Ctx) -> String {
-    let c = &ctx.config;
-    let entry = |d: &config::Decision| match &d.set_at {
-        Some(at) => format!(
-            "projects.{}.trust_level in {}",
-            json_key(&d.key),
-            at_file(at)
-        ),
-        None => format!("no projects.{} entry", json_key(&d.key)),
+/// The two trust decisions codex keeps apart for the target dir (`config.rs` module docs): the
+/// config gate (`dir_decision`) for the project `.codex/config.toml`, hooks and rules, the AGENTS.md
+/// gate (`active_project`) for the project AGENTS.md files.
+fn trust(ctx: &Ctx) -> crate::model::Trust {
+    use crate::model::{Trust, TrustGate, TrustLevel as Level};
+    let gate = |d: &config::Decision| TrustGate {
+        level: d.level.map(|level| match level {
+            TrustLevel::Trusted => Level::Trusted,
+            TrustLevel::Untrusted => Level::Untrusted,
+        }),
+        key: d.key.clone(),
+        set_in: d.set_in.clone(),
     };
-    let dir = &c.dir_decision;
-    let agents = &c.active_project;
-    let state = match dir.level {
-        Some(level) => level.as_str(),
-        None => "unset",
-    };
-    let mut out = format!("trust: {state} ({})", entry(dir));
-    match (dir.level, agents.level) {
-        (Some(TrustLevel::Trusted), a) if a != Some(TrustLevel::Untrusted) => {
-            out.push_str(": project .codex/config.toml, hooks and rules load");
-        }
-        (_, Some(TrustLevel::Untrusted)) => {
-            out.push_str(
-                ": project AGENTS.md files, .codex/config.toml, hooks and rules are skipped; skills still load",
-            );
-        }
-        _ => out.push_str(
-            ": project .codex/config.toml, hooks and rules are ignored; AGENTS.md and skills still load",
-        ),
+    Trust {
+        folder: gate(&ctx.config.dir_decision),
+        agents_md: gate(&ctx.config.active_project),
     }
-    if agents.level != dir.level || (agents.set_at.is_some() && agents.key != dir.key) {
-        out.push_str(&format!(" · AGENTS.md gate: {}", entry(agents)));
-    }
-    out
 }
 
-fn at_file(at: &str) -> &str {
-    at.split_once('#').map(|(f, _)| f).unwrap_or(at)
+/// `trust: <state> (<where>): <claims>` for the target dir, from [`trust`]: the project
+/// `.codex/config.toml`, hooks and rules load only when the config gate is `trusted`, the project
+/// AGENTS.md files are skipped only when the AGENTS.md gate is `untrusted`, skills follow neither.
+/// When the AGENTS.md gate is a decision of its own (`Trust::agents_md_apart`),
+/// ` · AGENTS.md gate: <state> (<where>)` names it with its own level.
+fn trust_signal(trust: &crate::model::Trust) -> String {
+    use crate::model::{TrustGate, TrustLevel as Level};
+    let entry = |g: &TrustGate| match &g.set_in {
+        Some(file) => format!(
+            "projects.{}.trust_level in {}",
+            json_key(&g.key),
+            file.display()
+        ),
+        None => format!("no projects.{} entry", json_key(&g.key)),
+    };
+    let state = |g: &TrustGate| g.level.map_or("unset", Level::as_str);
+    let (dir, agents) = (&trust.folder, &trust.agents_md);
+    let config_claim = match dir.level {
+        Some(Level::Trusted) => "load",
+        Some(Level::Untrusted) => "are skipped",
+        None => "are ignored",
+    };
+    let agents_claim = match agents.level {
+        Some(Level::Untrusted) => "are skipped",
+        _ => "load",
+    };
+    let mut out = format!(
+        "trust: {} ({}): project .codex/config.toml, hooks and rules {config_claim}; project AGENTS.md files {agents_claim}; skills load either way",
+        state(dir),
+        entry(dir)
+    );
+    if trust.agents_md_apart() {
+        out.push_str(&format!(
+            " · AGENTS.md gate: {} ({})",
+            state(agents),
+            entry(agents)
+        ));
+    }
+    out
 }
 
 /// A `projects` key as it is written in TOML (`"…"`).

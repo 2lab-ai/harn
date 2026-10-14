@@ -136,6 +136,9 @@ pub(crate) enum Mode {
 }
 
 pub const TRIM_HINT: &str = "AI trim: run `harn trim` in the shell (or /harn-trim in Claude Code)";
+/// `t` on the Codex tab: `harn trim` is Claude Code's for now (P1 adds Codex).
+pub const TRIM_HINT_CODEX: &str =
+    "AI trim for Codex is not implemented yet; `harn trim` trims Claude Code";
 
 pub struct App {
     pub(crate) target: Target,
@@ -377,7 +380,10 @@ impl App {
                 Some(err) => self.report_error(err),
                 None => self.info("refreshed: every setting and file read again".to_string()),
             },
-            KeyCode::Char('t') => self.info(TRIM_HINT.to_string()),
+            KeyCode::Char('t') => self.info(match self.tab().tree.agent {
+                data::Agent::Codex => TRIM_HINT_CODEX,
+                data::Agent::ClaudeCode => TRIM_HINT,
+            }),
             KeyCode::Char('?') => self.open(Card::Keys),
             KeyCode::Char('i') => {
                 if self.tab().screen.notes.is_empty() {
@@ -930,12 +936,16 @@ impl App {
                 .as_ref()
                 .is_some_and(|id| self.tab().journaled.contains_key(id));
             let by_policy = self.cursor_item().is_some_and(model::off_by_policy);
-            parts.push(t(if by_harn {
-                " is already off here; o turns it back on"
-            } else if by_policy {
-                OFF_BY_POLICY_SAYS
-            } else {
-                " is already off: your settings turn every hook off (disableAllHooks)"
+            let places = Places::of(&self.tab().tree);
+            let codex = self
+                .cursor_item()
+                .and_then(|i| model::codex_off_says(i, &places));
+            parts.push(t(match (by_harn, by_policy, codex) {
+                (true, _, _) => " is already off here; o turns it back on".to_string(),
+                (_, true, _) => OFF_BY_POLICY_SAYS.to_string(),
+                (_, _, Some(says)) => says,
+                _ => " is already off: your settings turn every hook off (disableAllHooks)"
+                    .to_string(),
             }));
             self.say(Tone::Info, parts);
             return;
@@ -947,15 +957,14 @@ impl App {
             ));
             return;
         };
-        if !item
-            .knobs
-            .iter()
-            .any(|k| plan::knob_scope(k) == Some(data::Scope::Local))
-        {
+        // The knob `harn off` picks without --scope (Claude Code: local; Codex: the narrowest
+        // file where it takes effect).
+        if model::default_knob(&item).is_none() {
+            let places = Places::of(&self.tab().tree);
             let parts = vec![
                 t("refused: "),
                 self.item(&item.id),
-                t(format!(" {}", model::refusal(&item))),
+                t(format!(" {}", model::refusal(&item, &places))),
             ];
             self.say(Tone::Error, parts);
             return;
@@ -1393,7 +1402,10 @@ impl App {
             let parts = vec![
                 t("refused: "),
                 self.item(&id),
-                t(" belongs to Claude Code or your organisation; e opens only files you own"),
+                t(format!(
+                    " belongs to {} or your organisation; e opens only files you own",
+                    model::agent_name(self.tab().tree.agent)
+                )),
             ];
             self.say(Tone::Error, parts);
             return;

@@ -259,7 +259,47 @@ pub struct Tree {
     /// Why tool search is on or off, e.g. `ANTHROPIC_BASE_URL is non-first-party (localhost)`.
     #[serde(default)]
     pub tool_search_cause: Option<String>,
+    /// Codex's trust for the target dir, per gate; None for an agent without one. The `trust:`
+    /// signal says the same for the CLI and the report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<Trust>,
 }
+
+/// Codex's two trust decisions for the target dir. They are kept apart because they decide
+/// different files: the folder's own `.codex/config.toml`, hooks and rules load only while
+/// `folder` is trusted; its AGENTS.md files are skipped only while `agents_md` is untrusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trust {
+    pub folder: TrustGate,
+    pub agents_md: TrustGate,
+}
+
+impl Trust {
+    /// The AGENTS.md gate is a decision of its own: another level, or an entry for another key.
+    pub fn agents_md_apart(&self) -> bool {
+        self.agents_md.level != self.folder.level
+            || (self.agents_md.set_in.is_some() && self.agents_md.key != self.folder.key)
+    }
+}
+
+/// One trust decision: its level, the `projects` key that decided it and the file that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustGate {
+    /// None = no `projects` entry decides it.
+    pub level: Option<TrustLevel>,
+    /// The `projects` key that decided it; when none did, the key Codex asks to be added.
+    pub key: String,
+    /// The config file whose `projects.<key>.trust_level` set it; None when unset.
+    pub set_in: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrustLevel {
+    Trusted,
+    Untrusted,
+}
+kebab_names!(TrustLevel { Trusted => "trusted", Untrusted => "untrusted" });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
@@ -484,6 +524,7 @@ mod tests {
             home: None,
             observed_regions: Vec::new(),
             tool_search_cause: None,
+            trust: None,
         }
     }
 
@@ -628,6 +669,45 @@ mod tests {
         );
     }
 
+    /// The public JSON stays compatible: a tree written before `trust` existed still reads, a
+    /// Claude Code tree has no `trust` key, a Codex tree's trust round-trips in this shape.
+    #[test]
+    fn trust_is_optional_in_json_and_round_trips() {
+        let mut codex = tree(Vec::new());
+        codex.agent = Agent::Codex;
+        codex.trust = Some(Trust {
+            folder: TrustGate {
+                level: Some(TrustLevel::Trusted),
+                key: "/repo".to_string(),
+                set_in: Some(PathBuf::from("/home/.codex/config.toml")),
+            },
+            agents_md: TrustGate {
+                level: None,
+                key: "/repo/child".to_string(),
+                set_in: None,
+            },
+        });
+        let json = serde_json::to_value(&codex).unwrap();
+        assert_eq!(
+            json["trust"],
+            serde_json::json!({
+                "folder": {"level": "trusted", "key": "/repo", "set_in": "/home/.codex/config.toml"},
+                "agents_md": {"level": null, "key": "/repo/child", "set_in": null}
+            })
+        );
+        let back: Tree = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, codex);
+
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("trust");
+        let read: Tree = serde_json::from_value(older).unwrap();
+        assert_eq!(read.trust, None);
+        assert_eq!(read.agent, Agent::Codex);
+
+        let claude = serde_json::to_value(tree(Vec::new())).unwrap();
+        assert!(claude.get("trust").is_none(), "{claude}");
+    }
+
     #[test]
     fn enums_serialize_as_their_kebab_names() {
         fn check<T: Serialize + fmt::Display>(all: &[T]) {
@@ -643,6 +723,7 @@ mod tests {
         check(Mode::ALL);
         check(Layer::ALL);
         check(Scope::ALL);
+        check(TrustLevel::ALL);
         assert_eq!(Layer::ClaudeAi.as_str(), "claudeai");
         assert_eq!(Kind::McpServer.as_str(), "mcp-server");
         assert_eq!(Mode::OnDemand.as_str(), "on-demand");

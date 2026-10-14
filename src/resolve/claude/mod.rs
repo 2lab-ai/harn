@@ -289,6 +289,7 @@ pub fn resolve(target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tre
         home: Some(target.home.clone()),
         observed_regions: Vec::new(),
         tool_search_cause: Some(tool_search_cause),
+        trust: None,
     };
     let (known, unknown) = totals(&tree);
     tree.predicted_known = known;

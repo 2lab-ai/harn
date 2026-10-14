@@ -475,6 +475,7 @@ pub(crate) fn parse_body(bytes: &[u8], init: Option<&InitEvent>) -> anyhow::Resu
         home: None,
         observed_regions: Vec::new(),
         tool_search_cause: None,
+        trust: None,
     };
     Ok(ParsedBody {
         regions: b.regions,

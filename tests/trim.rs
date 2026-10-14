@@ -31,6 +31,9 @@ fn harn_cmd(f: &Fixture, envs: &[(&str, &Path)], args: &[&str]) -> Command {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ENABLE_TOOL_SEARCH")
         .env_remove("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        // The Codex tree is read from these; the caller's must not leak in either.
+        .env_remove("CODEX_HOME")
+        .env_remove("HARN_CODEX_PROFILE")
         .arg("--dir")
         .arg(&f.project)
         .args(args);
@@ -429,6 +432,9 @@ fn trim_takes_a_positional_dir() {
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ENABLE_TOOL_SEARCH")
         .env_remove("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        // The Codex tree is read from these; the caller's must not leak in either.
+        .env_remove("CODEX_HOME")
+        .env_remove("HARN_CODEX_PROFILE")
         .current_dir(Path::new("/"))
         .args([
             "trim",

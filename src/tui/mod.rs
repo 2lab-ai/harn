@@ -10,7 +10,7 @@ mod app;
 pub mod model;
 mod view;
 
-pub use app::{App, Message, Part, Pending, Staged, Tone, TRIM_HINT};
+pub use app::{App, Message, Part, Pending, Staged, Tone, TRIM_HINT, TRIM_HINT_CODEX};
 pub use model::Sort;
 
 use crate::journal::Journal;
@@ -492,6 +492,7 @@ mod tests {
             home: None,
             observed_regions: Vec::new(),
             tool_search_cause: None,
+            trust: None,
         };
         let target = Target {
             dir: dir.clone(),
