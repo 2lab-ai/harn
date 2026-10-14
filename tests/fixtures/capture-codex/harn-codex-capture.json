@@ -1,0 +1,21 @@
+{
+  "schema": "harn-codex-capture/1",
+  "context": {
+    "cwd": "@REPO@/sub",
+    "agent": "codex",
+    "agent_version": "0.160.1",
+    "model": null,
+    "launch_opts": ["-C", "@REPO@/sub", "debug", "prompt-input"],
+    "settings_fingerprint": null,
+    "capture_kind": "codex-run",
+    "captured_at": "2026-10-14T00:00:00Z"
+  },
+  "env": {"CODEX_HOME": null, "HARN_CODEX_PROFILE": null},
+  "steps": [
+    {"args": ["--version"], "stdout": "version.txt", "stderr": "version.stderr", "exit": 0},
+    {"args": ["-C", "@REPO@/sub", "debug", "prompt-input"], "stdout": "prompt-input.json", "stderr": "prompt-input.stderr", "exit": 0},
+    {"args": ["-C", "@REPO@/sub", "debug", "models"], "stdout": "models.json", "stderr": "models.stderr", "exit": 0},
+    {"args": ["-C", "@REPO@/sub", "mcp", "list", "--json"], "stdout": "mcp-list.json", "stderr": "mcp-list.stderr", "exit": 0},
+    {"args": ["-C", "@REPO@/sub", "plugin", "list", "--json"], "stdout": "plugin-list.json", "stderr": "plugin-list.stderr", "exit": 0}
+  ]
+}

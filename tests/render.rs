@@ -1522,6 +1522,7 @@ fn verify_report_groups_rows_by_verdict() {
         ],
         passed: false,
         promoted: 2,
+        notes: Vec::new(),
     };
     let out = render::verify_report(&report);
     let expected = [

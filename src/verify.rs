@@ -33,6 +33,9 @@
 //! - **Promotion**: every matched static item gets `cost.observed`; the tree gets
 //!   `observed_body` with the capture's regions (`observed_regions`), the observed tool-search
 //!   state, and the over-cap signal.
+//!
+//! Codex (P0.5, acceptance A7–A8) has its own projection over codex's inspection commands:
+//! [`verify_codex`] in [`codex`].
 
 use crate::model::{Cost, Item, Kind, Layer, Mode, RunContext, Tree};
 use crate::oracle::claude::{version_triple, NAME_ONLY};
@@ -41,6 +44,9 @@ use crate::resolve::claude::CAP_STATE_UNKNOWN;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+mod codex;
+pub use codex::{verify_codex, OUTSIDE_THE_DUMP, RUNTIME_DECIDED};
 
 /// Bytes a reproducible contribution may differ by (a trailing newline the agent adds or drops).
 pub const CONTENT_TOLERANCE: u64 = 2;
@@ -51,7 +57,22 @@ pub enum RowVerdict {
     Seen,
     PredictedNotSeen,
     SeenNotPredicted,
-    ContentMismatch { predicted: u64, observed: u64 },
+    ContentMismatch {
+        predicted: u64,
+        observed: u64,
+    },
+    /// In the projection, but the oracle's output cannot show it (Codex: hook output, tools,
+    /// base instructions); never a failure.
+    NotCheckable {
+        reason: String,
+    },
+}
+
+impl RowVerdict {
+    /// Whether the row lets the report pass.
+    pub fn passes(&self) -> bool {
+        matches!(self, RowVerdict::Seen | RowVerdict::NotCheckable { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +82,10 @@ pub struct VerifyReport {
     pub rows: Vec<(String, RowVerdict)>,
     pub passed: bool,
     pub promoted: u32,
+    /// What the rows cannot say: what lies outside the oracle's output (Codex: A8) and where a
+    /// content mismatch starts. Empty for Claude Code.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// Kinds under the presence gate: statically discoverable and observable in the request.
@@ -480,12 +505,13 @@ pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
     }
     static_tree.warnings.extend(warnings);
 
-    let passed = context_ok && rows.iter().all(|(_, v)| *v == RowVerdict::Seen);
+    let passed = context_ok && rows.iter().all(|(_, v)| v.passes());
     VerifyReport {
         context: capture.context.clone(),
         rows,
         passed,
         promoted,
+        notes: Vec::new(),
     }
 }
 
