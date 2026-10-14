@@ -572,6 +572,7 @@ pub(crate) fn resolve_with(
             "no codex home at {}: {why}; nothing to list",
             codex_home.display()
         ));
+        tree.codex = Some(homeless_facts(target, &codex_home));
         return Ok(tree);
     }
 
@@ -742,6 +743,25 @@ fn trust_signal(trust: &crate::model::Trust) -> String {
         ));
     }
     out
+}
+
+/// [`codex_facts`] when the Codex home does not exist: the home is known, no config or catalog
+/// could be read — the model only when the target names it, the catalog missing.
+fn homeless_facts(target: &Target, codex_home: &Path) -> crate::model::CodexFacts {
+    use crate::model::{Catalog, CatalogState, CodexFacts, CodexModel};
+    CodexFacts {
+        home: codex_home.to_path_buf(),
+        model: CodexModel {
+            slug: target.model.clone(),
+            set_in: None,
+            context_window: target.context_window,
+        },
+        catalog: Catalog {
+            written_by: None,
+            lists_model: false,
+            state: CatalogState::Missing,
+        },
+    }
 }
 
 /// The facts the screens word themselves ([`crate::model::CodexFacts`]); the `model:` signal

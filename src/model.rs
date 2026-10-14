@@ -845,6 +845,88 @@ mod tests {
         );
     }
 
+    /// Every catalog state and reason on the wire, and which reasons mean Codex itself would
+    /// fetch a new catalog (`refetched`) rather than harn not knowing.
+    #[test]
+    fn catalog_states_and_reasons_have_a_fixed_wire_shape() {
+        use serde_json::json;
+        let detail = || "fetched_at is missing".to_string();
+        let whys = [
+            (CatalogWhy::NotJson, json!({"kind": "not-json"}), true),
+            (
+                CatalogWhy::Rejected { detail: detail() },
+                json!({"kind": "rejected", "detail": "fetched_at is missing"}),
+                true,
+            ),
+            (
+                CatalogWhy::UnreadShape { detail: detail() },
+                json!({"kind": "unread-shape", "detail": "fetched_at is missing"}),
+                false,
+            ),
+            (
+                CatalogWhy::CodexNotFound,
+                json!({"kind": "codex-not-found"}),
+                false,
+            ),
+            (
+                CatalogWhy::CodexVersionUnknown,
+                json!({"kind": "codex-version-unknown"}),
+                false,
+            ),
+            (
+                CatalogWhy::NoClientVersion,
+                json!({"kind": "no-client-version"}),
+                true,
+            ),
+            (
+                CatalogWhy::OtherVersion {
+                    written_by: "0.1.0".to_string(),
+                    installed: "0.2.0".to_string(),
+                },
+                json!({"kind": "other-version", "written_by": "0.1.0", "installed": "0.2.0"}),
+                true,
+            ),
+            (CatalogWhy::NoIdentity, json!({"kind": "no-identity"}), true),
+        ];
+        for (why, wire, refetched) in whys {
+            assert_eq!(serde_json::to_value(&why).unwrap(), wire, "{why:?}");
+            assert_eq!(
+                serde_json::from_value::<CatalogWhy>(wire.clone()).unwrap(),
+                why
+            );
+            assert_eq!(why.refetched(), refetched, "{why:?}");
+            let state = CatalogState::NotUsed { why: why.clone() };
+            let state_wire = json!({"state": "not-used", "why": wire});
+            assert_eq!(serde_json::to_value(&state).unwrap(), state_wire);
+            assert_eq!(
+                serde_json::from_value::<CatalogState>(state_wire).unwrap(),
+                state
+            );
+        }
+        for (state, wire) in [
+            (
+                CatalogState::Used {
+                    fetched_at: "2026-10-14T00:00:00Z".to_string(),
+                },
+                json!({"state": "used", "fetched_at": "2026-10-14T00:00:00Z"}),
+            ),
+            (CatalogState::Missing, json!({"state": "missing"})),
+            (
+                CatalogState::Elsewhere {
+                    set_in: Some(PathBuf::from("/home/.codex/config.toml")),
+                },
+                json!({"state": "elsewhere", "set_in": "/home/.codex/config.toml"}),
+            ),
+            (
+                CatalogState::Elsewhere { set_in: None },
+                json!({"state": "elsewhere", "set_in": null}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&state).unwrap(), wire, "{state:?}");
+            assert_eq!(serde_json::from_value::<CatalogState>(wire).unwrap(), state);
+        }
+    }
+
     #[test]
     fn enums_serialize_as_their_kebab_names() {
         fn check<T: Serialize + fmt::Display>(all: &[T]) {

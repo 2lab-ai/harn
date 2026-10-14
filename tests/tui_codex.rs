@@ -338,6 +338,15 @@ fn both_agents_get_a_tab_and_tab_switches_between_them() {
     );
 }
 
+/// The model note of [`fx`] / [`fx_full`] with the accepted catalog: what verify confirms is what
+/// Codex's dump shows, so the base instructions keep the catalog's figure.
+const ACCEPTED_MODEL_NOTE: &str = "The model is gpt-test (set in ~/.codex/config.toml), with a \
+    context window of 200000 tokens. Sizes that depend on the model come from Codex's model \
+    catalog as fetched at 2026-10-14T00:00:00Z (~/.codex/models_cache.json); Codex re-checks a \
+    catalog older than 5 minutes when it starts, and harn does not check it was fetched for your \
+    login. `harn verify --run --agent codex` confirms what Codex's dump shows; the base \
+    instructions are not in it, so their size stays the catalog's figure.";
+
 #[test]
 fn the_codex_header_names_the_agent_and_the_trust_state_and_the_notes_say_what_it_means() {
     for (trusted, word, says) in [
@@ -374,15 +383,7 @@ fn the_codex_header_names_the_agent_and_the_trust_state_and_the_notes_say_what_i
         assert_eq!(notes[0].text, says);
         // The model note is written from the resolver's facts: the model and its file, the
         // window, and the catalog snapshot with what harn did not check.
-        assert_eq!(
-            notes[1].text,
-            "The model is gpt-test (set in ~/.codex/config.toml), with a context window of \
-             200000 tokens. Sizes that depend on the model come from Codex's model catalog as \
-             fetched at 2026-10-14T00:00:00Z (~/.codex/models_cache.json); Codex re-checks a \
-             catalog older than 5 minutes when it starts, and harn does not check it was fetched \
-             for your login, so `harn verify --run --agent codex` confirms them.",
-            "{notes:?}"
-        );
+        assert_eq!(notes[1].text, ACCEPTED_MODEL_NOTE, "{notes:?}");
         press(&mut app, KeyCode::Char('i'));
         let frame = screen(&app, 80, 24);
         let body = card(&frame, "Notes").join(" ");
@@ -1656,19 +1657,31 @@ fn a_catalog_snapshot_harn_does_not_use_is_explained_in_words() {
             .into_iter()
             .map(|n| n.text)
             .collect();
-        assert!(
-            notes.contains(&format!(
-                "Tool search cannot be decided because {unused}; MCP servers are shown as \
-                 loading up front."
-            )),
-            "{case}: {notes:#?}"
-        );
-        assert!(
-            notes.contains(&format!(
+        // The why is said once, in the model note; the tool-search note right after it points
+        // there and keeps its consequence.
+        let model = notes
+            .iter()
+            .position(|n| n.starts_with("The model is"))
+            .unwrap_or_else(|| panic!("{case}: {notes:#?}"));
+        assert_eq!(
+            notes[model],
+            format!(
                 "The model is gpt-test (set in ~/.codex/config.toml), its context window \
                  unknown. {unused}; sizes that depend on the model are unknown."
-            )),
-            "{case}: {notes:#?}"
+            ),
+            "{case}"
+        );
+        assert_eq!(
+            notes[model + 1],
+            "Tool search cannot be decided: it comes from the model's entry in Codex's model \
+             catalog, which harn cannot use here (the model note says why); MCP servers are \
+             shown as loading up front.",
+            "{case}"
+        );
+        assert_eq!(
+            notes.iter().filter(|n| n.contains(why)).count(),
+            1,
+            "{case}: the why once: {notes:#?}"
         );
         for n in &notes {
             assert!(
@@ -1715,6 +1728,16 @@ fn base_instructions_say_where_their_size_comes_from_and_that_verify_cannot_chec
              its dump, so harn cannot check it against a session."
         ),
         "{detail}"
+    );
+    // The model note on the same screen agrees: verify confirms what the dump shows, and the
+    // base instructions keep the catalog's figure.
+    assert!(
+        app.screen()
+            .notes
+            .iter()
+            .any(|n| n.text == ACCEPTED_MODEL_NOTE),
+        "{:#?}",
+        app.screen().notes
     );
     let f = fx_unknown_model();
     let mut app = f.app(false);

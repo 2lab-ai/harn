@@ -1636,6 +1636,24 @@ fn no_codex_home_is_an_empty_tree_with_a_warning() {
         "{:?}",
         t.warnings
     );
+    // The facts still name the home; nothing else could be read, so the catalog is missing and
+    // the model is the target's own, when it names one.
+    let facts = t.codex.as_ref().expect("a Codex tree carries its facts");
+    assert_eq!(facts.home, f.root.join("missing"));
+    assert_eq!(facts.catalog.state, model::CatalogState::Missing);
+    assert_eq!(facts.catalog.written_by, None);
+    assert!(!facts.catalog.lists_model);
+    assert_eq!(facts.model.slug, None);
+    assert_eq!(facts.model.set_in, None);
+    te.model = Some("gpt-x".to_string());
+    te.context_window = Some(4000);
+    let facts = resolve(&te, None).codex.expect("facts");
+    assert_eq!(facts.model.slug.as_deref(), Some("gpt-x"));
+    assert_eq!(facts.model.context_window, Some(4000));
+    assert_eq!(
+        resolve(&target(&f), None).codex.map(|c| c.home),
+        Some(f.codex.clone())
+    );
 }
 
 // Review round 1 (C1): each test below fails on 393df03 except where it says it pins upstream.

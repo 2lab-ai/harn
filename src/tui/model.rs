@@ -134,14 +134,16 @@ impl Places {
 }
 
 /// `text` with every `path` that starts a path and ends at a path boundary replaced by `with`:
-/// never one inside another path (`/srv/home/me/x` keeps its `/home/me`). A root (`/`) or an
-/// empty path is never replaced.
+/// never one inside another path (`/srv/home/me/x`, `/srv/cache%/home/me/x` keep their
+/// `/home/me`). A path starts at the start of the text, or after whitespace or one of the marks
+/// that open a path in harn's sentences (`(`, a quote or backtick, `=`, `:`, `,`); after any other
+/// character it is part of something else. A root (`/`) or an empty path is never replaced.
 fn replace_path(text: &str, path: &str, with: &str) -> String {
     if path.is_empty() || path == "/" {
         return text.to_string();
     }
-    let path_char =
-        |c: char| c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '~' | '@' | '+');
+    let opens =
+        |c: char| c.is_whitespace() || matches!(c, '(' | '"' | '\'' | '`' | '=' | ':' | ',');
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find(path) {
@@ -151,7 +153,7 @@ fn replace_path(text: &str, path: &str, with: &str) -> String {
             .last()
             .filter(|_| at == 0)
             .or_else(|| rest[..at].chars().last())
-            .is_none_or(|c| !path_char(c));
+            .is_none_or(opens);
         let ends = path.ends_with('/')
             || after
                 .chars()
@@ -1178,8 +1180,8 @@ fn reason_words(reason: &str) -> String {
 ///    home, `/etc/codex`) and runs to the `#/` reference ([`codex_words`]). If neither holds, the
 ///    sentence is left as written: no binding, no shortening.
 /// 3. Shortening a home prefix applies only at the start of a path — a bound file from its own
-///    start, other text where a path starts (the text's start, or after a space, `(` or quote) —
-///    never inside another path. In text with no binding one case stays ambiguous: a folder name
+///    start, other text where a path starts (the text's start, or after whitespace, `(`, a quote
+///    or backtick, `=`, `:` or `,`) — never inside another path. In text with no binding one case stays ambiguous: a folder name
 ///    with a space before a home path in it (`/srv/copy of /home/me/x`) reads as two paths, so
 ///    its `/home/me` is shortened.
 ///
@@ -1640,8 +1642,11 @@ impl Builder<'_> {
         if let Some(trust) = &tree.trust {
             notes.push(note(trust_sentence(trust, places)));
         }
+        // The model note likewise, from the tree's Codex facts; its `model:` signal is the CLI's.
         for signal in &tree.signals {
-            if !(tree.trust.is_some() && signal.starts_with("trust: ")) {
+            let said = (tree.trust.is_some() && signal.starts_with("trust: "))
+                || (tree.codex.is_some() && signal.starts_with("model: "));
+            if !said {
                 signals.push(signal);
             }
         }
@@ -1654,6 +1659,11 @@ impl Builder<'_> {
                 )));
             }
         }
+        // The model note comes before the tool-search note, which rests on the same catalog
+        // entry and points to it rather than repeating why.
+        if let Some(codex) = &tree.codex {
+            notes.push(note(model_note(codex, places)));
+        }
         // One note on tool search; the resolver's own warning about it says the same.
         let tool_search_note = model::walk(tree).any(|i| i.kind == Kind::McpServer);
         if tool_search_note {
@@ -1665,11 +1675,13 @@ impl Builder<'_> {
                                 it, so every MCP tool schema loads in the first request; no \
                                 Codex setting changes that."
                     .to_string(),
-                None => match tree.codex.as_ref().and_then(|c| catalog_unused(c, places)) {
-                    Some(unused) => format!(
-                        "Tool search cannot be decided because {unused}; MCP servers are shown \
-                         as loading up front."
-                    ),
+                // Tool search comes only from the model's catalog entry: undecided means harn
+                // cannot use that entry, and the model note says why.
+                None => match &tree.codex {
+                    Some(_) => "Tool search cannot be decided: it comes from the model's entry in \
+                                Codex's model catalog, which harn cannot use here (the model \
+                                note says why); MCP servers are shown as loading up front."
+                        .to_string(),
                     None => format!(
                         "Tool search cannot be decided from the files{}: MCP servers are shown \
                          as loading up front.",
@@ -1684,12 +1696,6 @@ impl Builder<'_> {
             }));
         }
         for signal in signals {
-            // The model note is written from the resolver's facts; its `model:` signal (the same
-            // facts for the CLI) is not repeated.
-            if let (Some(codex), true) = (&tree.codex, signal.starts_with("model: ")) {
-                notes.push(note(model_note(codex, places)));
-                continue;
-            }
             let text = codex_words(signal, places);
             if !text.is_empty() {
                 notes.push(note(sentence(&text)));
@@ -4234,7 +4240,9 @@ fn catalog_unused(codex: &CodexFacts, places: &Places) -> Option<String> {
 /// The model note: the model and where it is set, its context window, and where the facts that
 /// depend on it come from — the catalog snapshot with what was not checked (when it was fetched
 /// as the file says, that Codex re-checks an older one when it starts, that the login is not
-/// compared, that `harn verify --run --agent codex` confirms), or why they are unknown.
+/// compared, that `harn verify --run --agent codex` confirms only what Codex's dump shows, which
+/// leaves the base instructions at the catalog's figure), or why they are unknown. The one place
+/// a Codex screen says why the catalog does not count; the tool-search note points here.
 fn model_note(codex: &CodexFacts, places: &Places) -> String {
     let m = &codex.model;
     let window = match m.context_window {
@@ -4268,8 +4276,9 @@ fn model_note(codex: &CodexFacts, places: &Places) -> String {
         (Some(_), None, CatalogState::Used { fetched_at }) => format!(
             "Sizes that depend on the model come from Codex's model catalog as fetched at \
              {fetched_at} ({}); Codex re-checks a catalog older than 5 minutes when it starts, \
-             and harn does not check it was fetched for your login, so `harn verify --run \
-             --agent codex` confirms them.",
+             and harn does not check it was fetched for your login. `harn verify --run --agent \
+             codex` confirms what Codex's dump shows; the base instructions are not in it, so \
+             their size stays the catalog's figure.",
             places.path(&codex.home.join("models_cache.json"))
         ),
         (Some(_), None, _) => format!("{}.", capitalized(unknown)),
@@ -5525,6 +5534,30 @@ mod tests {
             "No model is set in the files; Codex picks its default when it starts. Until it is \
              known, sizes that depend on the model are unknown."
         );
+    }
+
+    #[test]
+    fn a_home_inside_another_path_is_never_shortened() {
+        // A legal file-name character before the home: part of another path.
+        for c in ['%', '+', '@', '~', '#', 'x', '.', '-', '_', '/'] {
+            let text = format!("copy /srv/cache{c}/home/me/x");
+            assert_eq!(replace_path(&text, "/home/me", "~"), text, "{c}");
+        }
+        // The start of the text, whitespace or a mark that opens a path: a path starts there.
+        for (text, shown) in [
+            ("/home/me/x", "~/x"),
+            ("copy /home/me/x", "copy ~/x"),
+            ("copy\t/home/me/x", "copy\t~/x"),
+            ("(/home/me/x)", "(~/x)"),
+            ("\"/home/me/x\"", "\"~/x\""),
+            ("'/home/me/x'", "'~/x'"),
+            ("`/home/me/x`", "`~/x`"),
+            ("path=/home/me/x", "path=~/x"),
+            ("in:/home/me/x", "in:~/x"),
+            ("a,/home/me/x", "a,~/x"),
+        ] {
+            assert_eq!(replace_path(text, "/home/me", "~"), shown, "{text}");
+        }
     }
 
     #[test]
