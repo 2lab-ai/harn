@@ -79,7 +79,7 @@ pub fn for_agent(agent: Agent) -> Box<dyn Resolver> {
 }
 
 /// Agents listed when `--agent` is not given ("default: all, one table each"): every agent with
-/// a resolver in this build. P0 = Claude Code; P0.5 adds Codex here.
+/// a resolver in this build, Claude Code first (the first tab of the interactive view).
 pub fn default_agents() -> &'static [Agent] {
-    &[Agent::ClaudeCode]
+    &[Agent::ClaudeCode, Agent::Codex]
 }

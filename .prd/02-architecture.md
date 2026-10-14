@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **shipped (P0)** — v1.6, 2026-10-13 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5 Codex resolver still planned). Boundaries for the first
+Status: **shipped (P0)** — v1.7, 2026-10-14 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5: the Codex resolver, its TOML writes and the wiring are built, `oracle/codex.rs` + Codex `verify` in progress). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 
@@ -50,10 +50,18 @@ src/
                      plugin + connectors + dynamic; schemas `?` until a capture), plugins
                      (installed_plugins.json + enabledPlugins from six sources), builtins table,
                      tool-search state (base URL first-party or not)
-    codex/           config layers + profiles + the three trust gates, AGENTS chain + fallbacks +
-                     32 KiB budget, skills roots (trust-independent, 2 %/10k cap), hooks
-                     (+ trusted_hash), rules, plugins/marketplaces, mcp_servers (+ deferral by
-                     model catalog), builtins
+    codex/           mod.rs (CODEX_HOME, model facts from models_cache.json, the knob scope rule:
+                     a key is listed only in the files where it takes effect), config.rs (layers:
+                     defaults · /etc/codex · user · profile · trusted .codex/config.toml root→cwd ·
+                     managed, overlay applied to TOML; the three trust gates), instructions.rs
+                     (developer_instructions, the AGENTS message: one row per file + its framing,
+                     32 KiB shared budget), builtins.rs (base instructions, permissions,
+                     collaboration, apps, environment, multi-agent; `include_*`/`agents.enabled`),
+                     skills.rs (roots trust-independent, 2 %/10k-token budget, listing + its
+                     framing row), plugins.rs (plugin rows are switches; parts tagged
+                     origin.plugin), hooks.rs (per handler; trusted_hash; `off:` rows), rules.rs,
+                     mcp.rs (mcp_servers, deferral by the model's supports_search_tool)
+    mod.rs           default_agents() = Claude Code, Codex: commands without --agent list both
   plan.rs            ActionPlan builder: knob candidates per item by scope; quarantine only when
                      no knob and only in the same scope; freed = predicted(before) −
                      predicted(after) via resolve(target, overlay); side effects; warnings
@@ -81,12 +89,22 @@ src/
                      text) replace predicted → observed without failing; promotion only for
                      matched rows and regions
   render/
+    common.rs        shared cells: costs, freed, compact knobs (JSON pointer for Claude Code
+                     settings, the dotted TOML key for Codex config.toml), header facts per agent
     table.rs         one table per agent (ncdu-style bars, eighth-block + ASCII fallback),
                      header with cost tag, attributed/framing split, tool-search state, drift warning
     json.rs          schema harn/1
     brief.rs         LLM-oriented text: totals, signals, rows (id · origin · mode · cost · freed ·
                      default knob), unknowns, and the harn-plan/1 format the agent must emit
     html.rs          read-only visualization (one file, inline CSS, both agents, same rows/signals)
+    why.rs / text.rs `harn why`; plans, verify reports, history
+  tui/
+    mod.rs           terminal, event loop, signal-safe restore; `run(target, tabs, opts)`
+    app.rs           terminal-free core: one tab per agent (Tab / Shift-Tab), keys, the d/o/u
+                     cards through plan + writers + journal
+    model.rs         view-model: groups by kind, people's names and sentences, per agent (Codex:
+                     AGENTS.md files, Rules files, Built-in blocks, the trust state first in notes)
+    view.rs          drawing (header, list with bars, detail panel, key bar, cards)
   plan.rs (cont.)    PlanRequest (schema harn-plan/1) → validation (unique selectors, supported
                      knobs, no silent scope widening) → one ActionPlan; reasons carried into the journal
 ```

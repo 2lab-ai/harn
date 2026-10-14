@@ -10,8 +10,8 @@ use super::common::{
     cost_cell, facts, freed_cell, has_action, knob_compact, partition, plain, sorted, step_text,
     CostCell, Glyphs, UNICODE,
 };
-use crate::model::{Document, Item, Knob, Scope, Tree};
-use crate::plan::{PlanOp, PlanRequest, PLAN_SCHEMA};
+use crate::model::{Agent, Document, Item, Knob, Tree};
+use crate::plan::{default_scope, PlanOp, PlanRequest, PLAN_SCHEMA};
 use std::path::Path;
 
 /// Children printed per row; the rest collapse into one `… N more (harn --json)` line.
@@ -22,9 +22,12 @@ const LEGEND: &[&str] = &[
     "row: id|layer|mode|cost|freed|knob0|why. Leading spaces = child of the nearest less-indented row above. ^ = same as the line above (for knob0: the same knob). `… N more (harn --json)` = children beyond the first {CHILDREN_SHOWN}, in the same order.",
     "cost (first request): 1234 predicted · ~1234 estimated · o1234 observed · s1234 on disk only, not a first-request number · ? unknown · — none (mode runtime/none).",
     "freed: bytes that knob0 frees (predicted) · +Δ? plus an unknown re-render delta · Δ? delta unknown · — no applicable knob · empty = not computed.",
-    "knob0: the item's default knob (index 0), scope local unless (project)/(user) is shown · +N = N more knobs (harn why <id>).",
+    "knob0: the item's first knob (index 0) with its scope in parentheses; on claude-code rows a knob without one is local · Codex knobs are TOML keys (`a.b = v`, `+=` appends a table) · +N = N more knobs (harn why <id>).",
     "why (top-level rows only): the last step of the admission chain; empty when the id names it or it is the item's own file (harn path <id>); ./ = the target dir, ~ = $HOME.",
 ];
+
+/// How to read the Codex section's rows that are not files or skills.
+const CODEX_ROWS: &str = "codex rows: agents-md-message and skills_instructions are wrappers (the heading and tags around the AGENTS.md files and the skill listing) and go when what they wrap goes; a plugin row is a switch (cost —, freed = what leaves with it); a built-in block with cost ? is measured only by a capture; knobs write ~/.codex/config.toml (every project) or this folder's .codex/config.toml (read only while Codex trusts it).";
 
 /// One header per agent (title, drift, totals, tool search, signals, warnings), every row with
 /// its children, the open unknowns, then the plan format with an example op from the document.
@@ -72,6 +75,9 @@ fn agent_section(out: &mut Vec<String>, unknowns: &mut Vec<String>, tree: &Tree,
     let home = tree.home.as_deref();
     out.extend(f.signals.into_iter().map(|line| tilde(&line, home)));
     out.extend(f.warnings.into_iter().map(|line| tilde(&line, home)));
+    if tree.agent == Agent::Codex {
+        out.push(CODEX_ROWS.to_string());
+    }
     out.push("rows:".to_string());
 
     let paths = Paths {
@@ -173,8 +179,8 @@ fn push_row<'a>(
         None => g.dash.to_string(),
         Some(_) if same_knobs => "^".to_string(),
         Some(first) => match item.knobs.len() {
-            1 => knob_brief(first, g),
-            n => format!("{} +{}", knob_brief(first, g), n - 1),
+            1 => knob_brief(item, first, g),
+            n => format!("{} +{}", knob_brief(item, first, g), n - 1),
         },
     };
     let line = format!(
@@ -211,9 +217,13 @@ fn push_row<'a>(
     }
 }
 
-/// [`knob_compact`] without the default ` (local)`.
-fn knob_brief(knob: &Knob, g: &Glyphs) -> String {
+/// [`knob_compact`], without ` (local)` on a Claude Code row (its default scope); a Codex row
+/// keeps its scope, which is `project` or `user` by where the key takes effect.
+fn knob_brief(item: &Item, knob: &Knob, g: &Glyphs) -> String {
     let compact = knob_compact(knob, g);
+    if item.id.starts_with("codex/") {
+        return compact;
+    }
     match compact.strip_suffix(" (local)") {
         Some(short) => short.to_string(),
         None => compact,
@@ -299,9 +309,9 @@ fn delta_unknown(item: &Item) -> bool {
 /// The `harn-plan/1` format, an example op on a real id, and the rules.
 fn plan_format(doc: &Document) -> Vec<String> {
     let mut out = vec![
-        format!("PLAN FORMAT ({PLAN_SCHEMA}): write a JSON file, run `harn apply <file> --dry-run`, then `harn apply <file>`."),
+        format!("PLAN FORMAT ({PLAN_SCHEMA}): one plan per agent; write a JSON file, run `harn apply <file> --agent <agent> --dry-run`, then the same without --dry-run."),
         format!(
-            r#"{{"schema": "{PLAN_SCHEMA}", "target_dir": "<the target dir above>", "ops": [{{"selector": "<item id>", "scope": "local|project|user" (optional, default local), "knob": <index into the item's knobs> (optional, default 0), "reason": "<why this item goes>"}}]}}"#
+            r#"{{"schema": "{PLAN_SCHEMA}", "target_dir": "<the target dir above>", "ops": [{{"selector": "<item id>", "scope": "local|project|user" (optional, default: the agent's — claude-code local, codex the narrowest scope listed for the key of the item's knob 0), "knob": <index into the item's knobs> (optional, default: the knob of that scope), "reason": "<why this item goes>"}}]}}"#
         ),
         "Unknown keys are rejected. A selector is a full id, or a unique suffix, label or substring of one.".to_string(),
     ];
@@ -326,7 +336,7 @@ fn plan_format(doc: &Document) -> Vec<String> {
             .to_string(),
     );
     out.push(
-        "- scope never wider than needed: omit it (= local, this project only) unless the item must go everywhere; harn never widens a scope itself."
+        "- scope never wider than needed: omit it (claude-code: local, this project only; codex: the item's own key — knob 0's — in the narrowest config file listed for it, .codex/config.toml of a trusted project, else ~/.codex/config.toml; a wider switch listed after it, such as features.hooks or the whole plugin, is never the default) unless the item must go everywhere; harn never widens a scope itself."
             .to_string(),
     );
     out.push("- one reason per op.".to_string());
@@ -363,7 +373,7 @@ fn request(tree: &Tree, item: &Item) -> PlanRequest {
         target_dir: tree.target_dir.clone(),
         ops: vec![PlanOp {
             selector: item.id.clone(),
-            scope: Some(Scope::Local),
+            scope: Some(default_scope(item)),
             knob: Some(0),
             reason: "example only: replace with the real reason for this item".to_string(),
         }],

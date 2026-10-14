@@ -157,15 +157,6 @@ pub(crate) enum TrustLevel {
     Untrusted,
 }
 
-impl TrustLevel {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TrustLevel::Trusted => "trusted",
-            TrustLevel::Untrusted => "untrusted",
-        }
-    }
-}
-
 /// One trust lookup: the level found (None = no entry) and the `projects` key that decided it
 /// (when None, the key Codex tells the user to add).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +165,8 @@ pub(crate) struct Decision {
     pub key: String,
     /// `"<file>#<pointer>"` of the entry, when one was found.
     pub set_at: Option<String>,
+    /// The file of the entry, kept apart from its pointer (a path may hold a `#`).
+    pub set_in: Option<PathBuf>,
 }
 
 impl Decision {
@@ -587,6 +580,7 @@ impl Config {
                 level: None,
                 key: String::new(),
                 set_at: None,
+                set_in: None,
             },
         };
         config.active_project = config.active_project(dir, warnings);
@@ -663,6 +657,7 @@ impl Config {
             level: None,
             key: candidates.into_iter().next().unwrap_or_default(),
             set_at: None,
+            set_in: None,
         }
     }
 }
@@ -701,6 +696,7 @@ impl Trust<'_> {
             level: Some(level),
             key: key.to_string(),
             set_at: Some(layer.at(&pointer)),
+            set_in: layer.path.clone(),
         })
     }
 
@@ -722,6 +718,7 @@ impl Trust<'_> {
             level: None,
             key: keys(fallback).into_iter().next().unwrap_or_default(),
             set_at: None,
+            set_in: None,
         }
     }
 }

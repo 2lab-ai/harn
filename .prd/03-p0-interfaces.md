@@ -176,7 +176,8 @@ Target for tests: `Target { dir: project, home: fixture home, env: {} }`.
   `parse_request_body`, `parse_init_event`; `capture.rs` = the readers; all re-exported.
 - `render`: also `plan(&ActionPlan) -> String` and `history(&[JournalEntry]) -> String`; `main`
   does no formatting.
-- `resolve::default_agents()` = `[ClaudeCode]` in P0; `for_agent(Codex)` is a stub.
+- `resolve::default_agents()` = `[ClaudeCode]` in P0; `[ClaudeCode, Codex]` since P0.5 (C6), with
+  `for_agent(Codex)` the Codex resolver.
 - Deferred to WU-F (integration): selector 4th tier (unique substring, so `plugin:slack` matches
   `…/plugin:slack:slack`), `--assume-bytes-per-token`, exit-code collision notes (clap usage = 2 =
   ambiguous selector; generic error = 1 = verify diff).

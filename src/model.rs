@@ -259,7 +259,143 @@ pub struct Tree {
     /// Why tool search is on or off, e.g. `ANTHROPIC_BASE_URL is non-first-party (localhost)`.
     #[serde(default)]
     pub tool_search_cause: Option<String>,
+    /// Codex's trust for the target dir, per gate; None for an agent without one. The `trust:`
+    /// signal says the same for the CLI and the report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<Trust>,
+    /// What a Codex tree's screens word themselves — its home, its model and the model catalog
+    /// harn read; None for another agent. The `model:` signal says the same for the CLI and the
+    /// report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexFacts>,
 }
+
+/// A Codex tree's facts beyond its rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexFacts {
+    /// The Codex home the tree was resolved with: `CODEX_HOME`, else `~/.codex`.
+    pub home: PathBuf,
+    pub model: CodexModel,
+    /// `<home>/models_cache.json`: the snapshot of the catalog codex last fetched.
+    pub catalog: Catalog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexModel {
+    /// None when nothing sets a model (codex picks its default at startup), or the setting is
+    /// not a string.
+    pub slug: Option<String>,
+    /// The config file whose `model` sets it — or, with no slug, holds a value that is not a
+    /// string (codex refuses to start then); None when the target names it or nothing does.
+    pub set_in: Option<PathBuf>,
+    /// Tokens, when known.
+    pub context_window: Option<u64>,
+}
+
+/// The model catalog snapshot as harn read it. Every fact that depends on the model's catalog
+/// entry (base instructions, context window, tool search, the blocks the entry asks for) counts
+/// only while it is [`CatalogState::Used`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Catalog {
+    /// Its `client_version`: the codex that last wrote it.
+    pub written_by: Option<String>,
+    /// It has an entry for the model (read whether or not it is used).
+    pub lists_model: bool,
+    pub state: CatalogState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum CatalogState {
+    /// Accepted as the snapshot; `fetched_at` as the file writes it.
+    Used {
+        fetched_at: String,
+    },
+    /// No file yet: codex writes it on its first run.
+    Missing,
+    /// Config names its own catalog (`model_catalog_json`, set in `set_in`), which harn does not
+    /// read; `models_cache.json` is not consulted then.
+    Elsewhere {
+        set_in: Option<PathBuf>,
+    },
+    NotUsed {
+        why: CatalogWhy,
+    },
+}
+
+/// Why harn does not use `models_cache.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CatalogWhy {
+    /// Not JSON: codex fetches the catalog instead.
+    NotJson,
+    /// codex cannot parse it (`detail`: what is wrong): it fetches the catalog instead.
+    Rejected { detail: String },
+    /// A shape harn does not read (`detail`); whether codex loads it is unknown.
+    UnreadShape { detail: String },
+    /// No codex on `PATH`: whether it accepts the file is unknown.
+    CodexNotFound,
+    /// A codex on `PATH` whose version no file names: whether it accepts the file is unknown.
+    CodexVersionUnknown,
+    /// No `client_version`: codex fetches the catalog instead.
+    NoClientVersion,
+    /// Written by another codex than the installed one: codex fetches the catalog instead.
+    OtherVersion {
+        written_by: String,
+        installed: String,
+    },
+    /// No `identity` (a legacy file): codex fetches the catalog instead.
+    NoIdentity,
+}
+
+impl CatalogWhy {
+    /// Codex itself would not load the file (it fetches the catalog instead); otherwise whether
+    /// it loads it is unknown.
+    pub fn refetched(&self) -> bool {
+        !matches!(
+            self,
+            CatalogWhy::UnreadShape { .. }
+                | CatalogWhy::CodexNotFound
+                | CatalogWhy::CodexVersionUnknown
+        )
+    }
+}
+
+/// Codex's two trust decisions for the target dir. They are kept apart because they decide
+/// different files: the folder's own `.codex/config.toml`, hooks and rules load only while
+/// `folder` is trusted; its AGENTS.md files are skipped only while `agents_md` is untrusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trust {
+    pub folder: TrustGate,
+    pub agents_md: TrustGate,
+}
+
+impl Trust {
+    /// The AGENTS.md gate is a decision of its own: another level, or an entry for another key.
+    pub fn agents_md_apart(&self) -> bool {
+        self.agents_md.level != self.folder.level
+            || (self.agents_md.set_in.is_some() && self.agents_md.key != self.folder.key)
+    }
+}
+
+/// One trust decision: its level, the `projects` key that decided it and the file that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustGate {
+    /// None = no `projects` entry decides it.
+    pub level: Option<TrustLevel>,
+    /// The `projects` key that decided it; when none did, the key Codex asks to be added.
+    pub key: String,
+    /// The config file whose `projects.<key>.trust_level` set it; None when unset.
+    pub set_in: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrustLevel {
+    Trusted,
+    Untrusted,
+}
+kebab_names!(TrustLevel { Trusted => "trusted", Untrusted => "untrusted" });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
@@ -484,6 +620,8 @@ mod tests {
             home: None,
             observed_regions: Vec::new(),
             tool_search_cause: None,
+            trust: None,
+            codex: None,
         }
     }
 
@@ -628,6 +766,167 @@ mod tests {
         );
     }
 
+    /// The public JSON stays compatible: a tree written before `trust` existed still reads, a
+    /// Claude Code tree has no `trust` key, a Codex tree's trust round-trips in this shape.
+    #[test]
+    fn trust_is_optional_in_json_and_round_trips() {
+        let mut codex = tree(Vec::new());
+        codex.agent = Agent::Codex;
+        codex.trust = Some(Trust {
+            folder: TrustGate {
+                level: Some(TrustLevel::Trusted),
+                key: "/repo".to_string(),
+                set_in: Some(PathBuf::from("/home/.codex/config.toml")),
+            },
+            agents_md: TrustGate {
+                level: None,
+                key: "/repo/child".to_string(),
+                set_in: None,
+            },
+        });
+        let json = serde_json::to_value(&codex).unwrap();
+        assert_eq!(
+            json["trust"],
+            serde_json::json!({
+                "folder": {"level": "trusted", "key": "/repo", "set_in": "/home/.codex/config.toml"},
+                "agents_md": {"level": null, "key": "/repo/child", "set_in": null}
+            })
+        );
+        let back: Tree = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, codex);
+
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("trust");
+        let read: Tree = serde_json::from_value(older).unwrap();
+        assert_eq!(read.trust, None);
+        assert_eq!(read.agent, Agent::Codex);
+
+        let claude = serde_json::to_value(tree(Vec::new())).unwrap();
+        assert!(claude.get("trust").is_none(), "{claude}");
+        assert!(claude.get("codex").is_none(), "{claude}");
+
+        // The Codex facts: optional the same way, their enums tagged.
+        codex.codex = Some(CodexFacts {
+            home: PathBuf::from("/home/.codex"),
+            model: CodexModel {
+                slug: Some("gpt-x".to_string()),
+                set_in: Some(PathBuf::from("/home/.codex/config.toml")),
+                context_window: Some(200000),
+            },
+            catalog: Catalog {
+                written_by: Some("0.160.1".to_string()),
+                lists_model: true,
+                state: CatalogState::NotUsed {
+                    why: CatalogWhy::OtherVersion {
+                        written_by: "0.160.1".to_string(),
+                        installed: "0.159.0".to_string(),
+                    },
+                },
+            },
+        });
+        let json = serde_json::to_value(&codex).unwrap();
+        assert_eq!(
+            json["codex"]["catalog"]["state"],
+            serde_json::json!({
+                "state": "not-used",
+                "why": {"kind": "other-version", "written_by": "0.160.1", "installed": "0.159.0"}
+            })
+        );
+        assert_eq!(serde_json::from_value::<Tree>(json.clone()).unwrap(), codex);
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("codex");
+        assert_eq!(serde_json::from_value::<Tree>(older).unwrap().codex, None);
+        assert_eq!(
+            serde_json::to_value(CatalogState::Used {
+                fetched_at: "t".to_string()
+            })
+            .unwrap(),
+            serde_json::json!({"state": "used", "fetched_at": "t"})
+        );
+    }
+
+    /// Every catalog state and reason on the wire, and which reasons mean Codex itself would
+    /// fetch a new catalog (`refetched`) rather than harn not knowing.
+    #[test]
+    fn catalog_states_and_reasons_have_a_fixed_wire_shape() {
+        use serde_json::json;
+        let detail = || "fetched_at is missing".to_string();
+        let whys = [
+            (CatalogWhy::NotJson, json!({"kind": "not-json"}), true),
+            (
+                CatalogWhy::Rejected { detail: detail() },
+                json!({"kind": "rejected", "detail": "fetched_at is missing"}),
+                true,
+            ),
+            (
+                CatalogWhy::UnreadShape { detail: detail() },
+                json!({"kind": "unread-shape", "detail": "fetched_at is missing"}),
+                false,
+            ),
+            (
+                CatalogWhy::CodexNotFound,
+                json!({"kind": "codex-not-found"}),
+                false,
+            ),
+            (
+                CatalogWhy::CodexVersionUnknown,
+                json!({"kind": "codex-version-unknown"}),
+                false,
+            ),
+            (
+                CatalogWhy::NoClientVersion,
+                json!({"kind": "no-client-version"}),
+                true,
+            ),
+            (
+                CatalogWhy::OtherVersion {
+                    written_by: "0.1.0".to_string(),
+                    installed: "0.2.0".to_string(),
+                },
+                json!({"kind": "other-version", "written_by": "0.1.0", "installed": "0.2.0"}),
+                true,
+            ),
+            (CatalogWhy::NoIdentity, json!({"kind": "no-identity"}), true),
+        ];
+        for (why, wire, refetched) in whys {
+            assert_eq!(serde_json::to_value(&why).unwrap(), wire, "{why:?}");
+            assert_eq!(
+                serde_json::from_value::<CatalogWhy>(wire.clone()).unwrap(),
+                why
+            );
+            assert_eq!(why.refetched(), refetched, "{why:?}");
+            let state = CatalogState::NotUsed { why: why.clone() };
+            let state_wire = json!({"state": "not-used", "why": wire});
+            assert_eq!(serde_json::to_value(&state).unwrap(), state_wire);
+            assert_eq!(
+                serde_json::from_value::<CatalogState>(state_wire).unwrap(),
+                state
+            );
+        }
+        for (state, wire) in [
+            (
+                CatalogState::Used {
+                    fetched_at: "2026-10-14T00:00:00Z".to_string(),
+                },
+                json!({"state": "used", "fetched_at": "2026-10-14T00:00:00Z"}),
+            ),
+            (CatalogState::Missing, json!({"state": "missing"})),
+            (
+                CatalogState::Elsewhere {
+                    set_in: Some(PathBuf::from("/home/.codex/config.toml")),
+                },
+                json!({"state": "elsewhere", "set_in": "/home/.codex/config.toml"}),
+            ),
+            (
+                CatalogState::Elsewhere { set_in: None },
+                json!({"state": "elsewhere", "set_in": null}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&state).unwrap(), wire, "{state:?}");
+            assert_eq!(serde_json::from_value::<CatalogState>(wire).unwrap(), state);
+        }
+    }
+
     #[test]
     fn enums_serialize_as_their_kebab_names() {
         fn check<T: Serialize + fmt::Display>(all: &[T]) {
@@ -643,6 +942,7 @@ mod tests {
         check(Mode::ALL);
         check(Layer::ALL);
         check(Scope::ALL);
+        check(TrustLevel::ALL);
         assert_eq!(Layer::ClaudeAi.as_str(), "claudeai");
         assert_eq!(Kind::McpServer.as_str(), "mcp-server");
         assert_eq!(Mode::OnDemand.as_str(), "on-demand");

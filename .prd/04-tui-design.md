@@ -238,6 +238,79 @@ Same structure with room: a `source` column (marketplace / `~/.claude` / project
 wide, the detail panel 5 lines, children shown with their kind word (`skill`, `command`, `MCP
 server`, `hook`, `agent`).
 
+## Codex (P0.5) — the same screen, Codex's words
+
+One tab per agent, Claude Code first. `Tab` / `Shift-Tab` switch; the rule under the header says
+`Tab shows Codex` (or `Tab shows Claude Code`) whenever there is a second tab — the only line a
+Claude Code frame gains — and a plain rule otherwise. Without `--agent`, an agent with no item in
+this directory gets no tab. Everything else follows the rules above; what differs is wording:
+
+- **Header line 1** names the agent and, for Codex, its trust in this folder: `repo · Codex ·
+  trusted · 9 items load before your first message` (`untrusted`, `not trusted` when unset). At 80
+  columns the trust word goes before the agent's name and before `read-only`.
+- **Notes** (`i`): the trust sentence is the first one, each claim from the gate that decides
+  it — the project `.codex/config.toml`, hooks and rules from the folder's trust, the AGENTS.md
+  files from the AGENTS.md gate: `This folder is trusted by Codex (set in ~/.codex/config.toml):
+  its .codex/config.toml, hooks, rules and AGENTS.md files load; skills load either way.` / `This
+  folder is marked untrusted for Codex (set in …): its .codex/config.toml, hooks and rules are
+  skipped; its AGENTS.md files load, by a separate entry (set in …); skills load either way.` /
+  `Codex has no trust decision for this folder: its .codex/config.toml, hooks and rules are
+  ignored; its AGENTS.md files load; skills load either way.` Tool search gets a note when there is an MCP
+  server: `Tool search is on: the model's catalog entry supports it, so MCP tools are sent only
+  when the model looks them up.` / `… off: … every MCP tool schema loads in the first request; no
+  Codex setting changes that.` Every resolver text reads `key in file` (`model in
+  ~/.codex/config.toml`), never `file#/pointer`, and codex source references stay in `harn why`.
+- **Groups**: `AGENTS.md files` (one row per file — the global one and the project chain;
+  `biggest:` calls it `AGENTS.md`), `Skill listing` (`N entries · over its budget` when the
+  2 %/10k-token budget is exceeded), `Plugins` (a plugin row is a switch; its skills, MCP servers
+  and hooks fold under it; "Turn one off and its skills, MCP servers and hooks leave next
+  session."), `Hooks`, `MCP servers`, `Rules files` (`command rules Codex reads (*.rules)`; no
+  switch, `e` edits), `Built-in blocks` (`text Codex writes itself`; `6 of 8 can be turned off`
+  when most have an `include_*` switch). Wrappers are rows of Built-in blocks with names for
+  people: `AGENTS.md wrapper` ("the heading and tags Codex puts around the AGENTS.md files"),
+  `skill listing wrapper`.
+- **Block sentences** say what the block is for: base instructions "Codex's own instructions for
+  the model, from its model catalog", permissions "tells the model its sandbox, approval policy
+  and approved commands", environment context "the working folder, shell, date and time zone",
+  multi-agent "lets the model hand work to sub-agents, with their tools", apps "about connected
+  apps; sent only when an app is reachable".
+- **What `d` does** is the item's own switch (its first knob: a hook's `[hooks.state]` entry, a
+  skill's `[[skills.config]]` entry), never a wider one that happens to sit in a narrower file
+  (`features.hooks`, the whole plugin); one sentence with the scope, the key and the file: `d turns it off for every
+  project by writing include_environment_context = false to ~/.codex/config.toml.` In a trusted
+  folder the same key goes to `.codex/config.toml`, "for this project only". The verb follows the
+  key: `leaves out the project AGENTS.md files` (`project_doc_max_bytes = 0`), `hides it`
+  (`adding an entry to skills.config`), `turns off the whole docs plugin`, `drops the whole skill
+  listing`. The card's Writes line is the TOML key as written: `~/.codex/config.toml →
+  plugins."docs@market".enabled = false`.
+- **Sizes and what can measure them.** A group with some rows of unknown size shows its known
+  part as a floor — `0.1 KB  + unmeasured`, no bar, no share — never as if the group cost only
+  that. A sentence names `harn verify --run --agent codex` only for what Codex's dump has (the
+  blocks other than the base instructions, the skill listing's fit, the AGENTS.md message); hook
+  output ("Codex's dump does not include hook output, so harn cannot measure it"), MCP tool
+  schemas ("not in Codex's dump"), rules ("inside the permissions block; harn does not measure
+  them separately") and the base instructions ("counted from the model catalog; Codex sends it
+  outside its dump") say so instead. Tool search has one note: "Tool search cannot be decided
+  from the files (…): MCP servers are shown as loading up front."
+- **`w` cards and notes** show only what is for a person: a resolver step that cites codex's
+  source or research, or is a developer's note (a lead not verified, an `[unverified]`/`[추정]`
+  tag), is cut to its human part or dropped; content hashes, hook state keys and a skill's
+  rendered listing line stay in `harn why`. The AGENTS chain reads `AGENTS.md in this folder
+  (~/2lab.ai/zbrain)`, or `AGENTS.md in ~/repo, one of the files from the project root down to
+  this folder`; a project file's `d` says what else it frees ("That frees 4.2 KB: the file and
+  the wrapper around the AGENTS.md files"). A rules file is named by its file (`default.rules`,
+  source `~/.codex`).
+- **Rows that do not load or run** (an `off:` row) say why instead of a size and offer no `d`:
+  `not approved` ("Codex runs a hook only after you approve it in codex /hooks; …", "harn cannot
+  approve it; codex /hooks does."), `off by policy` (allow_managed_hooks_only), `off, with every
+  other hook` (features.hooks = false), `off` ("Your settings turn it off (mcp_servers.old.enabled =
+  false); it does not load here.", "harn did not make that change, so o and u cannot reverse it.").
+- **No switch**: "It cannot be turned off: Codex has no setting for it; empty the file or move it."
+  (the global AGENTS.md), "… it goes when the last AGENTS.md file goes." (the AGENTS.md wrapper),
+  "… Codex has no switch for it; model_instructions_file can only replace it, and Codex strongly
+  discourages that." (base instructions).
+- `t` says `AI trim for Codex is not implemented yet; `harn trim` trims Claude Code`.
+
 ## View-model (what the renderer consumes; `src/tui/model.rs`)
 
 - `Screen { title: Title, groups: Vec<Group>, notes: Vec<Note> }`, `Group { kind: GroupKind, name,

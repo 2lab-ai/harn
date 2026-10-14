@@ -145,7 +145,7 @@ impl App {
         self.blocked.set(blocked.is_some());
         let scrolls = self.card_scrolls(cards);
         frame.render_widget(Paragraph::new(self.header(width)), head);
-        frame.render_widget(Paragraph::new(self.rule(width, None)), rule1);
+        frame.render_widget(Paragraph::new(self.rule(width, self.tab_hint())), rule1);
         let footer = self.draw_list(frame, list);
         frame.render_widget(Paragraph::new(self.rule(width, footer)), rule2);
         self.draw_panel(frame, panel, blocked.as_deref());
@@ -158,6 +158,18 @@ impl App {
                 }
             }
         }
+    }
+
+    /// With more than one agent, the rule under the header says which one Tab shows next.
+    fn tab_hint(&self) -> Option<String> {
+        if self.tabs.len() < 2 {
+            return None;
+        }
+        let next = &self.tabs[(self.active + 1) % self.tabs.len()];
+        Some(format!(
+            "Tab shows {}",
+            super::model::agent_name(next.tree.agent)
+        ))
     }
 
     fn warn(&self) -> Style {
@@ -201,13 +213,32 @@ impl App {
         } else {
             ""
         };
+        // Codex: whether it trusts this folder decides what of the project loads; it goes
+        // before the agent's name does when the line is short of room.
+        let trust = t.trust.map(|w| format!(" · {w}")).unwrap_or_default();
+        let codex_lefts = t.trust.map(|_| {
+            [
+                format!(
+                    " {} · {}{trust}{ro} · {n} items before your first message",
+                    t.dir, t.agent
+                ),
+                format!(
+                    " {} · {}{ro} · {n} items load before your first message",
+                    t.dir, t.agent
+                ),
+                format!(
+                    " {} · {}{ro} · {n} items before your first message",
+                    t.dir, t.agent
+                ),
+            ]
+        });
         let lefts = [
             format!(
-                " {} · {}{version}{ro} · {n} items load before your first message",
+                " {} · {}{version}{trust}{ro} · {n} items load before your first message",
                 t.dir, t.agent
             ),
             format!(
-                " {} · {}{ro} · {n} items load before your first message",
+                " {} · {}{trust}{ro} · {n} items load before your first message",
                 t.dir, t.agent
             ),
             format!(" {}{ro} · {n} items load before your first message", t.dir),
@@ -215,6 +246,10 @@ impl App {
             format!(" {}{ro} · {n} items", t.dir),
             format!(" {} · {n} items", t.dir),
         ];
+        let mut lefts: Vec<String> = lefts.to_vec();
+        if let Some(more) = codex_lefts {
+            lefts.splice(2..2, more);
+        }
         let lefts: Vec<String> = lefts.iter().map(|l| self.t(l)).collect();
         let (left1, right1) = spread_parts(&lefts, &total, width, self.g());
         let first = format!("{left1}{right1}");
@@ -223,7 +258,10 @@ impl App {
             .groups
             .iter()
             .filter(|g| g.kind != super::model::GroupKind::Builtin)
-            .filter_map(|g| g.bytes.map(|b| (g.kind.short(), b, g.share)))
+            .filter_map(|g| {
+                g.bytes
+                    .map(|b| (g.kind.short_for(self.tab().tree.agent), b, g.share))
+            })
             .collect();
         groups.sort_by_key(|g| std::cmp::Reverse(g.1));
         groups.truncate(4);
@@ -712,11 +750,9 @@ impl App {
                 let can_off = match row {
                     Some(r) => {
                         r.state == State::On
-                            && self.cursor_item().is_some_and(|i| {
-                                i.knobs.iter().any(|k| {
-                                    crate::plan::knob_scope(k) == Some(crate::model::Scope::Local)
-                                })
-                            })
+                            && self
+                                .cursor_item()
+                                .is_some_and(|i| super::model::default_knob(i).is_some())
                     }
                     // Entries listed elsewhere: d acts on them there.
                     None if line.as_ref().is_some_and(|l| l.listed.is_some()) => false,
@@ -1436,18 +1472,36 @@ pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
             let graphemes: Vec<&str> = word.graphemes(true).collect();
             let mut used = 0;
             let mut fit = 0;
+            // After the last `/` or `›` in reach; only without one, after another break mark
+            // (`.`, `-`, `_`, `:`): a path never splits inside a name like `.codex-plugin`. A
+            // name longer than the row is split anyway, so there the last mark of any kind wins
+            // (no row is spent on the cut).
             let mut cut = 0;
+            let mut weak = 0;
             for (i, g) in graphemes.iter().enumerate() {
                 if used + g.width() > width {
                     break;
                 }
                 used += g.width();
                 fit = i + 1;
-                if breaks_after(g) {
+                if matches!(*g, "/" | "›") {
                     cut = i + 1;
+                } else if breaks_after(g) {
+                    weak = i + 1;
                 }
             }
-            let at = if cut > 0 { cut } else { fit.max(1) };
+            let name_after_cut: usize = graphemes[cut..]
+                .iter()
+                .take_while(|g| !matches!(**g, "/" | "›"))
+                .map(|g| g.width())
+                .sum();
+            let at = if cut > 0 && (weak < cut || name_after_cut <= width) {
+                cut
+            } else if weak > 0 {
+                weak
+            } else {
+                fit.max(1)
+            };
             rows.push(graphemes[..at].concat());
             word = graphemes[at..].concat();
         }
@@ -1518,6 +1572,33 @@ mod tests {
             ["a = true   (every project)"]
         );
         assert_eq!(wrap_words("", 5), [""]);
+    }
+
+    #[test]
+    fn a_path_wraps_after_a_slash_before_any_other_mark() {
+        // The plugin card's manifest line: a `.` is in reach after the version, but a `/` is
+        // too, and a dot-directory (`.codex-plugin`) stays whole.
+        let path = "~/.codex/plugins/cache/openai-primary-runtime/documents/26.630.12135/\
+                    .codex-plugin/plugin.json";
+        for width in 70..=74 {
+            let rows = wrap_words(path, width);
+            assert_eq!(
+                rows,
+                [
+                    "~/.codex/plugins/cache/openai-primary-runtime/documents/26.630.12135/",
+                    ".codex-plugin/plugin.json"
+                ],
+                "{width}"
+            );
+        }
+        // No `/` in reach: the other marks still break a long name.
+        assert_eq!(
+            wrap_words("aaaa.bbbb-cccc_dddd", 10),
+            ["aaaa.bbbb-", "cccc_dddd"]
+        );
+        // A name after the `/` that is wider than a row gets split anyway: cutting at the `/`
+        // would only cost a row (`aa/` · `bbbb-cccc-` · `dd`), so the later mark wins.
+        assert_eq!(wrap_words("aa/bbbb-cccc-dd", 10), ["aa/bbbb-", "cccc-dd"]);
     }
 
     #[test]

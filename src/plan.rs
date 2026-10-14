@@ -452,16 +452,28 @@ pub fn knob_scope(knob: &Knob) -> Option<Scope> {
 /// The scope `harn off` writes when none is given. Claude Code: `local`. Codex has no local-only
 /// config file, and its resolver lists a knob only where the write takes effect — the target's
 /// `.codex/config.toml` (`project`) while the dir is trusted and no higher layer decides the key,
-/// `$CODEX_HOME/config.toml` (`user`) otherwise — so its default is the narrowest knob listed.
-/// An explicit scope is never widened either way (`choose_knob`).
+/// `$CODEX_HOME/config.toml` (`user`) otherwise — so its default is the narrowest scope listed
+/// for the key of `knobs[0]`, the item's own switch (`Item.knobs`: narrowest effect first). A
+/// wider switch listed after it — every hook (`features.hooks`), the whole plugin a part belongs
+/// to — is never the default because its file is narrower: a hook's own `[hooks.state]` entry
+/// lives in the user config only. An explicit scope is never widened either way (`choose_knob`).
 pub fn default_scope(item: &Item) -> Scope {
     match item_agent(item) {
-        Some(Agent::Codex) => item
-            .knobs
-            .iter()
-            .filter_map(knob_scope)
-            .min()
-            .unwrap_or(Scope::Local),
+        Some(Agent::Codex) => {
+            let own = |k: &&Knob| match (k, item.knobs.first()) {
+                (Knob::Setting { pointer, .. }, Some(Knob::Setting { pointer: first, .. })) => {
+                    pointer == first
+                }
+                _ => false,
+            };
+            item.knobs
+                .iter()
+                .filter(own)
+                .filter_map(knob_scope)
+                .min()
+                .or_else(|| item.knobs.iter().filter_map(knob_scope).min())
+                .unwrap_or(Scope::Local)
+        }
         _ => Scope::Local,
     }
 }

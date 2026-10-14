@@ -1418,6 +1418,128 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
     }
 }
 
+/// The facts the screens word themselves: the Codex home the tree was resolved with (also
+/// `CODEX_HOME`), the model and its file, and the catalog snapshot's state with why it is not
+/// used — the same facts the `model:` signal spells for the CLI.
+#[test]
+fn codex_facts_name_the_home_the_model_and_the_catalog_state() {
+    use model::{CatalogState, CatalogWhy};
+    let f = fx();
+    catalog(&f);
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let facts = |t: &Target| {
+        resolve(t, None)
+            .codex
+            .expect("a Codex tree carries its facts")
+    };
+
+    let used = facts(&ctarget(&f));
+    assert_eq!(used.home, f.codex);
+    assert_eq!(used.model.slug.as_deref(), Some("rich-model"));
+    assert_eq!(used.model.set_in, Some(f.codex.join("config.toml")));
+    assert_eq!(used.catalog.written_by.as_deref(), Some("0.160.1"));
+    assert!(used.catalog.lists_model);
+    assert_eq!(
+        used.catalog.state,
+        CatalogState::Used {
+            fetched_at: FETCHED_AT.to_string()
+        }
+    );
+
+    let refused = |t: &Target| match facts(t).catalog.state {
+        CatalogState::NotUsed { why } => why,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(refused(&target(&f)), CatalogWhy::CodexNotFound);
+    assert_eq!(
+        refused(&with_codex(&f, target(&f), "0.159.0")),
+        CatalogWhy::OtherVersion {
+            written_by: "0.160.1".to_string(),
+            installed: "0.159.0".to_string()
+        }
+    );
+    assert!(!CatalogWhy::CodexNotFound.refetched());
+
+    // `CODEX_HOME` elsewhere is the home the facts name.
+    let elsewhere = f.root.join("elsewhere");
+    write(&elsewhere.join("config.toml"), "model = \"plain-model\"\n");
+    let mut t = ctarget(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), elsewhere.display().to_string());
+    let moved = facts(&t);
+    assert_eq!(moved.home, elsewhere);
+    assert_eq!(moved.model.set_in, Some(elsewhere.join("config.toml")));
+    assert_eq!(moved.catalog.state, CatalogState::Missing);
+}
+
+/// Tool search is undecided exactly when harn cannot use the model's catalog entry — an
+/// accepted snapshot that lists a set model always decides it (a missing
+/// `supports_search_tool` is false) — so the TUI's tool-search note can point to the model note
+/// for why. Checked across the states the facts name.
+#[test]
+fn tool_search_is_undecided_exactly_when_the_catalog_entry_cannot_be_used() {
+    use model::CatalogState;
+    let mcp = "[mcp_servers.github]\ncommand = \"gh-mcp\"\n";
+    let entry_usable = |t: &Tree| {
+        let c = t.codex.as_ref().expect("facts");
+        matches!(c.catalog.state, CatalogState::Used { .. })
+            && c.catalog.lists_model
+            && c.model.slug.is_some()
+    };
+    // Accepted and listed: decided, whatever the entry says about search.
+    for (said, decided) in [(Some(true), true), (Some(false), false), (None, false)] {
+        let f = fx();
+        let mut m = json!({"slug": "m"});
+        if let Some(v) = said {
+            m["supports_search_tool"] = json!(v);
+        }
+        cache(&f, json!([m]));
+        user_config(&f, None, &format!("model = \"m\"\n{mcp}"));
+        let t = resolve(&ctarget(&f), None);
+        assert!(entry_usable(&t), "{said:?}");
+        assert_eq!(t.tool_search, Some(decided), "{said:?}");
+    }
+    // Every way the entry cannot be used: undecided.
+    let f = fx();
+    cache(&f, json!([{"slug": "m", "supports_search_tool": true}]));
+    let cases: Vec<(&str, String, Target)> = vec![
+        ("no model", mcp.to_string(), ctarget(&f)),
+        (
+            "model not listed",
+            format!("model = \"other\"\n{mcp}"),
+            ctarget(&f),
+        ),
+        ("model not text", format!("model = 3\n{mcp}"), ctarget(&f)),
+        (
+            "no codex on PATH",
+            format!("model = \"m\"\n{mcp}"),
+            target(&f),
+        ),
+        (
+            "another codex",
+            format!("model = \"m\"\n{mcp}"),
+            with_codex(&f, target(&f), "0.159.0"),
+        ),
+        (
+            "catalog elsewhere",
+            format!("model = \"m\"\nmodel_catalog_json = \"/srv/catalog.json\"\n{mcp}"),
+            ctarget(&f),
+        ),
+    ];
+    for (case, config, t) in cases {
+        user_config(&f, None, &config);
+        let tree = resolve(&t, None);
+        assert!(!entry_usable(&tree), "{case}");
+        assert_eq!(tree.tool_search, None, "{case}");
+    }
+    // No snapshot at all.
+    std::fs::remove_file(f.codex.join("models_cache.json")).unwrap();
+    user_config(&f, None, &format!("model = \"m\"\n{mcp}"));
+    let tree = resolve(&ctarget(&f), None);
+    assert!(!entry_usable(&tree));
+    assert_eq!(tree.tool_search, None);
+}
+
 #[test]
 fn without_codex_on_path_the_cache_is_not_trusted() {
     const NOT_FOUND: &str =
@@ -1582,6 +1704,24 @@ fn no_codex_home_is_an_empty_tree_with_a_warning() {
         "{:?}",
         t.warnings
     );
+    // The facts still name the home; nothing else could be read, so the catalog is missing and
+    // the model is the target's own, when it names one.
+    let facts = t.codex.as_ref().expect("a Codex tree carries its facts");
+    assert_eq!(facts.home, f.root.join("missing"));
+    assert_eq!(facts.catalog.state, model::CatalogState::Missing);
+    assert_eq!(facts.catalog.written_by, None);
+    assert!(!facts.catalog.lists_model);
+    assert_eq!(facts.model.slug, None);
+    assert_eq!(facts.model.set_in, None);
+    te.model = Some("gpt-x".to_string());
+    te.context_window = Some(4000);
+    let facts = resolve(&te, None).codex.expect("facts");
+    assert_eq!(facts.model.slug.as_deref(), Some("gpt-x"));
+    assert_eq!(facts.model.context_window, Some(4000));
+    assert_eq!(
+        resolve(&target(&f), None).codex.map(|c| c.home),
+        Some(f.codex.clone())
+    );
 }
 
 // Review round 1 (C1): each test below fails on 393df03 except where it says it pins upstream.
@@ -1629,9 +1769,224 @@ fn review_trusted_project_layer_retrusts_a_subdir_for_agents_md_only() {
     let s = signal(&t, "trust: untrusted");
     assert!(
         s.contains(&format!(
-            "AGENTS.md gate: projects.\"{}\".trust_level in {}",
+            "AGENTS.md gate: trusted (projects.\"{}\".trust_level in {})",
             child.display(),
             f.repo.join(".codex/config.toml").display()
+        )),
+        "{s}"
+    );
+}
+
+/// The trust signal says what each gate decides: project config, hooks and rules from the
+/// config gate, the project AGENTS.md files from the AGENTS.md gate, with the second gate's own
+/// level when the two differ. Built the four ways the gates can stand, from files only: a project
+/// layer is enabled by its own dir's decision, so an enabled ancestor layer can set the target's
+/// AGENTS.md entry while the target's own config gate stays unset.
+#[test]
+fn the_trust_signal_reads_each_gate_for_what_it_decides() {
+    let claims = |config: &str, agents: &str| {
+        format!(
+            "project .codex/config.toml, hooks and rules {config}; project AGENTS.md files {agents}; skills load either way"
+        )
+    };
+    // Same level: one gate, no second entry.
+    let f = fx();
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target(&f), None);
+    let s = signal(&t, "trust: trusted");
+    assert!(s.ends_with(&claims("load", "load")), "{s}");
+    assert!(!s.contains("AGENTS.md gate"), "{s}");
+
+    // The config gate untrusted, the AGENTS.md gate re-trusted by the repo's own layer.
+    let f = fx();
+    let child = f.repo.join("child");
+    write(&child.join("AGENTS.md"), "child doc\n");
+    write(
+        &f.repo.join(".codex/config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            child.display()
+        ),
+    );
+    write(
+        &f.codex.join("config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            f.repo.display(),
+            child.display()
+        ),
+    );
+    let t = resolve(&target_at(&f, &child), None);
+    let s = signal(&t, "trust: untrusted");
+    assert!(s.contains(&claims("are skipped", "load")), "{s}");
+    assert!(s.contains("· AGENTS.md gate: trusted ("), "{s}");
+    assert!(!project_rows(&t).is_empty(), "the AGENTS.md files load");
+
+    // The config gate trusted (the repo's entry), the AGENTS.md gate untrusted by the repo's
+    // layer: project config loads, the AGENTS.md files do not.
+    let f = fx();
+    let child = f.repo.join("child");
+    write(&child.join("AGENTS.md"), "child doc\n");
+    write(
+        &child.join(".codex/config.toml"),
+        "include_environment_context = false\n",
+    );
+    write(
+        &f.repo.join(".codex/config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            child.display()
+        ),
+    );
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target_at(&f, &child), None);
+    let s = signal(&t, "trust: trusted");
+    assert!(s.contains(&claims("load", "are skipped")), "{s}");
+    assert!(s.contains("· AGENTS.md gate: untrusted ("), "{s}");
+    assert!(
+        project_rows(&t).is_empty(),
+        "the AGENTS.md files are skipped"
+    );
+    assert!(
+        find(&t, "/environment_context").is_none(),
+        "the child's config layer loads"
+    );
+
+    // The config gate unset (no entry for the target, its project root or its repo), the
+    // AGENTS.md gate untrusted by an enabled layer between them.
+    let f = fx();
+    let mid = f.repo.join("mid");
+    let leaf = mid.join("leaf");
+    write(&leaf.join("AGENTS.md"), "leaf doc\n");
+    write(
+        &mid.join(".codex/config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            leaf.display()
+        ),
+    );
+    user_config(&f, Some((&mid, "trusted")), "");
+    let t = resolve(&target_at(&f, &leaf), None);
+    let s = signal(&t, "trust: unset");
+    assert!(s.contains(&claims("are ignored", "are skipped")), "{s}");
+    assert!(s.contains("· AGENTS.md gate: untrusted ("), "{s}");
+    assert!(
+        project_rows(&t).is_empty(),
+        "the AGENTS.md files are skipped"
+    );
+}
+
+/// The fifth way the gates stand: no decision for the folder, its AGENTS.md files trusted by an
+/// enabled layer above it. The folder's own config is ignored, its AGENTS.md files load, and the
+/// tree says where the trusted gate was set — in its facts and in its signal.
+#[test]
+fn an_unset_folder_with_a_trusted_agents_md_gate_ignores_its_config_and_loads_its_agents_md() {
+    let f = fx();
+    let mid = f.repo.join("mid");
+    let leaf = mid.join("leaf");
+    write(&leaf.join("AGENTS.md"), "leaf doc\n");
+    write(
+        &leaf.join(".codex/config.toml"),
+        "include_environment_context = false\n",
+    );
+    let mid_file = mid.join(".codex/config.toml");
+    write(
+        &mid_file,
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            leaf.display()
+        ),
+    );
+    user_config(&f, Some((&mid, "trusted")), "");
+    let t = resolve(&target_at(&f, &leaf), None);
+
+    let trust = t
+        .trust
+        .as_ref()
+        .expect("a Codex tree carries its trust facts");
+    assert_eq!(trust.folder.level, None);
+    assert_eq!(trust.folder.set_in, None);
+    assert_eq!(trust.agents_md.level, Some(model::TrustLevel::Trusted));
+    assert_eq!(trust.agents_md.key, leaf.display().to_string());
+    assert_eq!(trust.agents_md.set_in.as_deref(), Some(mid_file.as_path()));
+    assert!(trust.agents_md_apart());
+
+    let s = signal(&t, "trust: unset");
+    assert!(
+        s.contains(
+            "project .codex/config.toml, hooks and rules are ignored; project AGENTS.md files load"
+        ),
+        "{s}"
+    );
+    assert!(
+        s.ends_with(&format!(
+            " · AGENTS.md gate: trusted (projects.\"{}\".trust_level in {})",
+            leaf.display(),
+            mid_file.display()
+        )),
+        "{s}"
+    );
+    assert!(
+        find(&t, "/environment_context").is_some(),
+        "the folder's own config is ignored"
+    );
+    assert!(
+        project_rows(&t)
+            .iter()
+            .any(|i| i.origin.path.as_deref() == Some(leaf.join("AGENTS.md").as_path())),
+        "the folder's AGENTS.md loads: {:?}",
+        project_rows(&t).iter().map(|i| &i.id).collect::<Vec<_>>()
+    );
+}
+
+/// Each gate's file is carried as a path, not cut out of `<file>#<pointer>`: a `#` in the Codex
+/// home and in the repo dir stays in the file (and in the signal).
+#[test]
+fn trust_gate_files_keep_a_hash_in_their_path() {
+    let f = fx();
+    let codex_home = f.root.join("co#dex");
+    let repo = f.root.join("re#po");
+    let child = repo.join("child");
+    write(&repo.join(".git/HEAD"), "ref: refs/heads/main\n");
+    write(&child.join("AGENTS.md"), "child doc\n");
+    let entry = |dir: &Path, level: &str| {
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"{level}\"\n",
+            dir.display()
+        )
+    };
+    let repo_file = repo.join(".codex/config.toml");
+    let user_file = codex_home.join("config.toml");
+    write(&repo_file, &entry(&child, "trusted"));
+    write(
+        &user_file,
+        &format!("{}{}", entry(&repo, "trusted"), entry(&child, "untrusted")),
+    );
+    let mut target = target_at(&f, &child);
+    target
+        .env
+        .insert("CODEX_HOME".to_string(), codex_home.display().to_string());
+    let t = resolve(&target, None);
+
+    let trust = t.trust.as_ref().expect("trust facts");
+    assert_eq!(trust.folder.level, Some(model::TrustLevel::Untrusted));
+    assert_eq!(trust.folder.set_in.as_deref(), Some(user_file.as_path()));
+    assert_eq!(trust.agents_md.level, Some(model::TrustLevel::Trusted));
+    assert_eq!(trust.agents_md.set_in.as_deref(), Some(repo_file.as_path()));
+    let s = signal(&t, "trust: untrusted");
+    assert!(
+        s.starts_with(&format!(
+            "trust: untrusted (projects.\"{}\".trust_level in {}): ",
+            child.display(),
+            user_file.display()
+        )),
+        "{s}"
+    );
+    assert!(
+        s.ends_with(&format!(
+            " · AGENTS.md gate: trusted (projects.\"{}\".trust_level in {})",
+            child.display(),
+            repo_file.display()
         )),
         "{s}"
     );

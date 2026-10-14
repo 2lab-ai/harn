@@ -6,7 +6,7 @@ A fresh Claude Code session in one real directory sends a 332 KB first request b
 2-byte instruction. `harn` lists every item behind those bytes without starting a session, one
 tree per agent: its size, where it came from, whether it is always loaded or only advertised, and
 the agent's official switch that turns it off. Every change it makes is reversible byte for byte.
-Claude Code today, Codex CLI next. One binary for macOS and Linux.
+Claude Code and the Codex CLI. One binary for macOS and Linux.
 
 ## Install
 
@@ -46,7 +46,7 @@ it executable and put it on your `PATH` as `harn`. A preview release is publishe
 
 | Command | What it does |
 |---|---|
-| `harn [DIR]` | The interactive view on a terminal; the table when piped. `DIR` defaults to the current directory. |
+| `harn [DIR]` | The interactive view on a terminal; the table when piped. `DIR` defaults to the current directory. Every agent gets its own tab (Claude Code first; `Tab` switches) or table; `--agent claude-code` or `--agent codex` picks one. |
 | `harn trim` | The AI picks what to turn off, shows the plan, applies on `y`. Journaled; `harn undo` puts it back. |
 | `harn report --html harn.html` | The same picture as a shareable read-only page. |
 | `harn verify --run` | Measures one real session: starts the agent once, runs your hooks and MCP servers, may cost one model request. |
@@ -65,7 +65,32 @@ row in sentences: where it comes from, what `d` would turn off and for whom, wha
 | `i` · `?` · `q` | notes · every key · quit |
 
 The key bar shows only the keys valid now. `--readonly` says so in the header and leaves `d`, `o`,
-`u` and `e` out.
+`u` and `e` out. With two agents the rule under the header says which one `Tab` shows next; an
+agent with nothing in this directory (Codex never ran on this machine) gets no tab.
+
+## Codex
+
+`harn --agent codex [DIR]` shows what the Codex CLI loads in `DIR`: the AGENTS.md files (your
+`~/.codex/AGENTS.md` and the project's, root to `DIR`, under one 32 KiB cap), the skill listing,
+plugins with their skills, MCP servers and hooks, hooks, MCP servers, rules files and the blocks
+Codex writes itself (base instructions, permissions, environment, …). The header says whether Codex
+trusts the folder, because that decides whether the project's `.codex/config.toml`, hooks and
+rules load at all; `i` explains it.
+
+- harn reads `$CODEX_HOME` (default `~/.codex`): `config.toml` and the profile it names,
+  `/etc/codex`, the trusted project's `.codex/config.toml`, `models_cache.json` (for the model's
+  base instructions, context window and tool search), AGENTS files, skills, plugins, hooks and
+  rules. It never starts `codex`.
+- `d` writes the item's own Codex config key (a hook's `[hooks.state]` entry, a skill's
+  `[[skills.config]]` entry, a block's `include_*` key — never a wider switch such as
+  `features.hooks`) with `toml_edit`, comments and order kept, in the narrowest file where Codex
+  reads it: the folder's `.codex/config.toml` when Codex trusts the folder (this project only),
+  else `~/.codex/config.toml` (every project). The card names the file and the key
+  (`include_environment_context = false`, `plugins."x@y".enabled = false`,
+  `hooks.state."…".enabled = false`, a `[[skills.config]]` entry). `u` restores it byte for byte.
+- `harn why`, `off`, `on`, `undo`, `brief`, `apply` and `report --html` work on the Codex tree;
+  `harn off` without `--scope` uses the same file as `d`. `harn trim --agent codex` is not
+  implemented yet; `harn verify --agent codex` is in progress.
 
 ## How it works
 
@@ -76,7 +101,8 @@ The key bar shows only the keys valid now. `--readonly` says so in the header an
   hook output, MCP tool schemas) reads `unmeasured` until `harn verify --run` measures a real
   session, so the screen's total covers only what files can size.
 - Turns things off only through the agent's official switches: a settings key, written to
-  `.claude/settings.local.json` by default (this project only); never a wider scope silently.
+  `.claude/settings.local.json` by default for Claude Code (this project only), and for Codex to
+  the narrowest `config.toml` where the key takes effect; never a wider scope silently.
 - Snapshots the file before every write and journals the change (`harn history`). `harn undo`, or
   `u` on the screen, restores the file byte for byte.
 - `--readonly` refuses every write and every active verify (exit 3).
@@ -113,8 +139,10 @@ Output flags:
 
 ## Status
 
-P0 for the Claude Code chain is shipped on `main`; preview builds install via the tap. Next: the
-Codex CLI resolver (P0.5). Open follow-ups: https://github.com/2lab-ai/harn/issues.
+P0 for the Claude Code chain is shipped on `main`; preview builds install via the tap. P0.5 (the
+Codex CLI): the resolver, its config switches and every surface above are on `main`; checking the
+Codex tree against a real Codex session (`harn verify --agent codex`) is in progress. Open
+follow-ups: https://github.com/2lab-ai/harn/issues.
 
 ## Development
 
