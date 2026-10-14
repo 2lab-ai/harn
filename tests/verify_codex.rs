@@ -1720,7 +1720,7 @@ const SYS_PLUGIN: &str = "- plugin-creator: Create plugins. (file: r2/plugin-cre
 /// The resolver's signal on a `.system` row (`src/resolve/codex/skills.rs`).
 fn bundled_signal() -> String {
     format!(
-        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; codex 0.160.1 writes its own copies there when they differ, so this skill and its listing line can change when it starts"
     )
 }
 

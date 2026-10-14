@@ -573,6 +573,13 @@ fn bundled_enabled_false_removes_the_system_skills() {
         .expect("bundled knob");
     // `.system` is not walked as part of `~/.codex/skills` (hidden dirs are pruned).
     assert_eq!(skill_ids(&t).len(), 2);
+    // One bundled skill: the note says so in the singular.
+    assert!(
+        t.signals.iter().any(|s| s.starts_with("bundled skills:")
+            && s.contains(", so this skill and its listing line can change when it starts.")),
+        "{:?}",
+        t.signals
+    );
 
     let after = resolve(&target(&f), Some(&overlay_of(bundled)));
     assert_eq!(skill_ids(&after), ["codex/skill/user/notes"]);
@@ -624,11 +631,9 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
     skill(&f.codex.join("skills"), "notes", "Keep notes.");
     user_config(&f, "");
     let signal = format!(
-        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; codex 0.160.1 writes its own copies there when they differ, so this skill and its listing line can change when it starts"
     );
-    let note = format!(
-        "bundled skills: ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so the presence and listing lines of its 3 skills are confirmed by `harn verify --run --agent codex`"
-    );
+    let note = "bundled skills: ~/.codex/skills/.system holds Codex's built-in skills as the last Codex that started on this machine wrote them (skills/src/lib.rs:59-121); codex 0.160.1 writes its own copies there when they differ, so these 3 skills and their listing lines can change when it starts. `harn verify --run --agent codex` shows the ones Codex lists".to_string();
     let t = resolve(&ctarget(&f), None);
     // The table names the bundled root (`r1`, after the user root), and the framing says so.
     let framing = row(&t, "codex/system-prompt/builtin/skills_instructions");
@@ -673,7 +678,7 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
     let r = row(&t, "codex/skill/builtin/imagegen");
     assert!(
         r.signal.as_deref().is_some_and(|s| s.contains(
-            "; no codex is on PATH; the codex that runs replaces it at start when its set's fingerprint differs, so"
+            "; no codex is on PATH; the codex that runs writes its own copies there when they differ, so"
         )),
         "{:?}",
         r.signal

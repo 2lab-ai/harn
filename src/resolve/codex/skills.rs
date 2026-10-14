@@ -77,7 +77,7 @@ pub const BUNDLED_SKILL: &str = "bundled-skill:";
 
 /// What the `.system` folder holds, after its path; shared by the rows' signal, the tree note and
 /// verify's reasons.
-pub const BUNDLED_SKILLS_WHY: &str = "holds the system skills of the last codex that installed its set there (a codex replaces it with its own embedded set when that set's fingerprint differs from the folder's marker, skills/src/lib.rs:59-121)";
+pub const BUNDLED_SKILLS_WHY: &str = "holds Codex's built-in skills as the last Codex that started on this machine wrote them (skills/src/lib.rs:59-121)";
 
 /// The `origin.why` prefix under which the framing row records each line of the roots table it
 /// predicts (`` - `rN` = `<dir>` ``).
@@ -1228,9 +1228,9 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
                 knobs.extend(bundled_knob.iter().cloned());
                 item.origin.why.extend(bundled_bad.clone());
                 item.signal = Some(format!(
-                    "{BUNDLED_SKILL} {} {BUNDLED_SKILLS_WHY}; {}, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`",
+                    "{BUNDLED_SKILL} {} {BUNDLED_SKILLS_WHY}; {}, so this skill and its listing line can change when it starts",
                     ctx.display(&ctx.codex_home.join("skills/.system")),
-                    installs_at_start(ctx)
+                    writes_at_start(ctx)
                 ));
             }
             _ => {}
@@ -1290,18 +1290,13 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
     out
 }
 
-/// Which codex replaces the `.system` folder at start, as far as harn knows.
-fn installs_at_start(ctx: &Ctx) -> String {
+/// Which codex writes its copies into the `.system` folder when it starts, as far as harn knows.
+fn writes_at_start(ctx: &Ctx) -> String {
+    let writes = "writes its own copies there when they differ";
     match &ctx.installed {
-        Installed::Version(v) => {
-            format!("the installed codex {v} replaces it at start when its set's fingerprint differs")
-        }
-        Installed::Unversioned => {
-            "the installed codex (version unknown) replaces it at start when its set's fingerprint differs".to_string()
-        }
-        Installed::NotFound => {
-            "no codex is on PATH; the codex that runs replaces it at start when its set's fingerprint differs".to_string()
-        }
+        Installed::Version(v) => format!("codex {v} {writes}"),
+        Installed::Unversioned => format!("the installed codex (version unknown) {writes}"),
+        Installed::NotFound => format!("no codex is on PATH; the codex that runs {writes}"),
     }
 }
 
@@ -1318,11 +1313,15 @@ pub(crate) fn bundled_note(ctx: &Ctx, items: &[Item]) -> Option<String> {
         })
         .count();
     (rows > 0).then(|| {
+        let these = if rows == 1 {
+            "this skill and its listing line".to_string()
+        } else {
+            format!("these {rows} skills and their listing lines")
+        };
         format!(
-            "bundled skills: {} {BUNDLED_SKILLS_WHY}; {}, so the presence and listing lines of its {rows} skill{} are confirmed by `harn verify --run --agent codex`",
+            "bundled skills: {} {BUNDLED_SKILLS_WHY}; {}, so {these} can change when it starts. `harn verify --run --agent codex` shows the ones Codex lists",
             ctx.display(&ctx.codex_home.join("skills/.system")),
-            installs_at_start(ctx),
-            if rows == 1 { "" } else { "s" }
+            writes_at_start(ctx),
         )
     })
 }
