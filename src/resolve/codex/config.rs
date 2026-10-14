@@ -20,13 +20,20 @@
 //! cloud bundle, thread config layers, macOS MDM managed preferences (`loader:448-465`).
 //!
 //! Every file is read through [`Fs`] (`RemovePath` hides it) and viewed as JSON with the overlay's
-//! `SetJson` patches applied, so `plan` computes freed bytes by re-resolving: a patch on a missing
-//! file reads as `{}` plus the patch, the way `harn off` would create it. A JSON `null` written by
-//! a patch reads as "key absent" (TOML has no null). A file that is not UTF-8 is unreadable, as it
-//! is to codex (`file-system/src/lib.rs:650-659`). A non-finite float (`nan`, `inf`) has no JSON
-//! form: its key stays set — no lower layer shows through — but unreadable as any type
-//! ([`Lookup::Unreadable`]; [`Config::get`] hands it out as JSON `null`, which no typed reader
-//! accepts). The list is taken after the overlay, so a patch that replaces the value clears it.
+//! `SetJson` patches applied, so `plan` computes freed bytes by re-resolving. Every non-null patch
+//! goes through the writer itself ([`writers::patch_toml`]) and its output is parsed exactly like
+//! an unpatched file, so the re-resolve reads the very bytes `harn off` would write (quoted keys,
+//! `[[…]]` appends, a missing file created) and the non-finite list below is recomputed from them.
+//! A patch the writer refuses (a file that does not parse or is not UTF-8, a path through a
+//! scalar, an integer past i64) fails the resolve: the plan cannot be applied, so its freed bytes
+//! are unknown, never a guess. The one exception is a top-level `null` patch, which no writer
+//! writes (TOML has none) and no knob uses: it is applied to the JSON view after the others and
+//! reads as "key absent". A file that is not UTF-8 is unreadable, as it is to codex
+//! (`file-system/src/lib.rs:650-659`); it is never decoded lossily. A non-finite float (`nan`,
+//! `inf`) has no JSON form: its key stays set — no lower layer shows through — but unreadable as
+//! any type ([`Lookup::Unreadable`]; [`Config::get`] hands it out as JSON `null`, which no typed
+//! reader accepts). The list is taken after the overlay, so a patch that replaces the value
+//! clears it.
 //!
 //! Trust (`projects."<path>".trust_level`):
 //! - a project layer in dir `D` is enabled iff the first entry found for `D`, else for the project
@@ -43,6 +50,8 @@
 
 use crate::model::{Overlay, OverlayOp};
 use crate::resolve::claude::fs::{self, Fs};
+use crate::writers;
+use anyhow::Context;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -223,37 +232,63 @@ impl Reader<'_> {
         self.patches.iter().any(|(file, _, _)| *file == norm)
     }
 
-    fn read(&self, path: &Path) -> Toml {
+    /// `path` as JSON with its patches applied (module docs): the writer's output for every
+    /// non-null patch, parsed strictly like an unpatched file, then the `null` ones on the JSON
+    /// view. Err = the writer refuses a patch.
+    fn read(&self, path: &Path) -> anyhow::Result<Toml> {
         let patches: Vec<&(PathBuf, String, Value)> = if self.patches.is_empty() {
             Vec::new()
         } else {
             let norm = fs::normalize(path);
             self.patches.iter().filter(|(f, _, _)| *f == norm).collect()
         };
-        let (mut value, non_finite) = match self.fs.read(path) {
-            Some(bytes) => match std::str::from_utf8(&bytes) {
-                Ok(text) => match parse(text) {
-                    Ok(parsed) => parsed,
-                    Err(e) => return Toml::Invalid(e),
-                },
-                Err(e) => return Toml::NotUtf8(format!("not UTF-8: {e}")),
-            },
-            None if !patches.is_empty() && self.fs.is_file(path) => {
-                (Value::Object(Map::new()), Vec::new())
-            }
-            None => return Toml::Missing,
+        let bytes = match self.fs.read(path) {
+            Some(bytes) => Some(bytes),
+            // A file the patch creates.
+            None if !patches.is_empty() && self.fs.is_file(path) => None,
+            None => return Ok(Toml::Missing),
         };
-        let mut non_finite = non_finite;
-        for (_, pointer, patch) in patches {
-            fs::set_pointer(&mut value, pointer, patch.clone());
+        let (nulls, sets): (Vec<_>, Vec<_>) =
+            patches.into_iter().partition(|(_, _, v)| v.is_null());
+        let text = if sets.is_empty() {
+            match &bytes {
+                Some(bytes) => match std::str::from_utf8(bytes) {
+                    Ok(text) => text.to_string(),
+                    Err(e) => return Ok(Toml::NotUtf8(format!("not UTF-8: {e}"))),
+                },
+                None => String::new(),
+            }
+        } else {
+            let sets: Vec<(String, Value)> = sets
+                .into_iter()
+                .map(|(_, pointer, value)| (pointer.clone(), value.clone()))
+                .collect();
+            // The writer refuses a file that is not UTF-8 or not TOML, like any other refusal.
+            let written = writers::patch_toml(bytes.as_deref(), &sets)
+                .with_context(|| path.display().to_string())?;
+            String::from_utf8(written).context("the TOML writer wrote UTF-8")?
+        };
+        // The same strict parse as an unpatched file: non-finite floats left after the writer's
+        // patches are listed again from the patched document.
+        let (mut value, mut non_finite) = match parse(&text) {
+            Ok(parsed) => parsed,
+            Err(e) => return Ok(Toml::Invalid(e)),
+        };
+        for (_, pointer, null) in nulls {
+            fs::set_pointer(&mut value, pointer, null.clone());
             non_finite.retain(|(u, _)| !overwrites(pointer, u));
         }
-        Toml::Ok(value, non_finite)
+        Ok(Toml::Ok(value, non_finite))
     }
 
     /// A non-project layer: missing → None; invalid → a warning (Codex refuses to start).
-    fn layer(&self, source: Source, path: &Path, warnings: &mut Vec<String>) -> Option<LayerFile> {
-        match self.read(path) {
+    fn layer(
+        &self,
+        source: Source,
+        path: &Path,
+        warnings: &mut Vec<String>,
+    ) -> anyhow::Result<Option<LayerFile>> {
+        Ok(match self.read(path)? {
             Toml::Ok(value, non_finite) if value.is_object() => {
                 warn_non_finite(path, &non_finite, warnings);
                 Some(LayerFile {
@@ -272,12 +307,13 @@ impl Reader<'_> {
                 ));
                 None
             }
-        }
+        })
     }
 }
 
-/// `set_pointer(patch)` replaces the value at `unreadable`: the same pointer, a parent of it, or
-/// a child of it (descending turns the scalar into a table).
+/// A `null` patch at `patch` (`set_pointer` on the JSON view; every other patch is re-parsed from
+/// the writer's output) replaces the value at `unreadable`: the same pointer, a parent of it, or a
+/// child of it (descending turns the scalar into a table).
 fn overwrites(patch: &str, unreadable: &str) -> bool {
     patch.is_empty()
         || patch == unreadable
@@ -379,12 +415,14 @@ pub(crate) struct Paths<'a> {
 }
 
 impl Config {
+    /// The layers as Codex stacks them. Err only when an overlay patch is one the writer refuses
+    /// (module docs); a resolve without an overlay never fails here.
     pub fn load(
         fs: &Fs,
         overlay: Option<&Overlay>,
         paths: &Paths,
         warnings: &mut Vec<String>,
-    ) -> Config {
+    ) -> anyhow::Result<Config> {
         let mut patches = Vec::new();
         for op in overlay.map(|o| o.ops.as_slice()).unwrap_or_default() {
             if let OverlayOp::SetJson {
@@ -406,9 +444,9 @@ impl Config {
             unreadable: Vec::new(),
         }];
         let system_file = paths.system_dir.join("config.toml");
-        layers.extend(reader.layer(Source::System, &system_file, warnings));
+        layers.extend(reader.layer(Source::System, &system_file, warnings)?);
         let user_file = paths.codex_home.join("config.toml");
-        layers.extend(reader.layer(Source::User, &user_file, warnings));
+        layers.extend(reader.layer(Source::User, &user_file, warnings)?);
         if let Some(name) = paths.profile {
             let profile_file = paths.codex_home.join(format!("{name}.config.toml"));
             if let Some(user) = layers.iter().find(|l| l.source == Source::User) {
@@ -432,11 +470,11 @@ impl Config {
                     profile_file.display()
                 ));
             }
-            layers.extend(reader.layer(Source::Profile, &profile_file, warnings));
+            layers.extend(reader.layer(Source::Profile, &profile_file, warnings)?);
         }
         let managed_file = paths.system_dir.join("managed_config.toml");
         let managed: Vec<LayerFile> = reader
-            .layer(Source::Managed, &managed_file, warnings)
+            .layer(Source::Managed, &managed_file, warnings)?
             .into_iter()
             .collect();
 
@@ -486,7 +524,7 @@ impl Config {
                 ),
             });
             let mut unreadable = Vec::new();
-            let mut value = match reader.read(&config_file) {
+            let mut value = match reader.read(&config_file)? {
                 Toml::Ok(v, non_finite) if v.is_object() => {
                     if disabled.is_none() {
                         warn_non_finite(&config_file, &non_finite, warnings);
@@ -558,7 +596,7 @@ impl Config {
                 layer.at("/profile")
             ));
         }
-        config
+        Ok(config)
     }
 
     /// The effective value at `pointer` and the layer that set it: the highest enabled layer
@@ -793,6 +831,7 @@ pub(crate) fn repo_root(fs: &Fs, dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Refused;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -834,7 +873,8 @@ mod tests {
                 profile,
             },
             &mut warnings,
-        );
+        )
+        .unwrap();
         (config, warnings)
     }
 
@@ -855,6 +895,244 @@ mod tests {
         );
         assert!(non_finite.is_empty());
         assert!(parse("a = ").is_err());
+    }
+
+    fn load_with(root: &Path, overlay: Option<&Overlay>) -> anyhow::Result<Config> {
+        Config::load(
+            &Fs::new(overlay),
+            overlay,
+            &Paths {
+                codex_home: &root.join("home/.codex"),
+                system_dir: &root.join("etc/codex"),
+                dir: &root.join("repo"),
+                profile: None,
+            },
+            &mut Vec::new(),
+        )
+    }
+
+    fn sets_on(file: &Path, sets: &[(&str, Value)]) -> Overlay {
+        Overlay {
+            ops: sets
+                .iter()
+                .map(|(pointer, value)| OverlayOp::SetJson {
+                    file: file.to_path_buf(),
+                    pointer: pointer.to_string(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn user_layer(root: &Path, overlay: Option<&Overlay>) -> Value {
+        load_with(root, overlay)
+            .unwrap()
+            .layers
+            .into_iter()
+            .find(|l| l.source == Source::User)
+            .map(|l| l.value)
+            .unwrap_or(Value::Null)
+    }
+
+    /// The knobs C2/C3 write (quoted plugin keys, `[[skills.config]]` appends, hook state keys
+    /// with `/`, keys with `.`), set through the overlay and through the writer on disk: the
+    /// re-resolve sees exactly what the write leaves.
+    #[test]
+    fn overlay_reads_what_the_writer_writes() {
+        let t = tmp();
+        let root = &t.0;
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        let file = root.join("home/.codex/config.toml");
+        write(
+            &file,
+            "# mine\nmodel = \"m\" # pinned\n\n[plugins.\"a@b\"]\nenabled = true\n\n[[skills.config]]\nname = \"keep\"\nenabled = false\n",
+        );
+        let sets = [
+            ("/plugins/x@y/enabled", json!(false)),
+            ("/plugins/a@b/enabled", json!(false)),
+            (
+                "/skills/config/-",
+                json!({"path": "/s/one/SKILL.md", "enabled": false}),
+            ),
+            (
+                "/skills/config/-",
+                json!({"path": "/s/two/SKILL.md", "enabled": false}),
+            ),
+            (
+                "/hooks/state/~1abs~1hooks.json:session_start:0:0/enabled",
+                json!(false),
+            ),
+            ("/mcp_servers/srv.v2/enabled", json!(false)),
+        ];
+        let overlay = Overlay {
+            ops: sets
+                .iter()
+                .map(|(pointer, value)| OverlayOp::SetJson {
+                    file: file.clone(),
+                    pointer: pointer.to_string(),
+                    value: value.clone(),
+                })
+                .collect(),
+        };
+        let virtual_view = user_layer(root, Some(&overlay));
+        assert_eq!(
+            virtual_view.pointer("/skills/config/2/path"),
+            Some(&json!("/s/two/SKILL.md"))
+        );
+        assert_eq!(
+            virtual_view.pointer("/hooks/state/~1abs~1hooks.json:session_start:0:0/enabled"),
+            Some(&json!(false))
+        );
+
+        let before = std::fs::read(&file).unwrap();
+        let sets: Vec<(String, Value)> = sets
+            .iter()
+            .map(|(p, v)| (p.to_string(), v.clone()))
+            .collect();
+        std::fs::write(&file, writers::patch_toml(Some(&before), &sets).unwrap()).unwrap();
+        assert_eq!(user_layer(root, None), virtual_view);
+
+        // A patch on a missing file reads as the file `harn off` would create.
+        let project = root.join("repo/.codex/config.toml");
+        let overlay = Overlay {
+            ops: vec![OverlayOp::SetJson {
+                file: project.clone(),
+                pointer: "/plugins/x@y/enabled".to_string(),
+                value: json!(false),
+            }],
+        };
+        let fs = Fs::new(Some(&overlay));
+        let reader = Reader {
+            fs: &fs,
+            patches: vec![(
+                fs::normalize(&project),
+                "/plugins/x@y/enabled".to_string(),
+                json!(false),
+            )],
+        };
+        match reader.read(&project).unwrap() {
+            Toml::Ok(v, _) => assert_eq!(v, json!({"plugins": {"x@y": {"enabled": false}}})),
+            _ => panic!("not read"),
+        }
+    }
+
+    /// Through the JSON view the TOML writer and the JSON writer make the same change.
+    #[test]
+    fn toml_writer_agrees_with_the_json_writer() {
+        let source = "a = 1\n[t]\nk = \"v\"\ninline = { x = 1 }\n[[aot]]\nn = 1\n[d]\ne.f = true\n";
+        let cases = [
+            ("/a", json!(2)),
+            ("/t/k", json!(["x", {"y": 1}])),
+            ("/t/inline/z", json!({"w": false})),
+            ("/aot/-", json!({"n": 2})),
+            ("/aot/0/m", json!("s")),
+            ("/d/e/g", json!(1.5)),
+            ("/new/deep/key@x", json!("v")),
+            ("/arr/-", json!("first")),
+            ("/arr2/-/k", json!(1)),
+        ];
+        for (pointer, value) in cases {
+            let written = writers::patch_toml(
+                Some(source.as_bytes()),
+                &[(pointer.to_string(), value.clone())],
+            )
+            .unwrap();
+            let mut expected = parse(source).unwrap().0;
+            writers::set_json_pointer(&mut expected, pointer, value).unwrap();
+            assert_eq!(
+                parse(&String::from_utf8(written).unwrap()).unwrap().0,
+                expected,
+                "{pointer}"
+            );
+        }
+    }
+
+    /// A writer patch re-parses the file strictly: a non-finite float it does not touch stays
+    /// listed (set, unreadable), one it replaces is gone.
+    #[test]
+    fn writer_patches_recompute_non_finite_markers() {
+        let t = tmp();
+        let root = &t.0;
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        let file = root.join("home/.codex/config.toml");
+        write(
+            &file,
+            "project_doc_max_bytes = nan\ninclude_environment_context = inf\n",
+        );
+        let overlay = sets_on(&file, &[("/include_environment_context", json!(false))]);
+        let config = load_with(root, Some(&overlay)).unwrap();
+        let user = config
+            .layers
+            .iter()
+            .find(|l| l.source == Source::User)
+            .unwrap();
+        assert_eq!(user.unreadable, ["/project_doc_max_bytes"]);
+        assert!(matches!(
+            user.lookup("/project_doc_max_bytes"),
+            Lookup::Unreadable
+        ));
+        assert_eq!(
+            config.get("/include_environment_context").unwrap().0,
+            &json!(false)
+        );
+    }
+
+    /// The one patch the writer has no form for: `null` reads as "key absent"; the other patches
+    /// of the file still go through the writer.
+    #[test]
+    fn a_null_patch_reads_as_key_absent() {
+        let t = tmp();
+        let root = &t.0;
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        let file = root.join("home/.codex/config.toml");
+        write(&file, "model = \"m\"\nkeep = 1\n");
+        let overlay = sets_on(&file, &[("/model", Value::Null), ("/keep", json!(2))]);
+        let config = load_with(root, Some(&overlay)).unwrap();
+        assert!(config.get_str("/model").is_none());
+        assert_eq!(config.get("/keep").unwrap().0, &json!(2));
+    }
+
+    /// Any other patch the writer refuses fails the load (so the re-resolve, so `freed`): a
+    /// guess here would show bytes freed by a plan that `harn off` refuses to apply.
+    #[test]
+    fn a_patch_the_writer_refuses_fails_the_load() {
+        let t = tmp();
+        let root = &t.0;
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        let file = root.join("home/.codex/config.toml");
+        write(&file, "model = \"m\"\n");
+        for (pointer, value, says) in [
+            (
+                "/model/x",
+                json!(false),
+                "/model is a string, not a table or array",
+            ),
+            ("/n", json!(u64::MAX), "past TOML's 64-bit integer range"),
+            ("/m", json!({"k": null}), "TOML has no null"),
+        ] {
+            let Err(err) = load_with(root, Some(&sets_on(&file, &[(pointer, value)]))) else {
+                panic!("{pointer}: loaded");
+            };
+            let err = format!("{err:#}");
+            assert!(
+                err.starts_with(&file.display().to_string()) && err.contains(says),
+                "{pointer}: {err}"
+            );
+        }
+        // A file the writer will not rewrite: not TOML, not UTF-8.
+        for bytes in [b"model = ".as_slice(), b"model = \"\xff\"\n".as_slice()] {
+            std::fs::write(&file, bytes).unwrap();
+            let overlay = sets_on(&file, &[("/include_apps_instructions", json!(false))]);
+            let Err(err) = load_with(root, Some(&overlay)) else {
+                panic!("{bytes:?}: loaded");
+            };
+            assert!(
+                err.chain().any(|c| c.downcast_ref::<Refused>().is_some()),
+                "{err:#}"
+            );
+            // Without a patch the file is only a warning, as before.
+            assert!(load_with(root, None).is_ok());
+        }
     }
 
     #[test]
@@ -983,7 +1261,8 @@ mod tests {
                 profile: None,
             },
             &mut warnings,
-        );
+        )
+        .unwrap();
         assert!(
             c.dir_decision.is_untrusted(),
             "config gate: non-project layers only"
