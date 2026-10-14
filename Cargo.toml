@@ -20,9 +20,14 @@ dirs = "6.0.0"
 ratatui = "0.30.1"
 # Codex hook matchers are `regex` patterns (codex-rs `hooks/Cargo.toml`, workspace `regex = "1.12.3"`).
 regex = "1.12.3"
+# Codex plugin versions are ordered with the crate codex uses (core-plugin-common/src/installed.rs:40-45).
+semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive"] }
 # preserve_order: settings JSON is rewritten in its original key order (02-architecture §Stack).
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
+# Codex reads a skill's agents/openai.yaml with serde_yaml (ext/skills/src/loader/metadata.rs:130);
+# harn uses the same crate so comments, flow style and type errors read the same way.
+serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 # SIGINT/SIGTERM/SIGHUP become a flag the view polls, so the terminal is restored on the way out.
 signal-hook = "0.3.18"

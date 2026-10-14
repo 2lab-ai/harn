@@ -4,8 +4,8 @@
 //! and the three trust gates ([`config`]), the AGENTS.md message and `developer_instructions`
 //! ([`instructions`]), and the built-in blocks with their `include_*` / `agents.enabled` switches
 //! ([`builtins`]), hooks ([`hooks`]), exec-policy rules files ([`rules`]) and MCP servers with
-//! the tool-search state ([`mcp`]). Skills and plugins (with their hooks and MCP servers) are a
-//! later work unit.
+//! the tool-search state ([`mcp`]) (WU C3); the skill listing with its 2 % budget ([`skills`]) and
+//! plugins with their skills, MCP servers, hooks and developer blocks ([`plugins`]) (WU C2).
 //!
 //! Reads files only, all of them through [`Fs`] so an [`Overlay`] is honoured everywhere
 //! (`SetJson` patches a TOML file viewed as JSON); never spawns a process and never touches the
@@ -14,10 +14,15 @@
 //! Item ids, in request order: `codex/system-prompt/builtin/instructions` (the request's
 //! `instructions` field), `codex/instruction/<layer>/<file>#/developer_instructions`,
 //! `codex/system-prompt/builtin/{permissions_instructions,collaboration_mode,apps_instructions,multi_agent}`,
+//! `codex/system-prompt/builtin/skills_instructions` + `codex/skill-listing/builtin/skills` (the
+//! `<skills_instructions>` block: framing row, then the listing with one `codex/skill/<layer>/<name>`
+//! child per skill), `codex/system-prompt/builtin/{plugins_instructions,recommended_plugins}`,
 //! `codex/instruction/builtin/agents-md-message` (the `# AGENTS.md instructions` user message:
 //! its framing bytes, with one child per file — `codex/instruction/user/<realpath>` for the
 //! global file, `codex/instruction/project/<realpath>` for the chain), and
-//! `codex/env-block/builtin/environment_context`.
+//! `codex/env-block/builtin/environment_context`, then plugin MCP servers
+//! (`codex/mcp-server/plugin/<server>`) and hooks (`codex/hook/plugin/<state key>`), then one
+//! `codex/plugin/plugin/<name@marketplace>` row per configured plugin.
 //!
 //! Knobs are Codex's own config keys. Codex has no local-only config file: the target dir's
 //! `.codex/config.toml` is `project` scope (and takes effect only while that dir is trusted),
@@ -31,7 +36,9 @@ mod config;
 mod hooks;
 mod instructions;
 mod mcp;
+mod plugins;
 mod rules;
+mod skills;
 
 use crate::model::{
     item_id, Agent, Cost, Item, Kind, Knob, Layer, Mode, Origin, Overlay, Scope, Target, Tree,
@@ -42,12 +49,14 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub use config::PROFILE_ENV;
+pub use skills::CAP_STATE_UNKNOWN;
 
 pub(crate) struct Ctx<'a> {
     pub target: &'a Target,
     pub fs: Fs,
     pub codex_home: PathBuf,
-    /// `/etc/codex` (injectable in tests): `requirements.toml`, `hooks.json`, `rules/`.
+    /// `/etc/codex` (injectable in tests): `requirements.toml`, `hooks.json`, `rules/`, and
+    /// `skills/` (the admin skill root).
     pub system_dir: PathBuf,
     pub config: Config,
     /// The effective model and context window (C2 needs the window for the skills cap).
@@ -260,16 +269,40 @@ pub(crate) fn resolve_with(
         warnings,
     };
 
+    // Plugins first: their skill roots feed the listing, their hook sources the hook rows.
+    let plugins = plugins::discover(&mut ctx);
+    let listing = skills::listing(&mut ctx, &plugins);
+    let (plugin_servers, plugin_hooks) = plugins::parts(&mut ctx, &plugins);
+    // Config hooks then plugin hooks (`hooks/src/engine/discovery.rs:128-197`), one rule set.
+    let mut hook_rows = hooks::collect(&mut ctx, plugin_hooks);
+    plugins::decorate_hooks(&plugins, &mut hook_rows);
+    let mut contributions = listing.clone();
+    contributions.extend(plugin_servers.iter().cloned());
+    contributions.extend(hook_rows.iter().cloned());
+    let plugin_blocks = plugins::blocks(&ctx, &plugins, &contributions);
+
+    // Request order (`research/02` §0): developer_instructions, skills, the developer blocks with
+    // the plugin blocks after apps, the multi-agent messages, the AGENTS.md message, environment.
     let mut items = Vec::new();
     items.push(builtins::base_instructions(&mut ctx));
     items.extend(instructions::developer_instructions(&ctx));
-    items.extend(builtins::developer_blocks(&ctx));
+    items.extend(listing);
+    let mut blocks = builtins::developer_blocks(&ctx);
+    let at = blocks
+        .iter()
+        .position(|i| i.id.ends_with("/builtin/multi_agent"))
+        .unwrap_or(blocks.len());
+    blocks.splice(at..at, plugin_blocks);
+    items.extend(blocks);
     items.extend(instructions::agents_md(&mut ctx));
     items.extend(builtins::environment_context(&ctx));
-    items.extend(hooks::collect(&mut ctx));
+    items.extend(hook_rows);
     items.extend(rules::collect(&mut ctx));
     let (tool_search, tool_search_cause) = mcp::tool_search(&ctx);
     items.extend(mcp::collect(&mut ctx, tool_search));
+    items.extend(plugin_servers);
+    let plugin_rows = plugins::items(&plugins, &items);
+    items.extend(plugin_rows);
     tree.items = items;
     tree.tool_search = tool_search;
     tree.tool_search_cause = Some(tool_search_cause);
