@@ -9,14 +9,15 @@ harn produces the facts (`--json`, `brief`) and applies an AI-authored plan (`ap
 reads a visualization (`report`). Claude Code first, Codex CLI second. One Rust binary for macOS
 and Linux; a CLI whose bare command is an interactive terminal view (TUI) for the human, `harn trim` for the AI; a GUI only as a read-only view.
 
-Status: **shipped** — v3.9, 2026-10-13 (A16 observed from the installed binary; A1–A6, A9–A13, A15 observed; the TUI's A14 is VOID after the user read the frames — the screen is redesigned in [`04-tui-design.md`](04-tui-design.md), acceptance A16 there; receipts in `p0-claude-code/loop.done.md`). Rewritten from scratch on [`research/`](research/) (00 =
+Status: **shipped** — v3.11, 2026-10-15. P0 (Claude Code), 2026-10-13: A16 observed from the installed binary; A1–A6, A9–A13, A15 observed; the TUI's A14 is VOID after the user read the frames — the screen is redesigned in [`04-tui-design.md`](04-tui-design.md), acceptance A16 there; receipts in `p0-claude-code/loop.done.md`. P0.5 (Codex), 2026-10-15: A7 and A8 observed on the author's macOS, A9 for the Codex tree on `cachy-z13`; receipts in `p0-5-codex/loop.done.md`. Rewritten from scratch on [`research/`](research/) (00 =
 the user's statement as a PRD, 01 = Claude Code loading rules, 02 = Codex loading rules, 03 = prior
 art and UX, 04 = local measurements), then revised on trinity rounds 1–4 (see [§Revision
 log](#revision-log)). The user's verbatim statement and the name decision are fixed in
 [`prd-rewrite/ssot.md`](prd-rewrite/ssot.md). Reviewed by the three-engine panel (grok-4.7,
 gpt-6-astra, fable): unanimous APPROVE on this text at round 5 of 5, 2026-10-13, no blocking
 items; round-by-round changes are in the [§Revision log](#revision-log). P0 is green on both
-machines; the open part is P0.5 (Codex, A7–A8). The site is [`05-landing.md`](05-landing.md).
+machines and P0.5 (Codex) is shipped; what is open is P1 (§P1 below). The site is
+[`05-landing.md`](05-landing.md).
 
 ## Problem
 
@@ -119,9 +120,11 @@ request**. Details and URLs: `research/03`.
    fingerprint, time) matches the tree being verified. `harn verify --capture <path>` reads an
    existing capture and never writes; `harn verify --run` starts the agent once under its official
    capture (Claude Code: `OTEL_LOG_RAW_API_BODIES=file:<dir>` request body + the `stream-json`
-   `system/init` provenance event; Codex: `codex debug prompt-input` + `codex mcp list --json` +
-   `codex plugin list --json`), states before running that it will execute hooks and MCP servers and
-   may cost a model request, and is refused under `--readonly`. Matching is done on the **projection each
+   `system/init` provenance event; Codex: `codex debug prompt-input` + `codex debug models` +
+   `codex mcp list --json` + `codex plugin list --json`, no model request), states before running
+   what it will execute (Claude Code: hooks and MCP servers, and possibly one model request;
+   Codex: the MCP servers `debug prompt-input` starts, and its writes into `CODEX_HOME`), and is
+   refused under `--readonly`. Matching is done on the **projection each
    oracle can observe**: items with mode `runtime` or `none` are expected to be absent from a
    request and are never counted as missing; capture-only children under a `?` parent (an MCP
    server's tools, a hook's stdout) are attached as `observed` and never counted as
@@ -132,8 +135,9 @@ request**. Details and URLs: `research/03`.
    memory block after its cap) — a size or content mismatch there is a resolver defect and fails
    verify. Values that vary per run (date, git status, hook stdout, MCP runtime text) are
    observations and replace `predicted` with `observed` without failing. Only
-   observed rows and regions are promoted; a Codex verify promotes instructions, skills and blocks
-   and says that tools and hook output are outside Codex's dump.
+   observed rows and regions are promoted; a Codex verify promotes instructions, skills and blocks,
+   and reports every row Codex's output cannot settle as `not-checkable`, with its reason
+   ([§Source of truth](#source-of-truth)).
 6. **The operator is an AI; the human reads.** The user's direction (2026-10-13, `ssot.md`): the
    analysis of what to keep and what to turn off is itself AI work, so harn's primary consumer is
    an agent (Claude Code or Codex running in the same directory). `harn --json` (schema `harn/1`)
@@ -230,14 +234,57 @@ until a bound capture turns it into `observed`.
   run with `OTEL_LOG_RAW_API_BODIES=file:<tmp>` (full request body + `index.jsonl`) and
   `--output-format stream-json --verbose` (`system/init` with `tools`, `mcp_servers[{name,status,
   source}]`, `skills`, `agents`, `plugins[{name,path,source,version}]`, `memory_paths`) — both
-  verified on this machine 2026-10-13 (`research/04` §E). Codex: `codex -C <dir> debug
-  prompt-input` + `codex debug models` + `codex mcp list --json` + `codex plugin list --json`;
-  tools and hook output are in no Codex dump, so a Codex verify is partial by construction and says
-  so (`research/02` §8).
+  verified on this machine 2026-10-13 (`research/04` §E). Codex: `codex --version`, then
+  `codex -C <dir> debug prompt-input` + `codex debug models` + `codex mcp list --json` +
+  `codex plugin list --json`, run with the `codex` on `PATH`; the outputs are kept in a new `0700`
+  capture directory (a manifest with the `RunContext`, each command's argv, exit status and output
+  files, and the bundled-skills root as the run resolved it) that `harn verify --agent codex
+  --capture <dir>` re-checks offline. No model request; `debug prompt-input` starts the configured
+  MCP servers and may write into `CODEX_HOME`. Gate 1 is presence by id over the AGENTS.md message
+  and each AGENTS file, `developer_instructions`, the skill listing and its entries, the built-in
+  blocks, the environment block, MCP servers and plugins; gate 2 is content, byte for byte
+  (tolerance 0): the AGENTS.md message as harn assembles it from the files, each listing line, and
+  every block with an exact prediction. A row Codex's output cannot settle is `not-checkable` — a
+  row of its own with its reason, never a failure — so a Codex verify is partial by construction
+  and every report says what is outside Codex's dump (`research/02` §8). The classes:
+  - *outside the dump*: tool schemas (`tools[]`, built-in and MCP), the base instructions (the
+    request's `instructions` field; `debug models` has the catalog's template, not the text
+    sent) and hook output (`debug prompt-input` does not run hooks);
+  - *rules files*: their allow prefixes render inside the permissions block, whose text harn
+    does not predict;
+  - *runtime-decided blocks*: `apps_instructions` and `recommended_plugins` render from the
+    login, the running MCP servers or the remote plugin catalog; one that does not render is a
+    warning, not a diff;
+  - *catalog-gated rows*: a block that renders only if the model's catalog entry says so, when
+    harn has no accepted catalog snapshot (next item) and Codex did not render it;
+  - *bundled skills*: `$CODEX_HOME/skills/.system` holds the set written by whichever Codex last
+    started, so a bundled skill that is missing on one side or listed with another line is not
+    checkable; the exemption needs proof on both sides (the row's signal, and the entry's path
+    under the bundled root recorded at capture time);
+  - *account plugins*: a plugin `codex plugin list --json` reports with source `remote`
+    (installed for the ChatGPT account, named by no local file) that harn did not predict.
+- **Codex's model catalog is a snapshot.** The base instructions (when the config does not set
+  them), the model's context window (and with it the skills budget), tool search and three blocks
+  (collaboration mode, multi-agent, the plugins instructions) follow the selected model's catalog
+  entry. harn reads it from `$CODEX_HOME/models_cache.json`, Codex's last fetched catalog, only
+  when the file is an accepted snapshot: valid JSON, its required fields present with their types,
+  every entry harn reads well-formed, an `identity`, and an installed `codex` whose version equals
+  the file's `client_version`. Otherwise those facts are unknown and each row that depends on them
+  says why (`catalog-gated:`). When the snapshot is used, the `model:` signal says when it was
+  fetched, that Codex re-checks a catalog older than 5 minutes with the server when it starts, and
+  that `harn verify --run --agent codex` confirms.
+- **Known limit: the installed Codex version.** The resolver never runs `codex`; it reads the
+  installed version from files only: the `@openai/codex` `package.json` above the binary on `PATH`
+  (npm), else a version directory right under a `codex` directory in the binary's real path
+  (Homebrew). Any other install, such as a distribution's static binary, reads "the installed
+  codex's version could not be determined", and catalog facts stay unknown. Observed on
+  `cachy-z13` (CachyOS, `openai-codex-bin` 0.155.1), 2026-10-15.
 - **Captures from elsewhere.** `harn verify --capture <file-or-dir>` accepts an OTEL raw-body
-  directory, an llmux `raw-io.jsonl` record, or a `CODEX_ROLLOUT_TRACE_ROOT` bundle, and uses a
-  record only when its `RunContext` matches the target (same canonical cwd, agent version, model);
-  it refuses with the mismatch otherwise. "The newest llmux session" is never a selection rule.
+  directory, an llmux `raw-io.jsonl` record, or a Codex capture directory written by `verify --run
+  --agent codex` (a `CODEX_ROLLOUT_TRACE_ROOT` bundle is P1), and uses a record only when its
+  `RunContext` matches the target (same canonical cwd, agent version, model; a Codex capture
+  directory is bound by its working directory); it refuses with the mismatch otherwise. "The
+  newest llmux session" is never a selection rule.
   For a record that carries no context of its own (an llmux line), the `RunContext` is derived from
   the request body itself — the Environment section's "Primary working directory" line, else the
   init event's `cwd`, else the deepest project `CLAUDE.md` directory (the `gitStatus` block carries
@@ -280,7 +327,7 @@ Item selectors: a full id or any unique suffix (`plugin:slack`, `rules/DEV.md`);
 selector lists the candidates and exits 2. Flags everywhere: `--readonly` (refuses every write and
 every active verify), `--no-unicode`, `--color`.
 
-### P0.5 — Codex resolver (same commands; acceptance A7–A8)
+### P0.5 — Codex resolver (same commands; acceptance A7–A8, and A9 for the Codex tree)
 
 The same commands with `--agent codex`: the tree, `why`, `off`/`on`/`undo`, `brief`, `verify`.
 What Codex loads and each item's off switch are in [§Codex coverage](#codex-coverage-condensed-from-research02)
@@ -288,13 +335,18 @@ What Codex loads and each item's off switch are in [§Codex coverage](#codex-cov
 in [`02-architecture.md`](02-architecture.md) (`resolve/codex/`, `oracle/codex.rs`). Codex never
 gates P0. `harn trim --agent codex` stays P1 (refused, exit 3).
 
-Status 2026-10-14 (built on `main`, receipts open): the Codex resolver (config layers, profiles
-and the three trust gates, the AGENTS chain, the built-in blocks, skills and plugins, hooks,
-rules, MCP servers), Codex switches as TOML writes with undo byte for byte, and the wiring: without
-`--agent` every command lists both agents (one table, one TUI tab, one brief/report section each;
-`apply` takes the agent whose tree has the plan's selectors), the TUI words Codex rows per
-[`04-tui-design.md`](04-tui-design.md) §Codex, `harn --version` names both rule versions. Open:
-`verify --agent codex` and the A7–A8 receipts.
+Status: shipped 2026-10-15; receipts in [`p0-5-codex/loop.done.md`](p0-5-codex/loop.done.md). On
+`main`: the Codex resolver (`CODEX_HOME`, a relative one taken from the target dir as Codex does;
+config layers, profiles and the three trust gates; the AGENTS chain; the built-in blocks; skills
+and plugins; hooks, rules, MCP servers), catalog facts only from an accepted `models_cache.json`
+snapshot, Codex switches as TOML writes with undo byte for byte, `harn verify --agent codex`
+(`--run`, or `--capture` on a capture directory it wrote) as in [§Source of
+truth](#source-of-truth), and the wiring: without `--agent` every command lists both agents (one
+table, one TUI tab, one brief/report section each; `apply` takes the agent whose tree has the
+plan's selectors), the TUI words Codex rows per [`04-tui-design.md`](04-tui-design.md) §Codex,
+`harn --version` names both rule versions. Known limit: the installed Codex version is read from
+npm and Homebrew layouts only (§Source of truth). P1: `harn trim --agent codex`, usage evidence,
+tool schemas from a live run (`CODEX_ROLLOUT_TRACE_ROOT`).
 
 ### P1 — beyond `harn trim`
 
@@ -304,8 +356,9 @@ The `/harn-trim` skill (`.claude/skills/harn-trim/SKILL.md`) is the same loop ru
 interactive Claude Code session, for when the agent is already there; the skill is text, the
 contract is the CLI. P1 adds: usage evidence in the brief (which skills/agents were actually
 invoked in this directory's session logs, so the agent's reasons cite use, not size alone);
-`harn trim --agent codex`; a `harn report` before/after pair. The human's view is the TUI, which
-is P0 ([`04-tui-design.md`](04-tui-design.md), A16).
+`harn trim --agent codex`; tool schemas from a live Codex run (a `CODEX_ROLLOUT_TRACE_ROOT`
+bundle read by `verify --capture`); a `harn report` before/after pair. The human's view is the
+TUI, which is P0 ([`04-tui-design.md`](04-tui-design.md), A16).
 
 Carried over from the P0 drive (`p0-claude-code/loop.md` G3, G7), both P1:
 - pointer-level undo for `harn on` — today `on A` after `off A; off B` on the same file reports
@@ -444,7 +497,8 @@ ignore trust entirely), and `-c plugins."x@y".enabled=false` being silently igno
 ## Acceptance scenarios
 
 Each row: run → what must be observed. "Both machines" = the author's macOS and `cachy-z13`.
-**P0 gate = A1–A6, A9–A15 on both machines. P0.5 = A7–A8.**
+**P0 gate = A1–A6, A9–A15 on both machines. P0.5 = A7–A8 on the author's macOS, and A9 for the
+Codex tree.**
 
 | # | run | observed |
 |---|---|---|
@@ -455,9 +509,9 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 | A4 | `harn off plugin:slack --dir ~/2lab.ai/zbrain` then `claude -p hi --output-format stream-json --verbose` in that directory | the plan showed target dir, diff, freed and side effects; `.claude/settings.local.json` gained `enabledPlugins["slack@claude-plugins-official"]: false`; the new `init` event lists no `plugin:slack:slack` and none of its 8 skills; `harn history` shows the op with its `RunContext`; `harn undo` restores the file byte-for-byte |
 | A5 | `harn off <item>` on an item with no knob | `builtin` → refused with the reason (exit 3); `--scope` was never widened silently (refused, exit 3). Quarantine half: every Claude Code item the resolver emits today has an official knob (skills and commands → `skillOverrides`, plugin items → `enabledPlugins`), so no row reaches the quarantine path; it stays covered by the plan/journal unit tests (move, manifest, undo) until an item without a knob exists |
 | A6 | `harn edit rules/DEV.md --dir ~/2lab.ai/zbrain` | `$EDITOR` opened the realpath; on exit the diff was printed and journaled; `harn undo` restores the previous bytes |
-| A7 | `harn --dir ~/2lab.ai/zbrain --agent codex --json` | AGENTS.md chain, skills roots, hooks, MCP servers, plugins match `codex -C … debug prompt-input` + `codex mcp list --json` + `codex plugin list --json`; the three trust gates are reflected (zbrain is `trusted`) |
-| A8 | `harn verify --run --agent codex` | 0 presence diffs on instructions, skills listing and blocks; the report states that tools and hook output are outside Codex's dump |
-| A9 | same binary on `cachy-z13` (`harn --version`, A1, A2) | identical columns and semantics; Linux paths (`/etc/claude-code/CLAUDE.md`, XDG state dir) resolved |
+| A7 | `harn --dir <dir> --agent codex --json`, `<dir>` a real working folder | the AGENTS.md chain, the skill listing with its roots, MCP servers and plugins match `codex -C … debug prompt-input` + `codex mcp list --json` + `codex plugin list --json`; hooks and rules files are rows of their own, which no Codex dump shows; the three trust gates are reflected (the folder is `trusted`) |
+| A8 | `harn verify --run --agent codex --dir <dir>`, the same folder | prints what it will run (no model request); 0 `predicted-not-seen`, 0 `seen-not-predicted` and 0 `content-mismatch` on instructions, the skill listing, blocks, MCP servers and plugins; every other row is `not-checkable` with its reason (§Source of truth); the report states what is outside Codex's dump; `passed: yes`, exit 0 |
+| A9 | same binary on `cachy-z13` (`harn --version`, A1, A2; A2 with `--agent codex`) | identical columns and semantics, for the Codex tree too; Linux paths (`/etc/claude-code/CLAUDE.md`, XDG state dir) resolved; the Codex tree resolves from files, never by running `codex` |
 | A10 | `harn --readonly off anything` · `harn --readonly verify --run` | both exit non-zero without writing or running |
 | A11 | an item present in a capture with no local config (the 2026-10-02 `blender` case) | row shows origin `unresolved` with the evidence it has (transport, log dir, last connect), never a guessed path; `verify --capture` refuses a capture whose `RunContext` does not match the target (exit 1, the verify family, with the mismatch named) |
 | A12 | `harn brief --dir ~/2lab.ai/zbrain` piped into a headless `claude -p` asking for a trimming plan, then `harn apply plan.json --dry-run` | the brief fits the agent's context (< 40 KB for zbrain), the plan validates (every selector unique, every knob supported, no silent scope widening) or is rejected with the offending op; `--dry-run` prints the diff and freed without writing; with the flag removed, `harn history` shows the entry with each op's reason |
@@ -468,7 +522,21 @@ Each row: run → what must be observed. "Both machines" = the author's macOS an
 **P0 receipt (2026-10-13):** every P0 gate row observed on macOS (release build, zbrain) and A1/A2/A9
 on cachy-z13; A5's quarantine half is unreachable while every emitted item has a knob. Per-row
 summary in [`p0-claude-code/loop.done.md`](p0-claude-code/loop.done.md); raw command output stays
-in the private control-plane repo. A7–A8 (Codex) not run — P0.5.
+in the private control-plane repo. A7–A8 (Codex) were P0.5, below.
+
+**P0.5 receipt (2026-10-15, `main` f8b65da):** A7 and A8 on the author's macOS with `codex-cli
+0.160.1`, in a real working folder. `harn verify --run --agent codex` diffs the tree A7 lists
+against Codex's own output: seen 42, predicted-not-seen 0, seen-not-predicted 0, content-mismatch
+0, not-checkable 18 (base instructions 1, hook output 1, rules file 1, runtime-decided block 1,
+catalog-gated block 1, bundled skills 2, account plugins 11), `passed: yes`, exit 0; the folder's
+git status was unchanged. The first run (2026-10-14, same machine, same folder) traced its
+differences to several Codex installs sharing one home, which rewrite `.system`, and to account
+plugins (→ C8), and found catalog defects in the resolver (→ C7). A9 on `cachy-z13` (CachyOS),
+f8b65da built there: the Codex tree resolves from files with the same columns as on macOS, and
+the `tui_pty` and `tui_codex` suites pass on Linux. Its `codex` is the distribution's static binary
+(`openai-codex-bin` 0.155.1), whose version harn cannot read (§Source of truth, known limit), so
+catalog facts there are unknown. Per-unit summary in
+[`p0-5-codex/loop.done.md`](p0-5-codex/loop.done.md).
 
 ## Tensions
 
@@ -513,6 +581,13 @@ revision and the agent versions the rules were verified against. Mechanics:
 
 ## Revision log
 
+- **v3.11 (2026-10-15, P0.5 shipped)** — Status and §P0.5 say Codex is shipped; A7–A8 observed on
+  the author's macOS and A9 for the Codex tree on `cachy-z13` (P0.5 receipt under §Acceptance);
+  A7's observed column says what a Codex dump can show (hooks and rules files are rows, not dump
+  matches); §Source of truth lists the Codex verify's gates and its not-checkable classes, the
+  `models_cache.json` snapshot contract and the version-detection limit; Goal 5 names `codex debug
+  models` and the Codex run's cost (no model request); `--capture` reads a Codex capture
+  directory, and a `CODEX_ROLLOUT_TRACE_ROOT` bundle moves to P1.
 - **v3.10 (2026-10-14, docs refresh)** — status paragraph no longer calls the shipped document a
   target; §P0.5 points at the Codex coverage, `research/02` and the architecture; §P1's "no TUI is
   planned" removed (the TUI is P0, A16); the site and its deploy recorded in `05-landing.md`.

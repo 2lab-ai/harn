@@ -1,6 +1,6 @@
 # harn — Architecture
 
-Status: **shipped (P0)** — v1.7, 2026-10-14 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5: the Codex resolver, its TOML writes and the wiring are built, `oracle/codex.rs` + Codex `verify` in progress). Boundaries for the first
+Status: **shipped (P0 and P0.5)** — v1.8, 2026-10-15 (modules as built on `main`: resolve, plan, writers, journal, oracle, verify, render, trim, tui; P0.5, shipped 2026-10-15: the Codex resolver, its TOML writes, `oracle/codex.rs`, `verify/codex.rs` and the wiring are built). Boundaries for the first
 implementation drive. Follows [`01-spec.md`](01-spec.md); where the two disagree, the spec wins
 and this file is fixed.
 
@@ -50,8 +50,12 @@ src/
                      plugin + connectors + dynamic; schemas `?` until a capture), plugins
                      (installed_plugins.json + enabledPlugins from six sources), builtins table,
                      tool-search state (base URL first-party or not)
-    codex/           mod.rs (CODEX_HOME, model facts from models_cache.json, the knob scope rule:
-                     a key is listed only in the files where it takes effect), config.rs (layers:
+    codex/           mod.rs (CODEX_HOME — a relative one resolved against the target dir, as
+                     codex does; model facts from models_cache.json only when it is an accepted
+                     snapshot: required fields present, an installed codex whose version — read
+                     from npm or Homebrew layouts, never by running it — equals client_version;
+                     else catalog-gated rows with the reason; the knob scope rule: a key is listed
+                     only in the files where it takes effect), config.rs (layers:
                      defaults · /etc/codex · user · profile · trusted .codex/config.toml root→cwd ·
                      managed, overlay applied to TOML; the three trust gates), instructions.rs
                      (developer_instructions, the AGENTS message: one row per file + its framing,
@@ -76,10 +80,13 @@ src/
   oracle/
     claude.rs        spawn `claude -p` with OTEL_LOG_RAW_API_BODIES + stream-json; parse body +
                      init; build RunContext from index.jsonl + init
-    codex.rs         `codex -C dir debug prompt-input`, `debug models`, `mcp list --json`,
-                     `plugin list --json`; CODEX_ROLLOUT_TRACE_ROOT reader
-    capture.rs       readers for an OTEL raw-body dir, an llmux raw-io.jsonl record, a Codex
-                     trace bundle → (Tree, RunContext); selection = RunContext match, never "newest"
+    codex.rs         `codex --version`, `codex -C dir debug prompt-input`, `debug models`, `mcp list
+                     --json`, `plugin list --json` into a new 0700 capture dir (manifest: RunContext,
+                     argv, exit status, files, the bundled skills root bound at capture time);
+                     reads such a dir back for `verify --capture` (a CODEX_ROLLOUT_TRACE_ROOT
+                     reader is P1)
+    capture.rs       readers for an OTEL raw-body dir, an llmux raw-io.jsonl record → (Tree,
+                     RunContext); selection = RunContext match, never "newest"
   verify.rs          inputs: static Tree, capture Tree + RunContext, the oracle's observable
                      projection (modes runtime/none excluded; capture-only children attach under
                      their `?` parent, never seen-not-predicted). Gate 1 presence by id over
@@ -88,6 +95,12 @@ src/
                      resolver defect; per-run values (date, git status, hook stdout, MCP runtime
                      text) replace predicted → observed without failing; promotion only for
                      matched rows and regions
+  verify/codex.rs    the Codex projection over codex's inspection output: gate 1 presence (AGENTS
+                     message and files, developer_instructions, skill listing and entries, blocks,
+                     environment, MCP servers, plugins), gate 2 byte-exact content; not-checkable
+                     rows with their reason, never a failure: outside the dump (tools[], base
+                     instructions, hook output), rules files, runtime-decided blocks, catalog-gated
+                     rows, bundled .system skills, account plugins (source remote)
   render/
     common.rs        shared cells: costs, freed, compact knobs (JSON pointer for Claude Code
                      settings, the dotted TOML key for Codex config.toml), header facts per agent

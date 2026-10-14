@@ -1,6 +1,6 @@
 # ssot — P0.5 drive: Codex resolver (fixed 2026-10-14)
 
-Status: in-progress
+Status: done (2026-10-15; receipts in `loop.done.md`, the next start point in `loop.md`)
 
 ## User statement (verbatim, 2026-10-14, `/goal`)
 

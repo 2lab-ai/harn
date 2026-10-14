@@ -72,15 +72,24 @@ agent with nothing in this directory (Codex never ran on this machine) gets no t
 
 `harn --agent codex [DIR]` shows what the Codex CLI loads in `DIR`: the AGENTS.md files (your
 `~/.codex/AGENTS.md` and the project's, root to `DIR`, under one 32 KiB cap), the skill listing,
-plugins with their skills, MCP servers and hooks, hooks, MCP servers, rules files and the blocks
-Codex writes itself (base instructions, permissions, environment, …). The header says whether Codex
-trusts the folder, because that decides whether the project's `.codex/config.toml`, hooks and
-rules load at all; `i` explains it.
+plugins (each with its skills, MCP servers and hooks), your own hooks and MCP servers, rules files
+and the blocks Codex writes itself (base instructions, permissions, environment, …). The header
+says whether Codex trusts the folder, because that decides whether the project's
+`.codex/config.toml`, hooks and rules load at all; `i` explains it.
 
-- harn reads `$CODEX_HOME` (default `~/.codex`): `config.toml` and the profile it names,
-  `/etc/codex`, the trusted project's `.codex/config.toml`, `models_cache.json` (for the model's
-  base instructions, context window and tool search), AGENTS files, skills, plugins, hooks and
-  rules. It never starts `codex`.
+- harn reads `$CODEX_HOME` (default `~/.codex`; a relative one is taken from `DIR`, as Codex
+  does): `config.toml` and the profile it names, `/etc/codex`, the trusted project's
+  `.codex/config.toml`, AGENTS files, skills, plugins, hooks and rules. It never starts `codex`.
+- The model's base instructions, context window, tool search and a few blocks come from Codex's
+  model catalog. harn reads it from `models_cache.json` only when the file passes its checks: the
+  fields harn reads are there, and the `codex` on your `PATH` is the version that wrote it.
+  Otherwise those facts read unknown, and each row that depends on them says why. Codex itself
+  re-checks a catalog older than 5 minutes when it starts, so the screen says when the catalog
+  was fetched.
+- harn finds the installed Codex version from files, never by running `codex`, and it knows two
+  layouts: npm and Homebrew. A Codex installed any other way, such as a Linux distribution's own
+  package, reads "the installed codex's version could not be determined", and catalog facts stay
+  unknown.
 - `d` writes the item's own Codex config key (a hook's `[hooks.state]` entry, a skill's
   `[[skills.config]]` entry, a block's `include_*` key — never a wider switch such as
   `features.hooks`) with `toml_edit`, comments and order kept, in the narrowest file where Codex
@@ -90,7 +99,27 @@ rules load at all; `i` explains it.
   `hooks.state."…".enabled = false`, a `[[skills.config]]` entry). `u` restores it byte for byte.
 - `harn why`, `off`, `on`, `undo`, `brief`, `apply` and `report --html` work on the Codex tree;
   `harn off` without `--scope` uses the same file as `d`. `harn trim --agent codex` is not
-  implemented yet; `harn verify --agent codex` is in progress.
+  implemented yet (it refuses, exit 3).
+- `harn verify --run --agent codex` checks the tree against Codex's own view of the folder. It
+  runs `codex debug prompt-input`, `debug models`, `mcp list --json` and `plugin list --json`.
+  That costs no model request, but `prompt-input` starts your MCP servers and may write into
+  `$CODEX_HOME`; harn says so before it runs. The outputs stay in a private directory, and
+  `harn verify --agent codex --capture <dir>` re-checks them offline. Each item Codex's output can
+  show (the AGENTS.md files, the skill listing and its entries, the blocks, MCP servers and
+  plugins) must be on both sides, and where harn predicts its text exactly, the text must match
+  byte for byte. Some rows cannot be checked; the report lists each one with its reason instead of
+  failing:
+  - tool schemas, the base instructions and hook output, because Codex's dump does not contain
+    them;
+  - rules files, because they land inside the permissions block, whose text harn does not
+    predict;
+  - the apps and recommended-plugins blocks when Codex leaves them out, because it decides them at
+    start from your login, your running MCP servers and its plugin catalog;
+  - blocks that follow the model catalog, when harn could not use the catalog (above) and Codex
+    left them out;
+  - Codex's bundled skills (`$CODEX_HOME/skills/.system`) that differ, because whichever Codex
+    started last wrote them;
+  - plugins installed for your ChatGPT account, because no local file names them.
 
 ## How it works
 
@@ -99,7 +128,8 @@ rules load at all; `i` explains it.
   hooks, MCP servers and built-ins.
 - Sizes each item in bytes as it lands in the first request. What files cannot tell (built-ins,
   hook output, MCP tool schemas) reads `unmeasured` until `harn verify --run` measures a real
-  session, so the screen's total covers only what files can size.
+  session (for Codex, only what its dump contains; see [Codex](#codex)), so the screen's total
+  covers only what files can size.
 - Turns things off only through the agent's official switches: a settings key, written to
   `.claude/settings.local.json` by default for Claude Code (this project only), and for Codex to
   the narrowest `config.toml` where the key takes effect; never a wider scope silently.
@@ -139,10 +169,9 @@ Output flags:
 
 ## Status
 
-P0 for the Claude Code chain is shipped on `main`; preview builds install via the tap. P0.5 (the
-Codex CLI): the resolver, its config switches and every surface above are on `main`; checking the
-Codex tree against a real Codex session (`harn verify --agent codex`) is in progress. Open
-follow-ups: https://github.com/2lab-ai/harn/issues.
+Claude Code (P0) and the Codex CLI (P0.5) are shipped on `main`, each with `harn verify`; preview
+builds install via the tap. Next (P1): `harn trim --agent codex`, usage evidence in the brief, and
+tool schemas from a live Codex run. Open follow-ups: https://github.com/2lab-ai/harn/issues.
 
 ## Development
 
