@@ -889,6 +889,89 @@ fn a_message_whose_kinds_do_not_pair_with_its_content_is_named_by_markers_with_a
 }
 
 #[test]
+fn intact_content_with_unpairable_kinds_is_a_warning_and_still_passes() {
+    // Every part as in the fixture; only a message's kinds are malformed. The markers name the
+    // same blocks, so the report is the pristine one (same fixture) plus the warning.
+    for input in [0, 1] {
+        let parts = [4, 2][input];
+        for (edit, warning) in [
+            (
+                "one kind too many",
+                format!("prompt-input.json: input[{input}] has {parts} content items but {} content_item_kinds; its blocks are named by their markers, not their kinds", parts + 1),
+            ),
+            (
+                "a string",
+                format!("prompt-input.json: input[{input}]: content_item_kinds is a string, not an array; its blocks are named by their markers, not their kinds"),
+            ),
+        ] {
+            let f = fx();
+            let pristine = verify_codex(&mut statics(&f), &capture(&f, |_| {}));
+            assert!(pristine.passed);
+            let c = capture(&f, |items| {
+                let k = &mut items[input]["internal_chat_message_metadata_passthrough"]
+                    ["content_item_kinds"];
+                if edit == "a string" {
+                    *k = Value::String("permissions.instructions".to_string());
+                } else {
+                    k.as_array_mut()
+                        .unwrap()
+                        .push(Value::String("permissions.instructions".to_string()));
+                }
+            });
+            assert!(c.warnings.contains(&warning), "{edit}: {:?}", c.warnings);
+            let mut tree = statics(&f);
+            let report = verify_codex(&mut tree, &c);
+            assert!(report.notes.contains(&format!("warning: {warning}")), "{edit}");
+            assert_eq!(report.rows, pristine.rows, "input[{input}], {edit}");
+            assert_eq!(report.promoted, pristine.promoted, "input[{input}], {edit}");
+            assert!(report.passed, "input[{input}], {edit}: a warning alone does not fail");
+        }
+    }
+}
+
+#[test]
+fn an_extra_part_whose_kind_and_marker_disagree_is_seen_not_predicted() {
+    // Every expected block intact, kinds aligned; one more part says permissions by its kind
+    // and plugins by its marker.
+    let f = fx();
+    let c = capture(&f, |items| {
+        items[0]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "input_text",
+                "text": "<plugins_instructions>\nAnother.\n</plugins_instructions>"
+            }));
+        items[0]["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::String("permissions.instructions".to_string()));
+    });
+    let warning = "prompt-input.json: input[0].part[4]: its content kind permissions.instructions names permissions_instructions, but its text opens with the marker of plugins_instructions (<plugins_instructions>); named by neither, kept as an unknown block";
+    assert!(c.warnings.iter().any(|w| w == warning), "{:?}", c.warnings);
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let unknown = id(
+        Kind::SystemPrompt,
+        Layer::Unresolved,
+        "input[0].part[4] (kind permissions.instructions, marker <plugins_instructions>)",
+    );
+    assert_eq!(
+        failing(&report),
+        vec![&(unknown, RowVerdict::SeenNotPredicted)]
+    );
+    for name in ["permissions_instructions", "plugins_instructions"] {
+        assert_eq!(
+            verdict(&report, &id(Kind::SystemPrompt, Layer::Builtin, name)),
+            Some(&RowVerdict::Seen),
+            "{name}"
+        );
+    }
+    assert!(report.notes.contains(&format!("warning: {warning}")));
+    assert!(!report.passed);
+}
+
+#[test]
 fn servers_and_plugins_are_matched_against_codex_lists() {
     let f = fx();
     let dir = capture_dir(&f, |_| {});

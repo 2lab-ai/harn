@@ -37,13 +37,18 @@
 //! (`core/src/context_manager/updates.rs:12-30`); the kind names the block. Without it (or for a
 //! kind not in [`BLOCKS`]) the block's opening marker decides; an unmarked first part of the
 //! first developer message is `developer_instructions` (`core/src/session/mod.rs:4321-4328`).
-//! Anything else is kept under its kind (or position) so `verify` can report it. Both fail
-//! closed, with a capture warning: a message whose kinds are not a list with one per content
-//! item is named as if it had none (paired by index, a kind would name another item), and a
-//! part whose kind names one block while its text opens with another block's marker is named by
-//! neither — it is kept as an unknown block that shows both. A region is one
-//! block: `input[<i>] <role> · <block>`, its bytes the UTF-8 length of the text; the regions
-//! partition the text of the input list, not a wire body (instructions and tools are absent).
+//! Anything else is kept under its kind (or position) so `verify` can report it.
+//!
+//! Kinds harn cannot pair with their content are left out of the naming and reported as a
+//! capture warning: a message whose kinds are not a list with one per content item is named as if
+//! it had none (paired by index, a kind would name another item), and a part whose kind names one
+//! block while its text opens with another block's marker is named by neither — it is kept as an
+//! unknown block that shows both. A warning alone does not fail `verify`; the rows decide (a
+//! block named by neither is seen-not-predicted, and the row it was predicted for is not seen).
+//!
+//! A region is one block: `input[<i>] <role> · <block>`, its bytes the UTF-8 length of the text;
+//! the regions partition the text of the input list, not a wire body (instructions and tools are
+//! absent).
 
 use super::Region;
 use crate::model::{
