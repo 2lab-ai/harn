@@ -1765,21 +1765,37 @@ mod tests {
             context_window: None,
             bytes_per_token: None,
         };
-        let exit = run_step(
-            &target,
-            &bin,
-            &[],
-            &root.join("out"),
-            &root.join("err"),
-            std::time::Duration::from_millis(1500),
-        )
-        .unwrap();
-        assert_eq!(exit, None, "killed at the timeout");
-        let pid: i32 = std::fs::read_to_string(&pidfile)
-            .unwrap()
-            .trim()
-            .parse()
+        // Under load the group can be killed before the script has recorded its descendant (no
+        // pidfile, or an empty one): such a run proves nothing either way, so it is run again
+        // with twice the timeout, up to 3 runs.
+        let timeouts = [1500, 3000, 6000].map(std::time::Duration::from_millis);
+        let mut recorded = None;
+        for timeout in timeouts {
+            let _ = std::fs::remove_file(&pidfile);
+            let exit = run_step(
+                &target,
+                &bin,
+                &[],
+                &root.join("out"),
+                &root.join("err"),
+                timeout,
+            )
             .unwrap();
+            assert_eq!(exit, None, "killed at the timeout");
+            recorded = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+                .filter(|&pid| pid > 0);
+            if recorded.is_some() {
+                break;
+            }
+        }
+        let Some(pid) = recorded else {
+            std::fs::remove_dir_all(&root).unwrap();
+            panic!(
+                "the script never recorded its descendant before being killed (timeouts {timeouts:?}): the host is too loaded for this run to show anything"
+            );
+        };
         // A killed descendant is a zombie until init reaps the orphan; poll for that.
         let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
