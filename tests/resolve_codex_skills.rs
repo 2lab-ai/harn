@@ -5,7 +5,8 @@
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
 use harn::resolve::codex::{
-    BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV, ROOT_PREFIX,
+    BUNDLED_ROOT_PREFIX, BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, CATALOG_GATED,
+    PROFILE_ENV, ROOT_PREFIX,
 };
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
@@ -629,6 +630,21 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
         "bundled skills: ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so the presence and listing lines of its 3 skills are confirmed by `harn verify --run --agent codex`"
     );
     let t = resolve(&ctarget(&f), None);
+    // The table names the bundled root (`r1`, after the user root), and the framing says so.
+    let framing = row(&t, "codex/system-prompt/builtin/skills_instructions");
+    let system = std::fs::canonicalize(f.codex.join("skills/.system")).unwrap();
+    let in_table =
+        framing.origin.why.iter().any(|w| {
+            w.starts_with(ROOT_PREFIX) && w.ends_with(&format!(" = `{}`", system.display()))
+        });
+    let marked: Vec<&str> = framing
+        .origin
+        .why
+        .iter()
+        .filter_map(|w| w.strip_prefix(BUNDLED_ROOT_PREFIX))
+        .collect();
+    assert!(in_table, "{:?}", framing.origin.why);
+    assert_eq!(marked, [system.display().to_string()]);
     for name in ["imagegen", "skill-creator", "quiet"] {
         let r = row(&t, &format!("codex/skill/builtin/{name}"));
         assert_eq!(r.signal.as_deref(), Some(signal.as_str()), "{name}");

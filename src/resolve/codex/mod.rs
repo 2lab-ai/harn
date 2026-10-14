@@ -55,7 +55,9 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub use config::PROFILE_ENV;
-pub use skills::{BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, ROOT_PREFIX};
+pub use skills::{
+    BUNDLED_ROOT_PREFIX, BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, ROOT_PREFIX,
+};
 
 /// Signal prefix of a row whose presence the model's catalog entry decides while harn does not
 /// know what codex will read there ([`Ctx::catalog_entry`]: no model in config, `model_catalog_json`

@@ -7,7 +7,7 @@
 
 use harn::model::{item_id, walk, Agent, Cost, Item, Kind, Layer, Mode, Origin, Target, Tree};
 use harn::oracle::codex::{self as oracle, CodexCapture};
-use harn::resolve::codex::ROOT_PREFIX;
+use harn::resolve::codex::{BUNDLED_ROOT_PREFIX, ROOT_PREFIX};
 use harn::resolve::{Codex, Resolver};
 use harn::verify::{
     verify_codex, RowVerdict, VerifyReport, ACCOUNT_PLUGIN, BUNDLED_SKILL, BUNDLED_SKILLS_WHY,
@@ -1761,6 +1761,10 @@ fn bundled_case(f: &Fx, edit: impl FnOnce(&mut Value)) -> (Tree, CodexCapture) {
         .origin
         .why
         .push(format!("{ROOT_PREFIX}- `r2` = `{}`", system.display()));
+    framing
+        .origin
+        .why
+        .push(format!("{BUNDLED_ROOT_PREFIX}{}", system.display()));
     let listing = tree
         .items
         .iter_mut()
@@ -1883,12 +1887,12 @@ fn a_bundled_skill_the_folder_keeps_out_of_the_listing_is_not_checkable_when_lis
 }
 
 #[test]
-fn a_bundled_skill_listed_by_absolute_path_is_known_by_its_folder() {
-    // Without a roots table codex names the file in full; the `.system` dir still says where
-    // it is from.
+fn a_bundled_skill_listed_by_absolute_path_is_known_by_the_recorded_root() {
+    // Codex names the file in full (no roots-table line for it); the capture records the
+    // bundled root the run saw, which proves where it is from.
     let f = fx();
     let path = f.home.join(".codex/skills/.system/imagegen/SKILL.md");
-    let c = capture(&f, |items| {
+    let dir = capture_dir(&f, |items| {
         replace_in(
             items,
             0,
@@ -1900,6 +1904,10 @@ fn a_bundled_skill_listed_by_absolute_path_is_known_by_its_folder() {
             ),
         )
     });
+    edit_manifest(&dir, |m| {
+        m["bundled_root"] = Value::from(f.home.join(".codex/skills/.system").display().to_string())
+    });
+    let c = oracle::read_capture_dir(&dir, &target(&f)).unwrap();
     let mut tree = statics(&f);
     let report = verify_codex(&mut tree, &c);
     assert!(matches!(
@@ -2280,6 +2288,10 @@ fn harn_read_bundled(f: &Fx, name: &str, description: &str) -> Tree {
         .replacen("`r1`", "`r2`", 1);
     framing.origin.why.push(format!("{ROOT_PREFIX}{added}"));
     framing.origin.why.push(plugin_root);
+    framing
+        .origin
+        .why
+        .push(format!("{BUNDLED_ROOT_PREFIX}{}", system.display()));
     let listing = tree
         .items
         .iter_mut()
@@ -2570,8 +2582,8 @@ fn a_retained_inactive_listing_with_only_bundled_entries_observed_is_not_checkab
 
 #[test]
 fn an_alias_is_exempt_only_when_the_tables_agree_without_the_bundled_root() {
-    // Codex adds the bundled root and also a repo root harn did not predict: beta's alias moves
-    // for a reason that is not the bundled root, so its line is a mismatch again.
+    // Codex adds the bundled root and also an extra repo root harn did not predict: the tables
+    // disagree for a reason that is not the bundled root, so beta's moved alias is a mismatch.
     let f = fx();
     let c = capture(&f, |items| {
         system_root_added(&f, items);
@@ -2599,4 +2611,244 @@ fn an_alias_is_exempt_only_when_the_tables_agree_without_the_bundled_root() {
         ),
         Some(RowVerdict::ContentMismatch { .. })
     ));
+}
+
+#[test]
+fn a_permutation_of_two_unrelated_roots_is_not_explained_by_the_bundled_root() {
+    // Codex adds the bundled root and lists the user and plugin roots in the other order: the
+    // same roots, permuted, so the tables disagree once the bundled line is dropped.
+    let f = fx();
+    let user = f.home.join(".codex/skills");
+    let plugin = f
+        .home
+        .join(".codex/plugins/cache/demo-mkt/demo-plugin/local/skills");
+    let system = f.home.join(".codex/skills/.system");
+    let c = capture(&f, |items| {
+        let text = text_mut(items, 0, 1);
+        let old = text.as_str().unwrap().to_string();
+        let table = format!(
+            "- `r0` = `{}`\n- `r1` = `{}`\n",
+            user.display(),
+            plugin.display()
+        );
+        let permuted = format!(
+            "- `r0` = `{}`\n- `r1` = `{}`\n- `r2` = `{}`\n",
+            plugin.display(),
+            system.display(),
+            user.display()
+        );
+        assert!(old.contains(&table));
+        let new = old
+            .replacen(&table, &permuted, 1)
+            .replacen("(file: r0/alpha/SKILL.md)", "(file: r2/alpha/SKILL.md)", 1)
+            .replacen("(file: r1/beta/SKILL.md)", "(file: r0/beta/SKILL.md)", 1)
+            .replacen(
+                "### Available skills\n",
+                "### Available skills\n- imagegen: Generate images. (file: r1/imagegen/SKILL.md)\n",
+                1,
+            );
+        *text = Value::String(new);
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    for row in [
+        id(Kind::Skill, Layer::User, "alpha"),
+        id(Kind::Skill, Layer::Plugin, "demo-plugin:beta"),
+        id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions"),
+    ] {
+        assert!(
+            matches!(
+                verdict(&report, &row),
+                Some(RowVerdict::ContentMismatch { .. })
+            ),
+            "{row}: {:?}",
+            verdict(&report, &row)
+        );
+    }
+    assert!(!report.passed);
+}
+
+// ---- review round 3: the bundled root is bound to the capture, not to the verifier -----------
+
+/// Rewrites the capture manifest of `dir` (parsed JSON).
+fn edit_manifest(dir: &Path, edit: impl FnOnce(&mut Value)) {
+    let path = dir.join(oracle::MANIFEST);
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut manifest);
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// Adds `- r2 = <root>` to codex's roots table and `name` listed from it, before the others.
+fn listed_from(items: &mut Value, root: &Path, name: &str) {
+    replace_in(
+        items,
+        0,
+        1,
+        "### Available skills\n",
+        &format!(
+            "- `r2` = `{}`\n### Available skills\n- {name}: Bundled. (file: r2/{name}/SKILL.md)\n",
+            root.display()
+        ),
+    );
+}
+
+const RECONSTRUCTED: &str = "bundled skills: the bundled root harn reconstructs for this capture (";
+
+#[test]
+fn a_relative_codex_home_resolves_against_the_capture_cwd_not_the_verifier() {
+    // Codex ran in `sub` with CODEX_HOME=.codex-home; harn verifies from its own cwd.
+    let f = fx();
+    let home = f.sub.join(".codex-home");
+    std::fs::create_dir_all(home.join("skills/.system/imagegen")).unwrap();
+    assert_ne!(std::env::current_dir().unwrap(), f.sub);
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), ".codex-home".to_string());
+    let dir = capture_dir(&f, |items| {
+        listed_from(items, &home.join("skills/.system"), "imagegen")
+    });
+    edit_manifest(&dir, |m| {
+        m["env"]["CODEX_HOME"] = Value::from(".codex-home")
+    });
+    let c = oracle::read_capture_dir(&dir, &t).unwrap();
+    assert!(
+        !c.warnings.iter().any(|w| w.starts_with(RECONSTRUCTED)),
+        "{:?}",
+        c.warnings
+    );
+    assert_eq!(c.bundled_root, Some(home.join("skills/.system")));
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(
+        matches!(
+            verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+            Some(RowVerdict::NotCheckable { .. })
+        ),
+        "{:?}",
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen"))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_recorded_bundled_root_wins_over_where_codex_home_points_now() {
+    // At capture time CODEX_HOME (a symlink) pointed to home-a; it points to home-b now.
+    let f = fx();
+    let (a, b) = (f.root.join("home-a"), f.root.join("home-b"));
+    for h in [&a, &b] {
+        std::fs::create_dir_all(h.join("skills/.system")).unwrap();
+    }
+    let link = f.root.join("codex-link");
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), link.display().to_string());
+    let dir = capture_dir(&f, |items| {
+        listed_from(items, &a.join("skills/.system"), "imagegen");
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            &format!(
+                "- rogue: Today's target. (file: {})\n### How to use skills",
+                b.join("skills/.system/rogue/SKILL.md").display()
+            ),
+        );
+    });
+    edit_manifest(&dir, |m| {
+        m["env"]["CODEX_HOME"] = Value::from(link.display().to_string());
+        m["bundled_root"] = Value::from(a.join("skills/.system").display().to_string());
+    });
+    let c = oracle::read_capture_dir(&dir, &t).unwrap();
+    assert_eq!(c.bundled_root, Some(a.join("skills/.system")));
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(matches!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    assert_eq!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "rogue")),
+        Some(&RowVerdict::SeenNotPredicted)
+    );
+}
+
+#[test]
+fn a_capture_without_a_recorded_root_still_reads() {
+    // The fixture's manifest predates `bundled_root`.
+    let f = fx();
+    let c = capture(&f, |_| {});
+    assert_eq!(c.bundled_root, None, "codex listed no bundled root");
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    // Codex listed the root harn rebuilds (`.codex` in the home, CODEX_HOME unset): bound.
+    let c = capture(&f, |items| system_root_added(&f, items));
+    assert_eq!(c.bundled_root, Some(f.home.join(".codex/skills/.system")));
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+}
+
+#[test]
+#[cfg(unix)]
+fn a_run_records_the_bundled_root_against_its_cwd() {
+    let f = fx();
+    let bin = fake_codex(&f);
+    std::fs::create_dir_all(f.sub.join(".codex-run")).unwrap();
+    let mut t = target(&f);
+    t.env.insert(
+        "PATH".to_string(),
+        std::env::var("PATH").unwrap_or_default(),
+    );
+    t.env
+        .insert("CODEX_HOME".to_string(), ".codex-run".to_string());
+    let c = oracle::run_codex(&t, &bin).expect("the prompt capture is kept");
+    let dir = c.dir.clone().unwrap();
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(oracle::MANIFEST)).unwrap())
+            .unwrap();
+    let recorded = f.sub.join(".codex-run/skills/.system");
+    assert_eq!(manifest["schema"], "harn-codex-capture/1");
+    assert_eq!(
+        manifest["bundled_root"],
+        Value::from(recorded.display().to_string())
+    );
+    assert_eq!(c.bundled_root, Some(recorded));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_reconstructed_root_codex_did_not_list_binds_nothing_and_says_why() {
+    // An old capture (no recorded root) whose listing names a bundled-looking file absolutely:
+    // the root harn reconstructs is not in codex's roots table, so nothing is bundled.
+    let f = fx();
+    let path = f.home.join(".codex/skills/.system/imagegen/SKILL.md");
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### Available skills\n",
+            &format!(
+                "### Available skills\n- imagegen: Generate images. (file: {})\n",
+                path.display()
+            ),
+        )
+    });
+    let warning = c
+        .warnings
+        .iter()
+        .find(|w| w.starts_with(RECONSTRUCTED))
+        .unwrap_or_else(|| panic!("{:?}", c.warnings));
+    assert!(
+        warning.contains(&f.home.join(".codex/skills/.system").display().to_string()),
+        "{warning}"
+    );
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        Some(&RowVerdict::SeenNotPredicted)
+    );
+    assert!(report.notes.contains(&format!("warning: {warning}")));
+    assert!(!report.passed);
 }

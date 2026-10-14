@@ -83,6 +83,10 @@ pub const BUNDLED_SKILLS_WHY: &str = "holds the system skills of the last codex 
 /// predicts (`` - `rN` = `<dir>` ``).
 pub const ROOT_PREFIX: &str = "rendered root: ";
 
+/// The `origin.why` prefix under which the framing row names the roots-table value that is the
+/// bundled root (`$CODEX_HOME/skills/.system` resolved), when the table it predicts has it.
+pub const BUNDLED_ROOT_PREFIX: &str = "bundled root: ";
+
 /// The listing container's id name and the framing row's id name.
 pub(crate) const LISTING: &str = "skills";
 pub(crate) const FRAMING: &str = "skills_instructions";
@@ -1339,11 +1343,20 @@ fn framing_row(ctx: &Ctx, r: &Rendered, knobs: Vec<Knob>) -> Item {
     item.origin.why = vec![
         "`<skills_instructions>` developer block around the listing: `## Skills`, the intro, the roots table when used, `### Available skills` (ext/skills/src/catalog_prompt.rs:81-106)".to_string(),
     ];
-    // The roots table as rendered: verify compares it with codex's when the bundled root's line
-    // is on one side only.
+    // The roots table as rendered, and which of its lines is the bundled root: verify compares it
+    // with codex's when the bundled root's line is on one side only.
     item.origin
         .why
         .extend(r.roots.iter().map(|line| format!("{ROOT_PREFIX}{line}")));
+    let bundled = slash(&ctx.fs.realpath(&ctx.codex_home.join("skills/.system")));
+    if r.roots
+        .iter()
+        .any(|line| line.ends_with(&format!(" = `{bundled}`")))
+    {
+        item.origin
+            .why
+            .push(format!("{BUNDLED_ROOT_PREFIX}{bundled}"));
+    }
     match ctx.catalog_flag("include_skills_usage_instructions") {
         Ok(usage) => {
             item.cost = Cost {

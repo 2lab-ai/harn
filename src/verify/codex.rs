@@ -24,8 +24,8 @@
 //!   not list, one codex listed from its `.system` root that harn did not predict, and one listed
 //!   with another line are not checkable, never a failure. An exemption needs proof that the
 //!   contribution is bundled: on the static side the row's signal, on the capture side the
-//!   entry's `SKILL.md` path under the bundled root of this run ([`BundledRoot`]:
-//!   `<CODEX_HOME>/skills/.system`, as a path prefix, never a dir name). A bundled row and an
+//!   entry's `SKILL.md` path under the bundled root of the run ([`BundledRoot`]: the capture's
+//!   [`CodexCapture::bundled_root`], bound at capture time, as a path prefix, never a dir name). A bundled row and an
 //!   entry not proven bundled (or the reverse) are never joined, even by name. When the bundled
 //!   root's line is in only one of the two `### Skill roots` tables ([`RootShift`]: codex
 //!   installs `.system` at start where harn read none, or lists none where harn read some), the
@@ -87,7 +87,7 @@ pub const RUNTIME_DECIDED: &[(&str, &str)] = &[
 /// read: such a row codex did not render is not checkable. Defined by the resolver.
 pub use crate::resolve::codex::CATALOG_GATED;
 
-use crate::resolve::codex::ROOT_PREFIX;
+use crate::resolve::codex::{BUNDLED_ROOT_PREFIX, ROOT_PREFIX};
 /// Prefix of a `.system` skill row's `signal`; defined by the resolver (see the module docs).
 pub use crate::resolve::codex::{BUNDLED_SKILL, BUNDLED_SKILLS_WHY};
 
@@ -219,7 +219,7 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
             .as_deref()
     };
     // Provenance: a skill row joins an entry only if both are bundled or neither is.
-    let root = BundledRoot::new(static_tree, capture);
+    let root = BundledRoot::new(capture);
     let same_provenance = |s: &Node, ci: usize| {
         s.kind != Kind::Skill || bundled(s).is_some() == root.holds(observed_path(ci))
     };
@@ -568,39 +568,16 @@ fn bundled(node: &Node) -> Option<&str> {
         .filter(|g| node.kind == Kind::Skill && g.starts_with(BUNDLED_SKILL))
 }
 
-/// Codex's bundled root for this run, `<CODEX_HOME>/skills/.system` (`ext/skills/src/host_roots.rs:56-131`):
-/// `CODEX_HOME` as the run saw it, else `.codex` in the tree's home
-/// (`utils/home-dir/src/lib.rs:13-17`), as written and resolved (codex prints the resolved root).
-/// Empty when neither is known: then nothing is proven bundled.
+/// Codex's bundled root in the run, `<CODEX_HOME>/skills/.system`
+/// (`ext/skills/src/host_roots.rs:56-131`), as the capture binds it
+/// ([`CodexCapture::bundled_root`]: recorded by the run, or rebuilt from the recorded env and
+/// found in codex's own roots table) — never resolved in the verifier's filesystem now. Empty
+/// when the capture has none: then nothing is proven bundled.
 struct BundledRoot(Vec<PathBuf>);
 
 impl BundledRoot {
-    fn new(tree: &Tree, capture: &CodexCapture) -> BundledRoot {
-        let home = match capture
-            .env
-            .get("CODEX_HOME")
-            .and_then(Option::as_deref)
-            .filter(|v| !v.is_empty())
-        {
-            Some(v) => Some(PathBuf::from(v)),
-            None => tree.home.as_ref().map(|h| h.join(".codex")),
-        };
-        let mut out: Vec<PathBuf> = Vec::new();
-        if let Some(home) = home {
-            let root = home.join("skills/.system");
-            let resolved = [
-                std::fs::canonicalize(&root).ok(),
-                std::fs::canonicalize(&home)
-                    .ok()
-                    .map(|h| h.join("skills/.system")),
-            ];
-            for p in std::iter::once(root).chain(resolved.into_iter().flatten()) {
-                if !out.contains(&p) {
-                    out.push(p);
-                }
-            }
-        }
-        BundledRoot(out)
+    fn new(capture: &CodexCapture) -> BundledRoot {
+        BundledRoot(capture.bundled_root.iter().cloned().collect())
     }
 
     /// Whether `path` (a listed `SKILL.md`) lies under the bundled root, by path components.
@@ -639,23 +616,26 @@ impl RootShift {
             .iter()
             .find(|s| s.kind == Kind::SystemPrompt && s.name == names::SKILLS_FRAMING)?;
         let owned = |(alias, root): (&str, &str)| (alias.to_string(), root.to_string());
-        let predicted: Vec<(String, String)> = get(&tree.items, &framing.path)
-            .origin
-            .why
+        let why = &get(&tree.items, &framing.path).origin.why;
+        let predicted: Vec<(String, String)> = why
             .iter()
             .filter_map(|w| w.strip_prefix(ROOT_PREFIX))
             .filter_map(parse_root_line)
             .map(owned)
             .collect();
+        // harn's own bundled line is known from harn's resolution; codex's only from the capture.
+        let harn_root = why.iter().find_map(|w| w.strip_prefix(BUNDLED_ROOT_PREFIX));
+        let harns = |r: &str| harn_root == Some(r);
+        let codexs = |r: &str| root.is(r);
         let listed: Vec<(String, String)> =
             parse_skill_roots(&capture.block(names::SKILLS_FRAMING)?.text)
                 .into_iter()
                 .map(owned)
                 .collect();
-        let bundled = |roots: &[(String, String)]| roots.iter().any(|(_, r)| root.is(r));
-        let in_listing = bundled(&listed);
-        let agree = renumbered(&predicted, root) == renumbered(&listed, root);
-        (in_listing != bundled(&predicted)).then_some(RootShift {
+        let in_listing = listed.iter().any(|(_, r)| codexs(r));
+        let in_predicted = predicted.iter().any(|(_, r)| harns(r));
+        let agree = renumbered(&predicted, harns) == renumbered(&listed, codexs);
+        (in_listing != in_predicted).then_some(RootShift {
             predicted,
             listed,
             in_listing,
@@ -705,11 +685,11 @@ fn root_line(alias: &str, root: &str) -> String {
     format!("- `{alias}` = `{root}`")
 }
 
-/// The table without the bundled root, aliases numbered again from `r0`.
-fn renumbered(roots: &[(String, String)], bundled: &BundledRoot) -> Vec<String> {
+/// The table without the bundled root's line, aliases numbered again from `r0`.
+fn renumbered(roots: &[(String, String)], bundled: impl Fn(&str) -> bool) -> Vec<String> {
     roots
         .iter()
-        .filter(|(_, root)| !bundled.is(root))
+        .filter(|(_, root)| !bundled(root))
         .enumerate()
         .map(|(i, (_, root))| root_line(&format!("r{i}"), root))
         .collect()
