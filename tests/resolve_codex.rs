@@ -1,0 +1,788 @@
+//! Codex resolver against fixtures built per test in a temp dir: `home/.codex` (the Codex home)
+//! and `repo/` (a git checkout, `.git/HEAD` present). No file outside the temp dir is read except
+//! `/etc/codex`, which these tests assume absent (as the Claude Code tests assume no managed
+//! settings). Layering with the system and managed files is covered in `src/resolve/codex`.
+
+use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
+use harn::resolve::codex::PROFILE_ENV;
+use harn::resolve::{Codex, Resolver};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Fx {
+    root: PathBuf,
+    home: PathBuf,
+    codex: PathBuf,
+    repo: PathBuf,
+}
+
+impl Drop for Fx {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn fx() -> Fx {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "harn-codex-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let home = root.join("home");
+    let codex = home.join(".codex");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&codex).unwrap();
+    write(&repo.join(".git/HEAD"), "ref: refs/heads/main\n");
+    Fx {
+        root,
+        home,
+        codex,
+        repo,
+    }
+}
+
+fn write(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn target_at(f: &Fx, dir: &Path) -> Target {
+    std::fs::create_dir_all(dir).unwrap();
+    Target {
+        dir: dir.to_path_buf(),
+        home: f.home.clone(),
+        env: BTreeMap::new(),
+        model: None,
+        context_window: None,
+        bytes_per_token: None,
+    }
+}
+
+fn target(f: &Fx) -> Target {
+    target_at(f, &f.repo)
+}
+
+fn resolve(t: &Target, overlay: Option<&Overlay>) -> Tree {
+    Codex.resolve(t, overlay).expect("resolve")
+}
+
+/// `[projects."<dir>"] trust_level = "<level>"` plus `extra` in the user config.
+fn user_config(f: &Fx, trust: Option<(&Path, &str)>, extra: &str) {
+    let mut text = String::from(extra);
+    if let Some((dir, level)) = trust {
+        text.push_str(&format!(
+            "\n[projects.\"{}\"]\ntrust_level = \"{level}\"\n",
+            dir.display()
+        ));
+    }
+    write(&f.codex.join("config.toml"), &text);
+}
+
+fn find<'t>(tree: &'t Tree, suffix: &str) -> Option<&'t Item> {
+    model::walk(tree).find(|i| i.id.ends_with(suffix))
+}
+
+fn row<'t>(tree: &'t Tree, suffix: &str) -> &'t Item {
+    find(tree, suffix).unwrap_or_else(|| {
+        let ids: Vec<&str> = model::walk(tree).map(|i| i.id.as_str()).collect();
+        panic!("no row ending in {suffix}: {ids:#?}")
+    })
+}
+
+fn project_rows(tree: &Tree) -> Vec<&Item> {
+    model::walk(tree)
+        .filter(|i| i.kind == Kind::Instruction && i.origin.layer == Layer::Project)
+        .collect()
+}
+
+fn signal<'t>(tree: &'t Tree, prefix: &str) -> &'t str {
+    tree.signals
+        .iter()
+        .find(|s| s.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no `{prefix}` signal: {:?}", tree.signals))
+}
+
+fn setting(knob: &Knob) -> (&Path, &str, &Value, Scope) {
+    match knob {
+        Knob::Setting {
+            file,
+            pointer,
+            value,
+            scope,
+            ..
+        } => (file.as_path(), pointer.as_str(), value, *scope),
+        other => panic!("not a setting knob: {other:?}"),
+    }
+}
+
+/// Framing bytes of the AGENTS.md message (`core/src/context/user_instructions.rs:23-34`).
+fn framing(cwd: Option<&Path>, global: bool, project_files: usize) -> u64 {
+    let mut n =
+        "# AGENTS.md instructions".len() + "\n\n<INSTRUCTIONS>\n".len() + "\n</INSTRUCTIONS>".len();
+    if let Some(cwd) = cwd {
+        n += " for ".len() + cwd.display().to_string().len();
+        n += project_files.saturating_sub(1) * 2;
+        if global {
+            n += "\n\n--- project-doc ---\n\n".len();
+        }
+    }
+    n as u64
+}
+
+const BLOCKS: &[(&str, &str)] = &[
+    (
+        "permissions_instructions",
+        "/include_permissions_instructions",
+    ),
+    (
+        "collaboration_mode",
+        "/include_collaboration_mode_instructions",
+    ),
+    ("apps_instructions", "/include_apps_instructions"),
+    ("multi_agent", "/agents/enabled"),
+    ("environment_context", "/include_environment_context"),
+];
+
+#[test]
+fn builtin_rows_are_present_with_their_knobs() {
+    let f = fx();
+    user_config(&f, None, "");
+    let t = resolve(&target(&f), None);
+    assert_eq!(t.agent, model::Agent::Codex);
+    assert_eq!(t.rules_verified_against, "0.160.1");
+
+    let base = row(&t, "codex/system-prompt/builtin/instructions");
+    assert!(
+        matches!(base.knobs.as_slice(), [Knob::None { reason }] if reason.contains("STRONGLY DISCOURAGED"))
+    );
+    assert_eq!(base.cost.predicted, None, "no model, no catalog: `?`");
+
+    for (name, pointer) in BLOCKS {
+        let item = row(&t, &format!("/builtin/{name}"));
+        assert_eq!(item.origin.layer, Layer::Builtin);
+        assert_eq!(item.mode, Mode::Always);
+        assert_eq!(
+            item.cost,
+            Default::default(),
+            "{name}: generated text is `?`"
+        );
+        // Trust unset: the project file would be ignored, so only the user file is a knob.
+        match item.knobs.as_slice() {
+            [knob] => {
+                let (file, p, value, scope) = setting(knob);
+                assert_eq!(file, f.codex.join("config.toml"));
+                assert_eq!(p, *pointer);
+                assert_eq!(value, &json!(false));
+                assert_eq!(scope, Scope::User);
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert_eq!(
+        row(&t, "/environment_context").kind,
+        Kind::EnvBlock,
+        "environment is an env block"
+    );
+    // Request order: instructions, developer blocks, multi-agent, user message.
+    let order: Vec<&str> = t
+        .items
+        .iter()
+        .map(|i| i.id.rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "instructions",
+            "permissions_instructions",
+            "collaboration_mode",
+            "apps_instructions",
+            "multi_agent",
+            "environment_context"
+        ]
+    );
+    assert_eq!(t.unknown_rows, 6);
+    assert_eq!(t.predicted_known, 0);
+
+    // Trusted: the target dir's `.codex/config.toml` is the narrower knob, listed first.
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target(&f), None);
+    let env = row(&t, "/environment_context");
+    let scopes: Vec<(PathBuf, Scope)> = env
+        .knobs
+        .iter()
+        .map(|k| {
+            let (file, _, _, scope) = setting(k);
+            (file.to_path_buf(), scope)
+        })
+        .collect();
+    assert_eq!(
+        scopes,
+        [
+            (f.repo.join(".codex/config.toml"), Scope::Project),
+            (f.codex.join("config.toml"), Scope::User)
+        ]
+    );
+}
+
+#[test]
+fn switched_off_blocks_leave_the_tree() {
+    let f = fx();
+    user_config(
+        &f,
+        None,
+        "include_permissions_instructions = false\ninclude_collaboration_mode_instructions = false\ninclude_apps_instructions = false\ninclude_environment_context = false\n[agents]\nenabled = false\n",
+    );
+    let t = resolve(&target(&f), None);
+    for (name, _) in BLOCKS {
+        assert!(find(&t, &format!("/builtin/{name}")).is_none(), "{name}");
+    }
+    assert_eq!(t.items.len(), 1, "only the base instructions remain");
+}
+
+#[test]
+fn overlay_set_json_on_config_toml_removes_the_row() {
+    let f = fx();
+    user_config(&f, None, "model = \"m\"\n");
+    let t = resolve(&target(&f), None);
+    let env = row(&t, "/environment_context");
+    let (file, pointer, value, _) = setting(&env.knobs[0]);
+    let overlay = Overlay {
+        ops: vec![OverlayOp::SetJson {
+            file: file.to_path_buf(),
+            pointer: pointer.to_string(),
+            value: value.clone(),
+        }],
+    };
+    let after = resolve(&target(&f), Some(&overlay));
+    assert!(find(&after, "/environment_context").is_none());
+    assert_eq!(after.items.len() + 1, t.items.len(), "nothing else changes");
+    // The patch is virtual: the file on disk is untouched.
+    assert_eq!(
+        std::fs::read_to_string(f.codex.join("config.toml")).unwrap(),
+        "model = \"m\"\n"
+    );
+
+    // A patch on a project config that does not exist yet still counts once the dir is trusted.
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target(&f), None);
+    let (file, pointer, value, scope) = setting(&row(&t, "/apps_instructions").knobs[0]);
+    assert_eq!(scope, Scope::Project);
+    assert!(!file.exists());
+    let overlay = Overlay {
+        ops: vec![OverlayOp::SetJson {
+            file: file.to_path_buf(),
+            pointer: pointer.to_string(),
+            value: value.clone(),
+        }],
+    };
+    let after = resolve(&target(&f), Some(&overlay));
+    assert!(find(&after, "/apps_instructions").is_none());
+}
+
+#[test]
+fn profile_layers_on_top_of_the_user_config() {
+    let f = fx();
+    user_config(
+        &f,
+        None,
+        "model = \"user-model\"\ninclude_apps_instructions = false\n",
+    );
+    write(
+        &f.codex.join("work.config.toml"),
+        "model = \"work-model\"\ninclude_apps_instructions = true\n",
+    );
+
+    let t = resolve(&target(&f), None);
+    assert!(find(&t, "/apps_instructions").is_none());
+    assert!(signal(&t, "model:").starts_with("model: user-model ("));
+
+    let mut tp = target(&f);
+    tp.env.insert(PROFILE_ENV.to_string(), "work".to_string());
+    let t = resolve(&tp, None);
+    assert!(find(&t, "/apps_instructions").is_some());
+    let model = signal(&t, "model:");
+    assert!(model.starts_with("model: work-model ("), "{model}");
+    assert!(model.contains("work.config.toml#/model"), "{model}");
+    assert!(signal(&t, "profile:").contains("work"));
+    // The profile sets the key above the user file: a user-file knob would not take effect.
+    assert!(matches!(
+        row(&t, "/apps_instructions").knobs.as_slice(),
+        [Knob::None { reason }] if reason.contains("work.config.toml")
+    ));
+
+    // `target.model` wins over the config.
+    let mut tm = target(&f);
+    tm.model = Some("pinned".to_string());
+    assert!(signal(&resolve(&tm, None), "model:").starts_with("model: pinned (target)"));
+}
+
+#[test]
+fn project_config_is_ignored_until_the_project_is_trusted() {
+    let f = fx();
+    write(
+        &f.repo.join(".codex/config.toml"),
+        "include_environment_context = false\ndeveloper_instructions = \"from the repo\"\n",
+    );
+    for trust in [None, Some("untrusted")] {
+        user_config(&f, trust.map(|l| (f.repo.as_path(), l)), "");
+        let t = resolve(&target(&f), None);
+        assert!(find(&t, "/environment_context").is_some(), "{trust:?}");
+        assert!(find(&t, "#/developer_instructions").is_none(), "{trust:?}");
+        let s = signal(&t, "trust:");
+        assert!(s.contains(trust.unwrap_or("unset")), "{s}");
+    }
+    let unset = resolve(&target(&f), None);
+    let s = signal(&unset, "trust:");
+    assert!(
+        s.contains(&format!("projects.\"{}\"", f.repo.display())),
+        "{s}"
+    );
+
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target(&f), None);
+    assert!(find(&t, "/environment_context").is_none());
+    let dev = row(&t, "#/developer_instructions");
+    assert_eq!(dev.origin.layer, Layer::Project);
+    assert_eq!(dev.kind, Kind::Instruction);
+    assert_eq!(dev.cost.predicted, Some("from the repo".len() as u64));
+    let s = signal(&t, "trust: trusted");
+    assert!(s.contains("config.toml"), "{s}");
+    // Set in the target dir's own project file: the knob writes `""` there; the user file is
+    // below it and would not take effect.
+    match dev.knobs.as_slice() {
+        [knob] => {
+            let (file, pointer, value, scope) = setting(knob);
+            assert_eq!(file, f.repo.join(".codex/config.toml"));
+            assert_eq!(pointer, "/developer_instructions");
+            assert_eq!(value, &json!(""));
+            assert_eq!(scope, Scope::Project);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn trust_reaches_a_subdir_through_the_project_root() {
+    let f = fx();
+    let sub = f.repo.join("pkg");
+    write(
+        &sub.join(".codex/config.toml"),
+        "include_collaboration_mode_instructions = false\n",
+    );
+    // Only the repo root is trusted; the subdir's layer is trusted through the project root.
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target_at(&f, &sub), None);
+    assert!(find(&t, "/collaboration_mode").is_none());
+}
+
+#[test]
+fn denylisted_project_keys_are_ignored() {
+    let f = fx();
+    write(
+        &f.repo.join(".codex/config.toml"),
+        "notify = [\"say\", \"done\"]\nprofile = \"p\"\nmodel_provider = \"elsewhere\"\ninclude_permissions_instructions = false\n",
+    );
+    user_config(&f, Some((&f.repo, "trusted")), "");
+    let t = resolve(&target(&f), None);
+    assert!(
+        find(&t, "/permissions_instructions").is_none(),
+        "allowed key applies"
+    );
+    let w = t
+        .warnings
+        .iter()
+        .find(|w| w.contains("ignored in a project config"))
+        .unwrap_or_else(|| panic!("{:?}", t.warnings));
+    for key in ["notify", "profile", "model_provider"] {
+        assert!(w.contains(key), "{w}");
+    }
+    assert!(
+        !t.warnings.iter().any(|w| w.contains("legacy `profile")),
+        "a denylisted `profile` never reaches the effective config: {:?}",
+        t.warnings
+    );
+
+    // Not trusted: no warning (Codex does not read the layer at all).
+    user_config(&f, None, "");
+    let t = resolve(&target(&f), None);
+    assert!(!t
+        .warnings
+        .iter()
+        .any(|w| w.contains("ignored in a project config")));
+}
+
+#[test]
+fn agents_chain_runs_root_to_cwd_with_override_and_fallback() {
+    let f = fx();
+    // Above the project root: never read.
+    write(&f.root.join("AGENTS.md"), "outside\n");
+    write(&f.repo.join("AGENTS.md"), "root doc\n");
+    write(&f.repo.join("a/AGENTS.override.md"), "override\n");
+    write(&f.repo.join("a/AGENTS.md"), "shadowed\n");
+    write(&f.repo.join("a/b/CLAUDE.md"), "claude\n");
+    let cwd = f.repo.join("a/b");
+    user_config(&f, None, "");
+    let t = resolve(&target_at(&f, &cwd), None);
+
+    let rows = project_rows(&t);
+    let paths: Vec<PathBuf> = rows
+        .iter()
+        .map(|i| i.origin.path.clone().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            f.repo.join("AGENTS.md"),
+            f.repo.join("a/AGENTS.override.md")
+        ]
+    );
+    assert_eq!(rows[0].cost.predicted, Some("root doc\n".len() as u64));
+    assert!(rows[1]
+        .origin
+        .why
+        .iter()
+        .any(|w| w.contains("shadows AGENTS.md")));
+    assert!(rows.iter().all(|r| r.mode == Mode::Always));
+
+    let message = row(&t, "codex/instruction/builtin/agents-md-message");
+    assert_eq!(message.cost.predicted, Some(framing(Some(&cwd), false, 2)));
+    assert_eq!(message.children.len(), 2);
+    assert!(matches!(message.knobs.as_slice(), [Knob::None { .. }]));
+    // Files land as the project chain; their knob drops them all and says so.
+    let knob = &rows[0].knobs[0];
+    let (file, pointer, value, scope) = setting(knob);
+    assert_eq!(file, f.codex.join("config.toml"));
+    assert_eq!(pointer, "/project_doc_max_bytes");
+    assert_eq!(value, &json!(0));
+    assert_eq!(scope, Scope::User);
+    assert!(
+        matches!(knob, Knob::Setting { note: Some(n), .. } if n.contains("every project AGENTS file"))
+    );
+
+    // CLAUDE.md is read only when listed as a fallback, and only where no AGENTS file exists.
+    user_config(
+        &f,
+        None,
+        "project_doc_fallback_filenames = [\"CLAUDE.md\", \"../x\", \"\"]\n",
+    );
+    let t = resolve(&target_at(&f, &cwd), None);
+    let rows = project_rows(&t);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[2].origin.path.as_deref(),
+        Some(f.repo.join("a/b/CLAUDE.md").as_path())
+    );
+    assert!(rows[2]
+        .origin
+        .why
+        .iter()
+        .any(|w| w.contains("project_doc_fallback_filenames")));
+    assert!(
+        t.warnings.iter().any(|w| w.contains("\"../x\"")),
+        "{:?}",
+        t.warnings
+    );
+    assert_eq!(
+        row(&t, "/agents-md-message").cost.predicted,
+        Some(framing(Some(&cwd), false, 3))
+    );
+    let total: u64 = model::walk(&t)
+        .filter(|i| i.kind == Kind::Instruction)
+        .filter_map(|i| i.cost.predicted)
+        .sum();
+    assert_eq!(
+        total,
+        framing(Some(&cwd), false, 3)
+            + ("root doc\n".len() + "override\n".len() + "claude\n".len()) as u64
+    );
+    assert_eq!(t.predicted_known, total, "nothing else has a known cost");
+}
+
+#[test]
+fn empty_override_shadows_agents_md_and_lands_nothing() {
+    let f = fx();
+    write(&f.repo.join("AGENTS.override.md"), "  \n\n");
+    write(&f.repo.join("AGENTS.md"), "never read\n");
+    user_config(&f, None, "");
+    let t = resolve(&target(&f), None);
+    assert!(
+        find(&t, "/agents-md-message").is_none(),
+        "no file landed: no message"
+    );
+    let empty = row(&t, "/AGENTS.override.md");
+    assert_eq!(empty.mode, Mode::None);
+    assert!(empty.cost.not_applicable);
+    assert_eq!(
+        empty.signal.as_deref(),
+        Some("empty, yet shadows AGENTS.md")
+    );
+    assert!(find(&t, "repo/AGENTS.md").is_none());
+}
+
+#[test]
+fn shared_budget_truncates_the_last_file_and_drops_the_rest() {
+    let f = fx();
+    write(&f.repo.join("AGENTS.md"), &"a".repeat(30_000));
+    write(&f.repo.join("sub/AGENTS.md"), &"b".repeat(5_000));
+    write(&f.repo.join("sub/deep/AGENTS.md"), "late\n");
+    user_config(&f, None, "");
+    let cwd = f.repo.join("sub/deep");
+    let t = resolve(&target_at(&f, &cwd), None);
+    let rows = project_rows(&t);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].cost.predicted, Some(30_000));
+    assert_eq!(rows[0].signal, None);
+    assert_eq!(rows[1].cost.source, Some(5_000));
+    assert_eq!(rows[1].cost.predicted, Some(2_768));
+    assert_eq!(
+        rows[1].signal.as_deref(),
+        Some("truncated: 2768 of 5000 bytes land (project_doc_max_bytes = 32768, shared by the chain)")
+    );
+    assert_eq!(rows[2].mode, Mode::None);
+    assert!(rows[2].cost.not_applicable);
+    assert!(rows[2].signal.as_deref().unwrap().starts_with("dropped"));
+    // Two landed: the join counts once.
+    assert_eq!(
+        row(&t, "/agents-md-message").cost.predicted,
+        Some(framing(Some(&cwd), false, 2))
+    );
+
+    // A smaller budget from config cuts sooner; a multi-byte character cut in half decodes as
+    // U+FFFD (3 bytes) while the budget counts the bytes read.
+    write(&f.repo.join("AGENTS.md"), "ab\u{00e9}cd");
+    user_config(&f, None, "project_doc_max_bytes = 3\n");
+    let t = resolve(&target_at(&f, &cwd), None);
+    let rows = project_rows(&t);
+    assert_eq!(rows[0].cost.predicted, Some("ab\u{fffd}".len() as u64));
+    assert_eq!(rows[1].mode, Mode::None, "budget used up after 3 bytes");
+
+    // 0 = no project files at all.
+    user_config(&f, None, "project_doc_max_bytes = 0\n");
+    let t = resolve(&target_at(&f, &cwd), None);
+    assert!(project_rows(&t).is_empty());
+}
+
+#[test]
+fn global_agents_md_is_not_charged_to_the_budget() {
+    let f = fx();
+    let global = format!("\n  {}  \n\n", "g".repeat(40_000));
+    write(&f.codex.join("AGENTS.md"), &global);
+    write(&f.repo.join("AGENTS.md"), &"p".repeat(32_768));
+    user_config(&f, None, "");
+    let t = resolve(&target(&f), None);
+    let g = row(
+        &t,
+        &format!(
+            "codex/instruction/user/{}",
+            f.codex.join("AGENTS.md").display()
+        ),
+    );
+    assert_eq!(g.cost.source, Some(global.len() as u64));
+    assert_eq!(g.cost.predicted, Some(40_000), "trimmed");
+    assert!(matches!(
+        g.knobs.as_slice(),
+        [Knob::None { reason }] if reason == "no config key; empty or move the file"
+    ));
+    let p = &project_rows(&t)[0];
+    assert_eq!(
+        p.cost.predicted,
+        Some(32_768),
+        "the whole budget is still there"
+    );
+    assert_eq!(p.signal, None);
+    assert_eq!(
+        row(&t, "/agents-md-message").cost.predicted,
+        Some(framing(Some(&f.repo), true, 1))
+    );
+
+    // AGENTS.override.md wins over AGENTS.md in CODEX_HOME.
+    write(&f.codex.join("AGENTS.override.md"), "override\n");
+    let t = resolve(&target(&f), None);
+    let g = row(&t, "/.codex/AGENTS.override.md");
+    assert_eq!(g.cost.predicted, Some("override".len() as u64));
+    assert!(find(&t, "/.codex/AGENTS.md").is_none());
+}
+
+#[test]
+fn untrusted_drops_project_agents_but_keeps_the_global_file() {
+    let f = fx();
+    write(&f.codex.join("AGENTS.md"), "global\n");
+    write(&f.repo.join("AGENTS.md"), "project\n");
+    user_config(&f, Some((&f.repo, "untrusted")), "");
+    let t = resolve(&target(&f), None);
+    assert!(project_rows(&t).is_empty());
+    assert!(find(&t, "/.codex/AGENTS.md").is_some());
+    // No project file: the header carries no ` for <cwd>`.
+    assert_eq!(
+        row(&t, "/agents-md-message").cost.predicted,
+        Some(framing(None, true, 0))
+    );
+    let s = signal(&t, "trust: untrusted");
+    assert!(s.contains("AGENTS.md"), "{s}");
+
+    // Unset trust keeps the project chain (only an explicit `untrusted` drops it).
+    user_config(&f, None, "");
+    assert_eq!(project_rows(&resolve(&target(&f), None)).len(), 1);
+}
+
+#[test]
+fn base_instructions_and_context_window_come_from_models_cache() {
+    let f = fx();
+    let cache = json!({
+        "client_version": "0.160.1",
+        "models": [
+            {
+                "slug": "test-model",
+                "context_window": 1000,
+                "max_context_window": 2000,
+                "base_instructions": "legacy",
+                "model_messages": {"instructions_template": "t".repeat(100)}
+            },
+            {"slug": "legacy-model", "base_instructions": "x".repeat(42)}
+        ]
+    });
+    write(
+        &f.codex.join("models_cache.json"),
+        &serde_json::to_string(&cache).unwrap(),
+    );
+    user_config(&f, None, "model = \"test-model\"\n");
+    let t = resolve(&target(&f), None);
+    let base = row(&t, "/builtin/instructions");
+    assert_eq!(base.cost.predicted, Some(100));
+    assert!(base.cost.predicted_is_estimate);
+    assert_eq!(t.agent_version, None, "no codex on the target's PATH");
+    assert!(signal(&t, "model:").contains("context window 1000 tokens (models_cache.json)"));
+    assert_eq!(t.predicted_known, 100);
+
+    // `model_context_window` is clamped to the catalog's maximum.
+    user_config(
+        &f,
+        None,
+        "model = \"test-model\"\nmodel_context_window = 5000\n",
+    );
+    let s = resolve(&target(&f), None).signals.join("\n");
+    assert!(s.contains("context window 2000 tokens"), "{s}");
+
+    // A catalog entry with only the legacy field.
+    user_config(&f, None, "model = \"legacy-model\"\n");
+    let t = resolve(&target(&f), None);
+    assert_eq!(row(&t, "/builtin/instructions").cost.predicted, Some(42));
+
+    // The `instructions` key replaces the catalog text, byte-exact.
+    user_config(
+        &f,
+        None,
+        "model = \"test-model\"\ninstructions = \"custom\"\n",
+    );
+    let t = resolve(&target(&f), None);
+    let base = row(&t, "/builtin/instructions");
+    assert_eq!(base.cost.predicted, Some(6));
+    assert!(!base.cost.predicted_is_estimate);
+
+    // The cache's writer is reported as a fact about the file, not as the installed codex.
+    assert!(signal(&t, "model:").ends_with("models_cache.json written by codex 0.160.1"));
+}
+
+#[test]
+fn developer_instructions_from_the_user_config() {
+    let f = fx();
+    user_config(&f, None, "developer_instructions = \"Be terse.\"\n");
+    let t = resolve(&target(&f), None);
+    let dev = row(&t, "#/developer_instructions");
+    assert_eq!(dev.origin.layer, Layer::User);
+    assert_eq!(dev.cost.predicted, Some(9));
+    assert_eq!(
+        dev.origin.setting.as_deref(),
+        Some(
+            format!(
+                "{}#/developer_instructions",
+                f.codex.join("config.toml").display()
+            )
+            .as_str()
+        )
+    );
+    let (file, _, value, scope) = setting(&dev.knobs[0]);
+    assert_eq!(file, f.codex.join("config.toml"));
+    assert_eq!(value, &json!(""));
+    assert_eq!(scope, Scope::User);
+    // The knob's own value turns the row off.
+    let overlay = Overlay {
+        ops: vec![OverlayOp::SetJson {
+            file: file.to_path_buf(),
+            pointer: "/developer_instructions".to_string(),
+            value: json!(""),
+        }],
+    };
+    assert!(find(
+        &resolve(&target(&f), Some(&overlay)),
+        "#/developer_instructions"
+    )
+    .is_none());
+}
+
+#[test]
+fn codex_home_is_never_a_project_layer() {
+    let f = fx();
+    // The target is $HOME itself: `~/.codex` is the user layer, not the target's project layer.
+    user_config(&f, Some((&f.home, "trusted")), "");
+    let t = resolve(&target_at(&f, &f.home.clone()), None);
+    let env = row(&t, "/environment_context");
+    assert_eq!(env.knobs.len(), 1);
+    assert_eq!(setting(&env.knobs[0]).3, Scope::User);
+}
+
+#[test]
+fn codex_home_env_overrides_the_default() {
+    let f = fx();
+    let other = f.root.join("alt-codex");
+    write(
+        &other.join("config.toml"),
+        "include_environment_context = false\n",
+    );
+    user_config(&f, None, "");
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), other.display().to_string());
+    let tree = resolve(&t, None);
+    assert!(find(&tree, "/environment_context").is_none());
+    // An empty CODEX_HOME is ignored.
+    t.env.insert("CODEX_HOME".to_string(), String::new());
+    assert!(find(&resolve(&t, None), "/environment_context").is_some());
+}
+
+#[test]
+fn no_codex_home_is_an_empty_tree_with_a_warning() {
+    let f = fx();
+    std::fs::remove_dir_all(&f.codex).unwrap();
+    write(&f.repo.join("AGENTS.md"), "project\n");
+    let t = resolve(&target(&f), None);
+    assert!(t.items.is_empty());
+    assert_eq!(t.predicted_known, 0);
+    assert_eq!(t.unknown_rows, 0);
+    assert!(
+        t.warnings
+            .iter()
+            .any(|w| w.starts_with("no codex home at") && w.contains("first run")),
+        "{:?}",
+        t.warnings
+    );
+
+    let mut te = target(&f);
+    te.env.insert(
+        "CODEX_HOME".to_string(),
+        f.root.join("missing").display().to_string(),
+    );
+    let t = resolve(&te, None);
+    assert!(t.items.is_empty());
+    assert!(
+        t.warnings[0].contains("refuses to start"),
+        "{:?}",
+        t.warnings
+    );
+}
