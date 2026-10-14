@@ -257,18 +257,13 @@ impl App {
         &self.tab().screen
     }
 
-    /// `(depth, name)` of every line the list shows, in order; a group is depth 0.
+    /// `(depth, name)` of every line the list shows, in order; a group is depth 0, a line that
+    /// stands for entries listed elsewhere is its text.
     pub fn rows(&self) -> Vec<(usize, String)> {
         let tab = self.tab();
         tab.lines
             .iter()
-            .map(|line| {
-                let name = match tab.screen.line_row(line) {
-                    Some(row) => row.name.clone(),
-                    None => tab.screen.groups[line.group].name.clone(),
-                };
-                (line.depth, name)
-            })
+            .map(|line| (line.depth, line_name(&tab.screen, line)))
             .collect()
     }
 
@@ -291,10 +286,7 @@ impl App {
     pub fn cursor_name(&self) -> Option<String> {
         let tab = self.tab();
         let line = tab.lines.get(tab.cursor)?;
-        Some(match tab.screen.line_row(line) {
-            Some(row) => row.name.clone(),
-            None => tab.screen.groups[line.group].name.clone(),
-        })
+        Some(line_name(&tab.screen, line))
     }
 
     /// Moves the cursor to the first row acting on item `id`, opening what is above it.
@@ -710,6 +702,9 @@ impl App {
 
     fn has_children(&self, line: &Line) -> bool {
         let screen = &self.tab().screen;
+        if line.listed.is_some() {
+            return false;
+        }
         match screen.line_row(line) {
             Some(row) => !row.children.is_empty(),
             None => !screen.groups[line.group].rows.is_empty(),
@@ -801,14 +796,21 @@ impl App {
     fn clear_filter(&mut self) {
         self.filter.clear();
         for i in 0..self.tabs.len() {
-            let keep = self.key_of(i);
+            let shown = self.key_of(i);
             // What the filter showed stays in place: the lines above the cursor open.
-            if let Some(key) = &keep {
+            if let Some(key) = &shown {
                 let parts: Vec<&str> = key.split('\n').collect();
                 for n in 1..parts.len() {
                     self.tabs[i].expanded.insert(parts[..n].join("\n"));
                 }
             }
+            // A line standing for entries listed elsewhere is gone without the filter: the
+            // cursor goes to its plugin row.
+            let t = &self.tabs[i];
+            let keep = match t.lines.get(t.cursor) {
+                Some(line) if line.listed.is_some() => Some(t.screen.key(line.group, &line.path)),
+                _ => shown,
+            };
             self.rebuild(i, keep);
         }
     }
@@ -816,6 +818,13 @@ impl App {
     // ---- actions ----------------------------------------------------------------------------
 
     fn where_from(&mut self) {
+        if let Some(listed) = self.cursor_line().and_then(|l| l.listed.clone()) {
+            self.info(format!(
+                "w shows where one thing comes from: pick one {}",
+                listed.place
+            ));
+            return;
+        }
         let Some(row) = self.cursor_row().cloned() else {
             self.info(
                 "w shows where one thing comes from: open a group (→) and pick a row".to_string(),
@@ -858,6 +867,13 @@ impl App {
         let Some(line) = self.cursor_line().cloned() else {
             return;
         };
+        if let Some(listed) = &line.listed {
+            self.info(format!(
+                "d turns off one thing: pick one {} · d on {} turns the plugin off",
+                listed.place, listed.plugin
+            ));
+            return;
+        }
         let Some(row) = self.tab().screen.line_row(&line).cloned() else {
             let group = self.tab().screen.groups[line.group].name.clone();
             self.info(format!(
@@ -1373,6 +1389,18 @@ impl App {
 /// The switch that turns every hook off at once.
 fn is_all_hooks(knob: &data::Knob) -> bool {
     matches!(knob, data::Knob::Setting { pointer, .. } if pointer == model::ALL_HOOKS)
+}
+
+/// What a list line is called: its row's name, its group's, or the text of a line standing for
+/// entries listed elsewhere.
+fn line_name(screen: &Screen, line: &Line) -> String {
+    if let Some(listed) = &line.listed {
+        return listed.text.clone();
+    }
+    match screen.line_row(line) {
+        Some(row) => row.name.clone(),
+        None => screen.groups[line.group].name.clone(),
+    }
 }
 
 /// The name of the first row acting on `id`.

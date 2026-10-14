@@ -325,13 +325,32 @@ impl Detail {
     }
 }
 
-/// A visible line of the list: a group (`path` empty) or a row under it.
+/// A visible line of the list: a group (`path` empty), a row under it, or (`listed`) the line
+/// that stands under a plugin for its entries a filtered listing already shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub group: usize,
+    /// A row's index path; for a `listed` line, its plugin row's.
     pub path: Vec<usize>,
     pub depth: usize,
     pub key: String,
+    pub listed: Option<Listed>,
+}
+
+/// While a filter is on, a plugin's entries that a listing group shows too are not repeated
+/// under the plugin: one line per listing stands in their place and names where they are.
+/// It acts on nothing; each entry keeps its one line, in the listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// The entries it stands for.
+    pub count: usize,
+    /// `8 matching skills — listed above under Skill listing › slack`.
+    pub text: String,
+    /// `above under Skill listing › slack`.
+    pub place: String,
+    /// The plugin's name (`slack`).
+    pub plugin: String,
+    pub detail: Detail,
 }
 
 impl Screen {
@@ -344,7 +363,11 @@ impl Screen {
         Some(row)
     }
 
+    /// The row of a line; None for a group line and for a `listed` line (neither is a row).
     pub fn line_row(&self, line: &Line) -> Option<&Row> {
+        if line.listed.is_some() {
+            return None;
+        }
         self.row(line.group, &line.path)
     }
 
@@ -385,7 +408,8 @@ impl Screen {
 
     /// The lines to show: every group; rows under an expanded group or row. With a filter, a
     /// line stays when it matches, has a match below (and opens to show it) or sits under a
-    /// match.
+    /// match, and a plugin's entries shown in a listing are not repeated under the plugin
+    /// ([`Listed`]).
     pub fn lines(&self, expanded: &HashSet<String>, filter: Option<&str>) -> Vec<Line> {
         let needle = filter
             .map(|f| f.trim().to_lowercase())
@@ -407,6 +431,7 @@ impl Screen {
                 path: Vec::new(),
                 depth: 0,
                 key: key.clone(),
+                listed: None,
             });
             if expanded.contains(&key) || below {
                 push_rows(
@@ -421,6 +446,89 @@ impl Screen {
                     &mut out,
                 );
             }
+        }
+        if needle.is_some() {
+            out = self.listed_once(out);
+        }
+        out
+    }
+
+    /// `lines` with each plugin entry the lines show under a listing's owner row (the same
+    /// item: the row's id) taken out from under its plugin row, and one [`Listed`] line per
+    /// listing in the place of the first one taken.
+    fn listed_once(&self, lines: Vec<Line>) -> Vec<Line> {
+        let is_listing = |g: usize| {
+            matches!(
+                self.groups[g].kind,
+                GroupKind::SkillListing | GroupKind::AgentListing
+            )
+        };
+        // Entries under an owner row (an owner row itself acts on its plugin: left out).
+        let mut shown: HashMap<&str, (usize, &str)> = HashMap::new();
+        for line in lines
+            .iter()
+            .filter(|l| is_listing(l.group) && l.path.len() >= 2)
+        {
+            let (Some(row), Some(owner)) =
+                (self.line_row(line), self.row(line.group, &line.path[..1]))
+            else {
+                continue;
+            };
+            if let Some(id) = row.id.as_deref() {
+                shown.entry(id).or_insert((line.group, owner.name.as_str()));
+            }
+        }
+        // A plugin's part shown there too: by its plugin row and that listing.
+        let elsewhere = |line: &Line| -> Option<(usize, usize, &str)> {
+            if self.groups[line.group].kind != GroupKind::Plugins || line.path.len() != 2 {
+                return None;
+            }
+            let id = self.line_row(line)?.id.as_deref()?;
+            let (listing, owner) = shown.get(id)?;
+            Some((line.path[0], *listing, *owner))
+        };
+        let mut words: HashMap<(usize, usize), Vec<&str>> = HashMap::new();
+        for line in &lines {
+            if let Some((plugin, listing, _)) = elsewhere(line) {
+                let kind = self.line_row(line).map_or("", |r| r.kind_word.as_str());
+                words.entry((plugin, listing)).or_default().push(kind);
+            }
+        }
+        if words.is_empty() {
+            return lines;
+        }
+        let mut out = Vec::with_capacity(lines.len());
+        for line in &lines {
+            let Some((plugin, listing, owner)) = elsewhere(line) else {
+                out.push(line.clone());
+                continue;
+            };
+            // The first one taken leaves its line to the note; the rest leave nothing.
+            let Some(kinds) = words.remove(&(plugin, listing)) else {
+                continue;
+            };
+            let parent = &line.path[..1];
+            let name = self.row(line.group, parent).map_or("", |r| r.name.as_str());
+            let place = format!(
+                "{} under {} › {owner}",
+                if listing < line.group {
+                    "above"
+                } else {
+                    "below"
+                },
+                self.groups[listing].name
+            );
+            out.push(Line {
+                group: line.group,
+                path: parent.to_vec(),
+                depth: line.depth,
+                key: format!(
+                    "{}\nlisted:{}",
+                    self.key(line.group, parent),
+                    self.groups[listing].kind.key()
+                ),
+                listed: Some(listed(&kinds, &place, name, &self.groups[listing].name)),
+            });
         }
         out
     }
@@ -451,6 +559,39 @@ fn reaches(row: &Row, needle: &str) -> bool {
     hit(row, needle) || row.children.iter().any(|c| reaches(c, needle))
 }
 
+/// The line standing for `kinds` (the kind word of each entry it stands for) of plugin `plugin`,
+/// shown `place` (`above under Skill listing › slack`) in `listing`.
+fn listed(kinds: &[&str], place: &str, plugin: &str, listing: &str) -> Listed {
+    let n = kinds.len();
+    let what = match kinds.split_first() {
+        Some((first, rest)) if rest.iter().all(|k| k == first) => {
+            count(n, &format!("matching {first}"))
+        }
+        // Kinds mixed: two entries at least.
+        _ => format!("{n} matching entries"),
+    };
+    let (them, each) = if n == 1 {
+        ("it", "it is")
+    } else {
+        ("them", "each is")
+    };
+    Listed {
+        count: n,
+        text: format!("{what} — listed {place}"),
+        place: place.to_string(),
+        plugin: plugin.to_string(),
+        detail: Detail {
+            what: format!("{what} of {plugin} · listed {place}"),
+            brings: format!(
+                "This search finds {them} under the plugin and in the {} too; {each} shown \
+                 once, there, with its own size.",
+                listing.to_lowercase()
+            ),
+            ..Detail::default()
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_rows(
     rows: &[Row],
@@ -477,6 +618,7 @@ fn push_rows(
             path: p.clone(),
             depth,
             key: key.clone(),
+            listed: None,
         });
         if !row.children.is_empty() && (expanded.contains(&key) || below) {
             push_rows(
@@ -3723,6 +3865,183 @@ mod tests {
             );
             assert_eq!(owner.saving, slack.saving, "{kind:?}");
         }
+    }
+
+    /// The key of the `slack` owner row in the listing group of `kind` (to open it).
+    fn slack_owner(screen: &Screen, kind: GroupKind) -> String {
+        let g = screen.groups.iter().position(|g| g.kind == kind).unwrap();
+        let i = screen.groups[g]
+            .rows
+            .iter()
+            .position(|r| r.name == "slack")
+            .unwrap();
+        screen.key(g, &[i])
+    }
+
+    /// The lines under the plugin row at `at` of the Plugins group, in order: a row by its
+    /// name, a note by its text.
+    fn under_plugin(screen: &Screen, lines: &[Line], plugins: usize, at: usize) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.group == plugins && l.path.first() == Some(&at) && l.depth == 2)
+            .map(|l| match (&l.listed, screen.line_row(l)) {
+                (Some(listed), _) => listed.text.clone(),
+                (None, Some(row)) => row.name.clone(),
+                (None, None) => unreachable!("a group line under a plugin"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_search_shows_each_listed_entry_once_and_points_there_from_its_plugin() {
+        let tree = synthetic();
+        let screen = build(&tree, &[], &HashMap::new(), Sort::Size);
+        let plugins = screen
+            .groups
+            .iter()
+            .position(|g| g.kind == GroupKind::Plugins)
+            .unwrap();
+        let at = screen.groups[plugins]
+            .rows
+            .iter()
+            .position(|r| r.name == "slack")
+            .unwrap();
+        let slack = &screen.groups[plugins].rows[at];
+        let entry = |label: &str| {
+            slack
+                .children
+                .iter()
+                .find(|c| c.name == label)
+                .and_then(|c| c.id.clone())
+                .unwrap()
+        };
+        let (block_kit, helper) = (entry("block-kit"), entry("helper"));
+        let once = |lines: &[Line]| {
+            for id in [&block_kit, &helper] {
+                let n = lines
+                    .iter()
+                    .filter(|l| screen.line_row(l).and_then(|r| r.id.as_ref()) == Some(id))
+                    .count();
+                assert_eq!(n, 1, "{id}");
+            }
+        };
+
+        // No filter: the plugin row keeps every part as a child.
+        let open: HashSet<String> = ["plugins".to_string(), format!("plugins\n{}", slack.key)]
+            .into_iter()
+            .collect();
+        let lines = screen.lines(&open, None);
+        assert!(lines.iter().all(|l| l.listed.is_none()));
+        assert_eq!(
+            under_plugin(&screen, &lines, plugins, at),
+            ["slack", "block-kit", "helper"],
+            "its server and its two listing lines"
+        );
+
+        // `slack` with the listings' slack rows folded (no entry name matches): the listings
+        // show no entry, so the plugin keeps them; each still shows once.
+        let lines = screen.lines(&HashSet::new(), Some("slack"));
+        once(&lines);
+        assert!(lines.iter().all(|l| l.listed.is_none()));
+        assert_eq!(
+            under_plugin(&screen, &lines, plugins, at),
+            ["slack", "block-kit", "helper"]
+        );
+
+        // With them open, each entry shows once, in its listing; under the plugin, one line
+        // per listing in their places says where. Its server is listed nowhere else and stays.
+        let open: HashSet<String> = [
+            slack_owner(&screen, GroupKind::SkillListing),
+            slack_owner(&screen, GroupKind::AgentListing),
+        ]
+        .into_iter()
+        .collect();
+        let lines = screen.lines(&open, Some("slack"));
+        once(&lines);
+        let notes: Vec<&Line> = lines.iter().filter(|l| l.listed.is_some()).collect();
+        assert_eq!(
+            under_plugin(&screen, &lines, plugins, at),
+            [
+                "slack",
+                "1 matching skill — listed above under Skill listing › slack",
+                "1 matching agent — listed above under Agent listing › slack",
+            ],
+            "its server, then the two notes in their entries' places (by size)"
+        );
+        assert_eq!(notes.len(), 2);
+        for note in &notes {
+            // It sits under the plugin row, acts on nothing and opens nothing.
+            assert_eq!(
+                (note.group, note.path.as_slice(), note.depth),
+                (plugins, &[at][..], 2)
+            );
+            assert!(screen.line_row(note).is_none());
+            let listed = note.listed.as_ref().unwrap();
+            assert_eq!((listed.count, listed.plugin.as_str()), (1, "slack"));
+            assert!(listed.detail.action.is_empty(), "{:?}", listed.detail);
+        }
+        assert_ne!(notes[0].key, notes[1].key);
+        // The plugin row is unchanged: `d` on it still turns slack off.
+        let row = lines
+            .iter()
+            .find(|l| l.group == plugins && l.path == [at])
+            .and_then(|l| screen.line_row(l))
+            .unwrap();
+        assert_eq!(row, slack);
+        assert_eq!(row.state, State::On);
+        assert!(
+            row.detail.action.starts_with("d turns it off"),
+            "{}",
+            row.detail.action
+        );
+    }
+
+    #[test]
+    fn a_note_counts_mixed_entries_and_says_below_when_the_listing_is_below() {
+        let mut tree = synthetic();
+        for item in &mut tree.items {
+            if item.kind == Kind::SkillListing {
+                // An unmeasured skill listing sorts after the Plugins group.
+                item.cost.predicted = None;
+                for c in &mut item.children {
+                    c.cost.predicted = None;
+                }
+                let mut post = item.children[0].clone();
+                post.id = "claude-code/command/plugin/slack:post".to_string();
+                post.label = "slack:post".to_string();
+                post.kind = Kind::Command;
+                item.children.push(post);
+            }
+        }
+        let screen = build(&tree, &[], &HashMap::new(), Sort::Size);
+        let order: Vec<GroupKind> = screen.groups.iter().map(|g| g.kind).collect();
+        let (p, s) = (
+            order.iter().position(|k| *k == GroupKind::Plugins).unwrap(),
+            order
+                .iter()
+                .position(|k| *k == GroupKind::SkillListing)
+                .unwrap(),
+        );
+        assert!(p < s, "{order:?}");
+        let open: HashSet<String> = [
+            slack_owner(&screen, GroupKind::SkillListing),
+            slack_owner(&screen, GroupKind::AgentListing),
+        ]
+        .into_iter()
+        .collect();
+        let texts: Vec<String> = screen
+            .lines(&open, Some("slack"))
+            .iter()
+            .filter_map(|l| l.listed.as_ref().map(|n| n.text.clone()))
+            .collect();
+        // In their entries' places: the agent (1.0 KB) sorts before the unmeasured two.
+        assert_eq!(
+            texts,
+            [
+                "1 matching agent — listed above under Agent listing › slack",
+                "2 matching entries — listed below under Skill listing › slack",
+            ]
+        );
     }
 
     /// A tree with no listings at all: harn turned off every skill and agent it had.

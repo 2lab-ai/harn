@@ -78,6 +78,11 @@ Rules that produce it:
   would do — "d would turn it off …" — and promises no `u`); the Built-in group row has no `d`.
 - **Footer honesty**: `345 items · 5 shown · filter: none` only when a filter or fold hides rows
   that would otherwise be visible; otherwise no footer (the panel is the footer).
+- **A search shows each thing once**: while a filter is on, a plugin's entries that a filtered
+  listing already shows are not repeated under its row in Plugins — one grey line per listing
+  stands in their place (`8 matching skills — listed above under Skill listing › slack`), acts on
+  nothing (d and w say where to pick one), and counts as one line in the footer, while the plugin
+  row keeps its d.
 
 ## Rules fixed after reading the first rebuild's frames (2026-10-13 19:1x)
 

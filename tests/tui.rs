@@ -2044,6 +2044,8 @@ fn filter_shows_matches_with_their_group_and_esc_restores() {
     let mut app = app(&f);
     press(&mut app, KeyCode::Char('/'));
     keys(&mut app, "beta-rev");
+    // The agent shows once, in the listing; under its plugin one line says where it is.
+    let note = "1 matching agent — listed above under Agent listing › beta";
     assert_eq!(
         app.rows(),
         [
@@ -2052,7 +2054,7 @@ fn filter_shows_matches_with_their_group_and_esc_restores() {
             (2, "beta-reviewer".to_string()),
             (0, "Plugins (2)".to_string()),
             (1, "beta".to_string()),
-            (2, "beta-reviewer".to_string()),
+            (2, note.to_string()),
         ]
     );
     assert_eq!(app.cursor_name().as_deref(), Some("beta-reviewer"));
@@ -2069,7 +2071,7 @@ fn filter_shows_matches_with_their_group_and_esc_restores() {
         "       beta-reviewer ",
         " ▾ Plugins (2)  0.3 KB would leave with them · counted in the listings above",
         "   ▾ beta ",
-        "       beta-reviewer ",
+        &format!("       {note}"),
     ];
     assert_eq!(drawn.len(), starts.len(), "{drawn:#?}");
     for (line, start) in drawn.iter().zip(starts) {
@@ -2104,6 +2106,142 @@ fn filter_shows_matches_with_their_group_and_esc_restores() {
     press(&mut app, KeyCode::Char('/'));
     keys(&mut app, "zzz");
     assert!(text(&app, 80, 24).contains("nothing matches \"zzz\""));
+}
+
+#[test]
+fn a_search_shows_a_plugins_listed_skills_once_and_its_row_keeps_d() {
+    let f = fixture();
+    let skills: Vec<String> = model::walk(&tree(&f))
+        .filter(|i| i.kind == Kind::Skill && i.origin.plugin.as_deref() == Some("alpha@market-one"))
+        .map(|i| i.id.clone())
+        .collect();
+    assert_eq!(skills.len(), 2, "alpha brings two skills: {skills:?}");
+
+    // Without a filter, alpha's skills are its children, as every part of a plugin is.
+    let mut app = app(&f);
+    assert!(app.select(ALPHA));
+    press(&mut app, KeyCode::Right);
+    let at = app.cursor();
+    let children: Vec<(usize, String)> = app.rows()[at + 1..]
+        .iter()
+        .take_while(|(depth, _)| *depth == 2)
+        .cloned()
+        .collect();
+    let names = |rows: &[(usize, String)]| -> Vec<String> {
+        let mut names: Vec<String> = rows.iter().map(|(_, n)| n.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        names(&children),
+        [
+            "UserPromptSubmit hook",
+            "alpha-other",
+            "alpha-server",
+            "alpha-skill"
+        ],
+        "no filter: nothing changes"
+    );
+
+    // With one, the skills the filtered skill listing shows are not repeated under Plugins:
+    // one line stands in their place and says where they are.
+    let note = "2 matching skills — listed above under Skill listing › alpha";
+    let mut app = self::app(&f);
+    press(&mut app, KeyCode::Char('/'));
+    keys(&mut app, "alpha");
+    press(&mut app, KeyCode::Enter);
+    let rows = app.rows();
+    assert_eq!(
+        rows,
+        [
+            (0, "Skill listing".to_string()),
+            (1, "alpha".to_string()),
+            (2, "alpha-other".to_string()),
+            (2, "alpha-skill".to_string()),
+            (0, "Plugins (2)".to_string()),
+            (1, "alpha".to_string()),
+            (2, note.to_string()),
+            (2, "alpha-server".to_string()),
+            (2, "UserPromptSubmit hook".to_string()),
+        ]
+    );
+    // Each skill is on exactly one line, by the item it acts on.
+    press(&mut app, KeyCode::Char('g'));
+    let mut ids = Vec::new();
+    for _ in 0..rows.len() {
+        ids.push(app.cursor_id());
+        press(&mut app, KeyCode::Char('j'));
+    }
+    for id in &skills {
+        let lines = ids.iter().filter(|i| i.as_deref() == Some(id)).count();
+        assert_eq!(lines, 1, "{id}: {ids:?}");
+    }
+
+    // The note acts on nothing: no item, no card, no `d` in the key bar; d and w say where to go.
+    press(&mut app, KeyCode::Char('g'));
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.cursor_name().as_deref(), Some(note));
+    assert_eq!(app.cursor_id(), None);
+    let frame = screen(&app, 80, 24);
+    let drawn: Vec<String> = list_rows(&frame.join("\n"))
+        .iter()
+        .map(|l| l.trim_end().to_string())
+        .collect();
+    assert!(
+        drawn.contains(&format!("       {note}")),
+        "drawn under alpha, where its first skill was: {drawn:#?}"
+    );
+    assert!(!frame[23].contains("d turn off"), "{}", frame[23]);
+    assert!(!frame[23].contains("w where from"), "{}", frame[23]);
+    // The panel says what the line is.
+    let detail = panel(&frame).join(" ");
+    assert!(detail.contains("Skill listing › alpha"), "{detail}");
+    for key in ['d', 'w'] {
+        press(&mut app, KeyCode::Char(key));
+        assert!(!app.has_card(), "{key} opened a card on the note");
+        let said = message(&app);
+        assert!(
+            said.contains("pick one above under Skill listing › alpha"),
+            "{key}: {said}"
+        );
+        // The message row shows where, whole.
+        let first = panel(&screen(&app, 80, 24))[0].clone();
+        assert!(
+            first.ends_with("pick one above under Skill listing › alpha")
+                || first.contains("pick one above under Skill listing › alpha ·"),
+            "{key}: {first}"
+        );
+    }
+    // →/Enter open nothing under it.
+    let before = app.rows();
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.rows(), before);
+
+    // The plugin row keeps its d: it stages turning the whole plugin off.
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.cursor_id().as_deref(), Some(ALPHA));
+    assert!(screen(&app, 80, 24)[23].contains("d turn off"));
+    press(&mut app, KeyCode::Char('d'));
+    let staged = app.staged().expect("d on the plugin row opens its card");
+    assert_eq!(staged.item_id, ALPHA);
+    press(&mut app, KeyCode::Esc);
+
+    // Esc clears the filter from the note: what was above it stays open, the cursor goes to
+    // alpha, and its skills are its children again.
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.cursor_name().as_deref(), Some(note));
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.filter(), "");
+    assert_eq!(app.cursor_id().as_deref(), Some(ALPHA));
+    let at = app.cursor();
+    let back: Vec<(usize, String)> = app.rows()[at + 1..]
+        .iter()
+        .take_while(|(depth, _)| *depth == 2)
+        .cloned()
+        .collect();
+    assert_eq!(names(&back), names(&children));
 }
 
 #[test]
