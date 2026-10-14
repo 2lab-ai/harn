@@ -707,11 +707,27 @@ fn base_instructions_and_context_window_come_from_models_cache() {
     assert!(signal(&t, "model:").ends_with("models_cache.json written by codex 0.160.1"));
 }
 
-/// A `models_cache.json` with one entry per catalog shape (generic slugs).
+/// `models_cache.json` as codex 0.160.1 writes it: its own `client_version` and an `identity`
+/// (`models-manager/src/manager.rs:635-641`), plus `models`.
+fn cache(f: &Fx, models: Value) {
+    raw_cache(
+        f,
+        json!({"client_version": "0.160.1", "identity": "test-login", "models": models}),
+    );
+}
+
+fn raw_cache(f: &Fx, cache: Value) {
+    write(
+        &f.codex.join("models_cache.json"),
+        &serde_json::to_string(&cache).unwrap(),
+    );
+}
+
+/// One entry per catalog shape (generic slugs).
 fn catalog(f: &Fx) {
-    let cache = json!({
-        "client_version": "0.160.1",
-        "models": [
+    cache(
+        f,
+        json!([
             {"slug": "plain-model", "model_messages": null},
             {
                 "slug": "rich-model",
@@ -721,19 +737,19 @@ fn catalog(f: &Fx) {
                     "multi_agent": {"role": {"root": "Root role."}}
                 }
             },
+            {"slug": "v2-bare-model", "multi_agent_version": "v2"},
             {"slug": "v1-model", "multi_agent_version": "v1"},
+            {"slug": "null-version-model", "multi_agent_version": null},
+            {"slug": "v3-model", "multi_agent_version": "v3"},
             {
                 "slug": "messages-only-model",
                 "model_messages": {
                     "collaboration_modes": {"default": null, "plan": "Plan mode text."},
                     "multi_agent": {"role": {"root": "Root role."}}
                 }
-            }
-        ]
-    });
-    write(
-        &f.codex.join("models_cache.json"),
-        &serde_json::to_string(&cache).unwrap(),
+            },
+            {"slug": "no-modes-model", "model_messages": {"collaboration_modes": null}}
+        ]),
     );
 }
 
@@ -741,6 +757,27 @@ fn gated(item: &Item) -> bool {
     item.signal
         .as_deref()
         .is_some_and(|s| s.starts_with(CATALOG_GATED))
+}
+
+/// The cache states codex would not use as they are, and a field it cannot parse: each leaves
+/// the catalog-gated rows unknown. `(cache, reason in the signal)`; `None` = no file.
+fn unusable_caches() -> Vec<(Option<Value>, &'static str)> {
+    let entry = json!([{"slug": "rich-model", "multi_agent_version": "v2"}]);
+    vec![
+        (None, "no usable models_cache.json"),
+        (
+            Some(json!({"client_version": "0.159.0", "identity": "test-login", "models": entry})),
+            "written by codex 0.159.0, not 0.160.1",
+        ),
+        (
+            Some(json!({"identity": "test-login", "models": entry})),
+            "has no client_version",
+        ),
+        (
+            Some(json!({"client_version": "0.160.1", "models": entry})),
+            "has no identity",
+        ),
+    ]
 }
 
 #[test]
@@ -762,9 +799,14 @@ fn catalog_decides_the_collaboration_mode_block() {
         c.origin.why
     );
 
-    // No Default text (none at all, or only the Plan mode's): `codex exec` and
+    // No Default text — missing or `null` at any level, or only the Plan mode's: `codex exec` and
     // `debug prompt-input` send no block; the row stays for the TUI, mode none.
-    for model in ["plain-model", "messages-only-model", "v1-model"] {
+    for model in [
+        "plain-model",
+        "messages-only-model",
+        "no-modes-model",
+        "v1-model",
+    ] {
         user_config(&f, None, &format!("model = \"{model}\"\n"));
         let t = resolve(&target(&f), None);
         let c = row(&t, "/builtin/collaboration_mode");
@@ -803,7 +845,41 @@ fn catalog_decides_the_collaboration_mode_block() {
         assert!(s.contains("collaboration_modes.default"), "{s}");
     }
 
+    // A cache codex would not use, or a field it cannot parse: unknown as well.
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let mut caches = unusable_caches();
+    caches.push((
+        Some(
+            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+                {"slug": "rich-model", "model_messages": {"collaboration_modes": {"default": 5}}}
+            ]}),
+        ),
+        "default is a number, so codex cannot parse models_cache.json",
+    ));
+    caches.push((
+        Some(
+            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+                {"slug": "rich-model", "model_messages": "text"}
+            ]}),
+        ),
+        "model_messages is a string",
+    ));
+    for (file, why) in caches {
+        match file {
+            Some(c) => raw_cache(&f, c),
+            None => std::fs::remove_file(f.codex.join("models_cache.json")).unwrap(),
+        }
+        let t = resolve(&target(&f), None);
+        let c = row(&t, "/builtin/collaboration_mode");
+        let s = c.signal.as_deref().unwrap_or_default();
+        assert!(
+            c.mode == Mode::Always && gated(c) && s.contains(why),
+            "{why}: {s}"
+        );
+    }
+
     // The switch still removes the row whatever the catalog says.
+    catalog(&f);
     user_config(
         &f,
         None,
@@ -816,14 +892,25 @@ fn catalog_decides_the_collaboration_mode_block() {
 fn catalog_decides_the_multi_agent_block() {
     let f = fx();
     catalog(&f);
+    let present = |config: &str| -> Option<Item> {
+        user_config(&f, None, config);
+        find(&resolve(&target(&f), None), "/builtin/multi_agent").cloned()
+    };
 
-    // `multi_agent_version = "v2"`: role + mode rendered (session/multi_agents.rs:14-18, :77-82).
+    // `multi_agent_version = "v2"`: role + mode rendered (session/multi_agents.rs:14-18, :77-82),
+    // with or without the catalog's own role text.
+    for model in ["rich-model", "v2-bare-model"] {
+        let m = present(&format!("model = \"{model}\"\n")).expect(model);
+        assert_eq!(
+            (m.mode, m.signal.as_deref()),
+            (Mode::Always, None),
+            "{model}"
+        );
+        assert_eq!(setting(&m.knobs[0]).1, "/agents/enabled");
+    }
+    // The plugin blocks stay before it; without it they close the developer blocks.
     user_config(&f, None, "model = \"rich-model\"\n");
     let t = resolve(&target(&f), None);
-    let m = row(&t, "/builtin/multi_agent");
-    assert_eq!((m.mode, m.signal.as_deref()), (Mode::Always, None));
-    assert_eq!(setting(&m.knobs[0]).1, "/agents/enabled");
-    // The plugin blocks stay before it; without it they close the developer blocks.
     let order: Vec<&str> = t
         .items
         .iter()
@@ -834,8 +921,15 @@ fn catalog_decides_the_multi_agent_block() {
         ["recommended_plugins", "multi_agent", "environment_context"]
     );
 
-    // Anything but v2 (v1, absent, role text without a version): no role or mode message.
-    for model in ["v1-model", "plain-model", "messages-only-model"] {
+    // Anything but v2 — "v1", missing, `null`, a value codex does not recognise, role text
+    // without a version: no role or mode message, in any front end.
+    for model in [
+        "v1-model",
+        "plain-model",
+        "null-version-model",
+        "v3-model",
+        "messages-only-model",
+    ] {
         user_config(&f, None, &format!("model = \"{model}\"\n"));
         let t = resolve(&target(&f), None);
         assert!(find(&t, "/builtin/multi_agent").is_none(), "{model}");
@@ -847,31 +941,31 @@ fn catalog_decides_the_multi_agent_block() {
     }
 
     // agents.enabled = false wins over the catalog (config/mod.rs:1586-1593).
-    user_config(
-        &f,
-        None,
-        "model = \"rich-model\"\n[agents]\nenabled = false\n",
-    );
-    assert!(find(&resolve(&target(&f), None), "/builtin/multi_agent").is_none());
+    assert!(present("model = \"rich-model\"\n[agents]\nenabled = false\n").is_none());
 
-    // features.multi_agent_v2 = true wins over both, as a boolean or a table.
-    for (features, pointer) in [
+    // features.multi_agent_v2 = true wins over both, as a boolean or a table, even with the
+    // catalog entry unknown.
+    for (model, features, pointer) in [
         (
+            "plain-model",
             "[features]\nmulti_agent_v2 = true\n",
             "/features/multi_agent_v2",
         ),
         (
+            "plain-model",
             "[features.multi_agent_v2]\nenabled = true\n",
             "/features/multi_agent_v2/enabled",
         ),
+        (
+            "ghost-model",
+            "[features]\nmulti_agent_v2 = true\n",
+            "/features/multi_agent_v2",
+        ),
     ] {
-        user_config(
-            &f,
-            None,
-            &format!("model = \"plain-model\"\n[agents]\nenabled = false\n{features}"),
-        );
-        let t = resolve(&target(&f), None);
-        let m = row(&t, "/builtin/multi_agent");
+        let m = present(&format!(
+            "model = \"{model}\"\n[agents]\nenabled = false\n{features}"
+        ))
+        .expect(features);
         assert_eq!(
             (m.mode, m.signal.as_deref()),
             (Mode::Always, None),
@@ -886,16 +980,89 @@ fn catalog_decides_the_multi_agent_block() {
         }
     }
 
+    // Set to false (a boolean or the table's `enabled`) it is no override: the catalog decides.
+    for features in [
+        "[features]\nmulti_agent_v2 = false\n",
+        "[features.multi_agent_v2]\nenabled = false\n",
+        "[features.multi_agent_v2]\nmax_concurrent_threads_per_session = 2\n",
+    ] {
+        let m = present(&format!("model = \"rich-model\"\n{features}")).expect(features);
+        assert_eq!(setting(&m.knobs[0]).1, "/agents/enabled", "{features}");
+        assert!(
+            present(&format!("model = \"v1-model\"\n{features}")).is_none(),
+            "{features}"
+        );
+    }
+
     // Entry unknown: listed, marked not checkable.
-    user_config(&f, None, "model = \"ghost-model\"\n");
-    let t = resolve(&target(&f), None);
-    let m = row(&t, "/builtin/multi_agent");
+    let m = present("model = \"ghost-model\"\n").expect("ghost");
     assert_eq!(m.mode, Mode::Always);
     let s = m.signal.as_deref().unwrap_or_default();
     assert!(
-        gated(m) && s.contains("multi_agent_version") && s.contains("ghost-model is not in"),
+        gated(&m) && s.contains("multi_agent_version") && s.contains("ghost-model is not in"),
         "{s}"
     );
+    let mut caches = unusable_caches();
+    caches.push((
+        Some(
+            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+                {"slug": "rich-model", "multi_agent_version": 2}
+            ]}),
+        ),
+        "multi_agent_version is a number",
+    ));
+    for (file, why) in caches {
+        match file {
+            Some(c) => raw_cache(&f, c),
+            None => std::fs::remove_file(f.codex.join("models_cache.json")).unwrap(),
+        }
+        let m = present("model = \"rich-model\"\n").expect(why);
+        let s = m.signal.as_deref().unwrap_or_default();
+        assert!(
+            m.mode == Mode::Always && gated(&m) && s.contains(why),
+            "{why}: {s}"
+        );
+    }
+}
+
+#[test]
+fn multi_agent_knobs_remove_the_block_one_decider_at_a_time() {
+    let f = fx();
+    catalog(&f);
+    user_config(
+        &f,
+        None,
+        "model = \"rich-model\"\n[features]\nmulti_agent_v2 = true\n",
+    );
+    let t = resolve(&target(&f), None);
+    let first = row(&t, "/builtin/multi_agent").knobs[0].clone();
+    assert_eq!(setting(&first).1, "/features/multi_agent_v2");
+
+    // Turning the feature off leaves the block: the catalog's v2 still renders it.
+    let op = |knob: &Knob| {
+        let (file, pointer, value, _) = setting(knob);
+        OverlayOp::SetJson {
+            file: file.to_path_buf(),
+            pointer: pointer.to_string(),
+            value: value.clone(),
+        }
+    };
+    let mut overlay = Overlay {
+        ops: vec![op(&first)],
+    };
+    let after = resolve(&target(&f), Some(&overlay));
+    let m = row(&after, "/builtin/multi_agent");
+    assert_eq!((m.mode, m.signal.as_deref()), (Mode::Always, None));
+    let next = m.knobs[0].clone();
+    assert_eq!(setting(&next).1, "/agents/enabled");
+
+    // Its next knob removes it.
+    overlay.ops.push(op(&next));
+    assert!(find(
+        &resolve(&target(&f), Some(&overlay)),
+        "/builtin/multi_agent"
+    )
+    .is_none());
 }
 
 #[test]

@@ -313,9 +313,12 @@ fn entry_and_framing_bytes_match_a_hand_rendered_block() {
     skill(&f.codex.join("skills"), "alpha", "Does alpha.");
     skill(&f.codex.join("skills"), "beta", "Does beta.");
     user_config(&f, "model = \"m\"\n");
+    // A cache codex 0.160.1 uses (its version, an identity) whose entry leaves out
+    // include_skills_usage_instructions: a `#[serde(default)] bool`, so no usage section
+    // (openai_models.rs:432-433) — the block below has none.
     write(
         &f.codex.join("models_cache.json"),
-        r#"{"models": [{"slug": "m", "context_window": 100000, "include_skills_usage_instructions": false}]}"#,
+        r#"{"client_version": "0.160.1", "identity": "test-login", "models": [{"slug": "m", "context_window": 100000}]}"#,
     );
     let mut t = target(&f);
     t.context_window = None;
@@ -642,23 +645,85 @@ fn plugin_enabled_and_disabled() {
 }
 
 #[test]
+fn skills_usage_section_follows_the_catalog_flag() {
+    const FRAMING: &str = "codex/system-prompt/builtin/skills_instructions";
+    let f = fx();
+    skill(&f.codex.join("skills"), "alpha", "Does alpha.");
+    let models = json!([
+        {"slug": "silent", "context_window": 100000},
+        {"slug": "off", "context_window": 100000, "include_skills_usage_instructions": false},
+        {"slug": "on", "context_window": 100000, "include_skills_usage_instructions": true},
+        {"slug": "null", "context_window": 100000, "include_skills_usage_instructions": null}
+    ]);
+    let cache = |cache: Value| {
+        write(
+            &f.codex.join("models_cache.json"),
+            &serde_json::to_string(&cache).unwrap(),
+        )
+    };
+    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
+    let framing = |model: &str| {
+        user_config(&f, &format!("model = \"{model}\"\n"));
+        let mut t = target(&f);
+        t.context_window = None;
+        row(&resolve(&t, None), FRAMING).clone()
+    };
+
+    // Missing reads false, like an explicit false: no usage section.
+    let without = framing("silent").cost.predicted.expect("known");
+    assert_eq!(framing("off").cost.predicted, Some(without));
+    // true adds `### How to use skills` and the usage text of the rendered form
+    // (fragments.rs:24-30; 2,531 or 3,031 bytes, see the unit test in skills.rs).
+    let with = framing("on").cost.predicted.expect("known");
+    let section = "\n### How to use skills\n".len() as u64;
+    assert!(
+        [2_531 + section, 3_031 + section].contains(&(with - without)),
+        "{with} - {without}"
+    );
+
+    // Unknown, with both sizes in `why`: a flag codex cannot parse, a cache it would not use.
+    let unknown = |item: &Item, why: &str| {
+        assert_eq!(item.cost.predicted, None, "{why}");
+        assert!(
+            why_has(
+                item,
+                &format!(
+                    "size unknown: {without} bytes without `### How to use skills`, {with} with it"
+                )
+            ) && why_has(item, why),
+            "{why}: {:?}",
+            item.origin.why
+        );
+    };
+    unknown(
+        &framing("null"),
+        "null's include_skills_usage_instructions is null",
+    );
+    cache(json!({"client_version": "0.159.0", "identity": "test-login", "models": models}));
+    unknown(&framing("on"), "written by codex 0.159.0, not 0.160.1");
+    cache(json!({"client_version": "0.160.1", "models": models}));
+    unknown(&framing("silent"), "has no identity");
+}
+
+#[test]
 fn plugins_instructions_follow_the_catalog_flag() {
     const ID: &str = "codex/system-prompt/builtin/plugins_instructions";
     let f = fx();
     let p = plugin(&f, "1.0.0", "demo");
     skill(&p.join("skills"), "search", "Search the docs.");
-    let cache = json!({
-        "client_version": "0.160.1",
-        "models": [
-            {"slug": "on-model", "include_plugin_usage_instructions": true},
-            {"slug": "off-model", "include_plugin_usage_instructions": false},
-            {"slug": "silent-model"}
-        ]
-    });
-    write(
-        &f.codex.join("models_cache.json"),
-        &serde_json::to_string(&cache).unwrap(),
-    );
+    // As codex 0.160.1 writes it: its own client_version and an identity.
+    let cache = |cache: Value| {
+        write(
+            &f.codex.join("models_cache.json"),
+            &serde_json::to_string(&cache).unwrap(),
+        )
+    };
+    let models = json!([
+        {"slug": "on-model", "include_plugin_usage_instructions": true},
+        {"slug": "off-model", "include_plugin_usage_instructions": false},
+        {"slug": "silent-model"}
+    ]);
+    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
     let config = |model: &str| format!("{model}[plugins.\"demo@mkt\"]\nenabled = true\n");
 
     // true: rendered, the fixed text's exact size (available_plugins_instructions.rs:30-48).
@@ -669,35 +734,65 @@ fn plugins_instructions_follow_the_catalog_flag() {
     assert_eq!(r.cost.predicted, Some(1014));
     assert!(!r.cost.predicted_is_estimate);
 
-    // false: codex renders nothing (world_state.rs:271-272).
-    user_config(&f, &config("model = \"off-model\"\n"));
-    let t = resolve(&target(&f), None);
-    assert!(find(&t, ID).is_none());
-    assert!(find(&t, "codex/system-prompt/builtin/recommended_plugins").is_some());
-
-    // Unknown — the entry is silent (codex 0.160.1 always writes the flag), the model is not in
-    // the cache, or there is no model: listed, marked not checkable, size if rendered in `why`.
-    for (model, why) in [
-        ("model = \"silent-model\"\n", "silent-model"),
-        ("model = \"ghost-model\"\n", "ghost-model is not in"),
-        ("", "no model in config"),
-    ] {
-        user_config(&f, &config(model));
+    // false, or missing — a `#[serde(default)] bool` (openai_models.rs:434-435) — in a cache codex
+    // uses: codex renders nothing (world_state.rs:271-272).
+    for model in ["off-model", "silent-model"] {
+        user_config(&f, &config(&format!("model = \"{model}\"\n")));
         let t = resolve(&target(&f), None);
-        let r = row(&t, ID);
-        assert_eq!(r.mode, Mode::Always, "{model}");
-        assert_eq!(r.cost.predicted, None, "{model}");
+        assert!(find(&t, ID).is_none(), "{model}");
+        assert!(find(&t, "codex/system-prompt/builtin/recommended_plugins").is_some());
+    }
+
+    // Unknown: listed, marked not checkable, the size if rendered in `why`.
+    let unknown = |why: &str| {
+        let t = resolve(&target(&f), None);
+        let r = row(&t, ID).clone();
+        assert_eq!(r.mode, Mode::Always, "{why}");
+        assert_eq!(r.cost.predicted, None, "{why}");
         let s = r.signal.as_deref().unwrap_or_default();
         assert!(
             s.starts_with(CATALOG_GATED)
                 && s.contains("include_plugin_usage_instructions = true")
                 && s.contains(why),
-            "{model}: {s}"
+            "{why}: {s}"
         );
-        assert!(why_has(r, "1014 bytes if rendered"), "{:?}", r.origin.why);
+        assert!(why_has(&r, "1014 bytes if rendered"), "{:?}", r.origin.why);
+    };
+    // ...the model is not in the cache, or there is no model;
+    for (model, why) in [
+        ("model = \"ghost-model\"\n", "ghost-model is not in"),
+        ("", "no model in config"),
+    ] {
+        user_config(&f, &config(model));
+        unknown(why);
     }
+    // ...or codex would not use the cache: another version's, no identity, a flag it cannot
+    // parse (`null` is not a bool), or no cache at all.
+    user_config(&f, &config("model = \"off-model\"\n"));
+    for (file, why) in [
+        (
+            json!({"client_version": "0.159.0", "identity": "test-login", "models": models}),
+            "written by codex 0.159.0, not 0.160.1",
+        ),
+        (
+            json!({"client_version": "0.160.1", "models": models}),
+            "has no identity",
+        ),
+        (
+            json!({"client_version": "0.160.1", "identity": "test-login", "models": [
+                {"slug": "off-model", "include_plugin_usage_instructions": null}
+            ]}),
+            "include_plugin_usage_instructions is null, so codex cannot parse",
+        ),
+    ] {
+        cache(file);
+        unknown(why);
+    }
+    std::fs::remove_file(f.codex.join("models_cache.json")).unwrap();
+    unknown("no usable models_cache.json");
 
     // No plugin with a part: no block, whatever the catalog says.
+    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
     user_config(&f, "model = \"on-model\"\n");
     assert!(find(&resolve(&target(&f), None), ID).is_none());
 }

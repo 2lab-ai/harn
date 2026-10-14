@@ -26,8 +26,9 @@
 //!
 //! Some built-in blocks render only when the model's catalog entry carries their text or flag
 //! (`<collaboration_mode>`, `<multi_agent_role>` + `<multi_agent_mode>`, `<plugins_instructions>`).
-//! With the entry in `$CODEX_HOME/models_cache.json` the row follows it; without it the row is
-//! listed with a [`CATALOG_GATED`] signal.
+//! When codex would use `$CODEX_HOME/models_cache.json` as it is ([`Ctx::catalog_entry`]) the row
+//! follows the entry, read with codex's serde defaults; otherwise the row is listed with a
+//! [`CATALOG_GATED`] signal.
 //!
 //! Knobs are Codex's own config keys. Codex has no local-only config file: the target dir's
 //! `.codex/config.toml` is `project` scope (and takes effect only while that dir is trusted),
@@ -57,11 +58,11 @@ pub use config::PROFILE_ENV;
 pub use skills::CAP_STATE_UNKNOWN;
 
 /// Signal prefix of a row whose presence the model's catalog entry decides while harn does not
-/// know that entry (no model in config, the model missing from `models_cache.json`,
-/// `model_catalog_json` set, or the entry silent on a field codex always writes). The row stays
-/// listed (`always`, its size if rendered in `why`), so a capture without it is not a prediction
-/// miss: verify treats `item.signal.starts_with(CATALOG_GATED)` as not checkable. The rest of the
-/// signal names the catalog condition and why the entry is unknown.
+/// know what codex will read there ([`Ctx::catalog_entry`]: no model in config, `model_catalog_json`
+/// set, a `models_cache.json` codex would not use, the model missing from it, or a field codex
+/// cannot parse). The row stays listed (`always`, its size if rendered in `why`), so a capture
+/// without it is not a prediction miss: verify treats `item.signal.starts_with(CATALOG_GATED)` as
+/// not checkable. The rest of the signal names the catalog condition and why the entry is unknown.
 pub const CATALOG_GATED: &str = "catalog-gated:";
 
 pub(crate) struct Ctx<'a> {
@@ -95,6 +96,10 @@ pub(crate) struct ModelFacts {
     /// so every catalog fact (base instructions, window) stays unknown rather than mixing in
     /// `models_cache.json`.
     pub catalog_unread: Option<String>,
+    /// Why codex would not use `models_cache.json` as it is ([`cache_unusable`]). Only the
+    /// catalog-gated rows depend on it; base instructions and the window keep reading the file as
+    /// the best snapshot.
+    pub cache_unusable: Option<String>,
 }
 
 impl Ctx<'_> {
@@ -119,21 +124,43 @@ impl Ctx<'_> {
         path.display().to_string()
     }
 
-    /// Why harn does not know the model's catalog entry; None when `models_cache.json` has it.
-    pub fn catalog_unknown(&self) -> Option<String> {
+    /// The model's slug and the catalog entry codex will read for it, or why harn does not know
+    /// that entry: config names its own catalog, there is no (readable) model, codex would not
+    /// use `models_cache.json` ([`ModelFacts::cache_unusable`]), or the model is not in it.
+    pub fn catalog_entry(&self) -> Result<(&str, &Value), String> {
         let m = &self.model;
-        if m.catalog.is_some() {
-            return None;
+        if let Some(at) = &m.catalog_unread {
+            return Err(format!("{at}: that catalog is not read"));
         }
-        let cache = self.display(&self.codex_home.join("models_cache.json"));
-        Some(match (&m.catalog_unread, &m.slug, &m.slug_unreadable) {
-            (Some(at), _, _) => format!("{at}: that catalog is not read"),
-            (None, Some(slug), _) => format!("{slug} is not in {cache}"),
-            (None, None, Some(at)) => format!("{at} is not a string"),
-            (None, None, None) => {
-                "no model in config: codex picks its default at startup".to_string()
-            }
-        })
+        let Some(slug) = m.slug.as_deref() else {
+            return Err(match &m.slug_unreadable {
+                Some(at) => format!("{at} is not a string"),
+                None => "no model in config: codex picks its default at startup".to_string(),
+            });
+        };
+        if let Some(why) = &m.cache_unusable {
+            return Err(why.clone());
+        }
+        match &m.catalog {
+            Some(entry) => Ok((slug, entry)),
+            None => Err(format!(
+                "{slug} is not in {}",
+                self.display(&self.codex_home.join("models_cache.json"))
+            )),
+        }
+    }
+
+    /// A `#[serde(default)] bool` of the catalog entry as codex reads it
+    /// (`include_skills_usage_instructions`, `include_plugin_usage_instructions`,
+    /// `protocol/src/openai_models.rs:432-435`): missing is `false`; `null` or another type fails
+    /// the whole file ([`unparsable`]); `Err` = unknown, with why ([`Ctx::catalog_entry`]).
+    pub fn catalog_flag(&self, flag: &str) -> Result<bool, String> {
+        let (slug, entry) = self.catalog_entry()?;
+        match entry.get(flag) {
+            None => Ok(false),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(other) => Err(unparsable(slug, flag, other)),
+        }
     }
 
     /// The [`CATALOG_GATED`] signal: the row renders only if the catalog entry has `condition`.
@@ -153,6 +180,86 @@ impl Ctx<'_> {
         (fs::normalize(&dot_codex) != fs::normalize(&self.codex_home))
             .then(|| dot_codex.join("config.toml"))
     }
+}
+
+/// An optional field of a catalog entry as codex deserializes it (`Option<…>` fields, missing or
+/// `null` = `None`): `Ok(None)` when it or an object on `path` is missing or `null`, `Err` when an
+/// object on the path has another type — codex then cannot parse `models_cache.json` and fetches
+/// the catalog instead ([`unparsable`]). The leaf's own type is the caller's to check.
+pub(crate) fn catalog_field<'a>(
+    slug: &str,
+    entry: &'a Value,
+    path: &[&str],
+) -> Result<Option<&'a Value>, String> {
+    let mut value = entry;
+    for (i, key) in path.iter().enumerate() {
+        let Value::Object(map) = value else {
+            return Err(unparsable(slug, &path[..i].join("."), value));
+        };
+        match map.get(*key) {
+            None | Some(Value::Null) => return Ok(None),
+            Some(v) => value = v,
+        }
+    }
+    Ok(Some(value))
+}
+
+/// Why codex ignores a `models_cache.json` whose entry for `slug` has `field` of the wrong type:
+/// the whole file fails to deserialize (`models-manager/src/cache.rs:229-239`) and codex fetches
+/// the catalog instead (`models-manager/src/manager.rs:725-735`). harn checks only the fields it
+/// reads, in the model's own entry.
+pub(crate) fn unparsable(slug: &str, field: &str, value: &Value) -> String {
+    let is = match value {
+        Value::Null => "is null".to_string(),
+        other => format!("is a {}", json_type(other)),
+    };
+    format!(
+        "{slug}'s {field} {is}, so codex cannot parse models_cache.json and fetches the catalog instead"
+    )
+}
+
+pub(crate) fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Why codex would not use `models_cache.json` as it is: the file is missing (codex writes it on
+/// its first run) or not JSON (`models-manager/src/cache.rs:229-239`, a miss at
+/// `manager.rs:725-735`); `client_version` is missing or not `codex_version` (`manager.rs:739-746`);
+/// `identity` is missing — a legacy, unscoped cache (`manager.rs:747-752`; harn cannot compare a
+/// present one with the login). Codex then fetches the catalog for its own version. The 300 s
+/// freshness window (`manager.rs:35`) is not modelled: a stale cache is refetched for the same
+/// version and login, and harn keeps it as the best snapshot.
+fn cache_unusable(cache: Option<&Value>, codex_version: &str) -> Option<String> {
+    let Some(cache) = cache else {
+        return Some("no usable models_cache.json (codex writes it on its first run)".to_string());
+    };
+    let refetch = "codex fetches the catalog instead (models-manager/src/manager.rs:725-752)";
+    match cache.get("client_version").and_then(Value::as_str) {
+        None => {
+            return Some(format!(
+                "models_cache.json has no client_version; {refetch}"
+            ))
+        }
+        Some(v) if v != codex_version => {
+            return Some(format!(
+                "models_cache.json was written by codex {v}, not {codex_version}; {refetch}"
+            ))
+        }
+        Some(_) => {}
+    }
+    if cache.get("identity").and_then(Value::as_str).is_none() {
+        return Some(format!(
+            "models_cache.json has no identity (a legacy cache); {refetch}"
+        ));
+    }
+    None
 }
 
 pub(crate) fn new_item(kind: Kind, layer: Layer, name: &str, label: &str) -> Item {
@@ -295,7 +402,19 @@ pub(crate) fn resolve_with(
         },
         &mut warnings,
     )?;
-    let model = model_facts(&fs, target, &codex_home, &config, &mut warnings);
+    // The installed codex decides which models_cache.json it accepts; harn's rules version when
+    // none is found.
+    let installed = agent_version(target);
+    let model = model_facts(
+        &fs,
+        target,
+        &codex_home,
+        &config,
+        installed
+            .as_deref()
+            .unwrap_or(super::Codex::VERIFIED_AGAINST),
+        &mut warnings,
+    );
     let mut ctx = Ctx {
         target,
         fs,
@@ -352,7 +471,7 @@ pub(crate) fn resolve_with(
             config::PROFILE_ENV
         ));
     }
-    tree.agent_version = agent_version(target);
+    tree.agent_version = installed;
     let mut warnings = ctx.warnings;
     if let Some(v) = tree.agent_version.as_deref() {
         if version_key(v) > version_key(super::Codex::VERIFIED_AGAINST) {
@@ -456,12 +575,13 @@ fn model_signal(ctx: &Ctx) -> String {
 /// The model (`target.model`, else the effective `model` key), its `models_cache.json` entry,
 /// and the context window: `target.context_window`, else `model_context_window` clamped to the
 /// catalog's `max_context_window` (`models-manager/src/model_info.rs:20-27`), else the catalog's
-/// `context_window`.
+/// `context_window`. `codex_version` is the codex that will read `models_cache.json`.
 fn model_facts(
     fs: &Fs,
     target: &Target,
     codex_home: &Path,
     config: &Config,
+    codex_version: &str,
     warnings: &mut Vec<String>,
 ) -> ModelFacts {
     let mut m = ModelFacts::default();
@@ -498,6 +618,7 @@ fn model_facts(
         }
         Json::Missing => None,
     };
+    m.cache_unusable = cache_unusable(cache.as_ref(), codex_version);
     if let Some(cache) = &cache {
         m.catalog_version = cache
             .get("client_version")

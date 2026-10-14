@@ -17,7 +17,7 @@
 //! `codex exec` and `codex debug prompt-input` send nothing but the interactive TUI sends the
 //! bundled preset.
 
-use super::{config_knobs, new_item, Ctx};
+use super::{catalog_field, config_knobs, new_item, unparsable, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -199,21 +199,32 @@ fn collaboration_mode(ctx: &Ctx) -> Option<Item> {
         "/include_collaboration_mode_instructions",
         &["`<collaboration_mode>` developer block (core/src/session/world_state.rs:203-210)"],
     )?;
-    let (Some(entry), Some(slug)) = (ctx.model.catalog.as_ref(), ctx.model.slug.as_deref()) else {
-        item.signal = ctx
-            .catalog_unknown()
-            .map(|why| Ctx::catalog_gated(CONDITION, &why));
-        return Some(item);
+    // `model_messages`, `collaboration_modes` and `default` are all `Option`s: missing or `null`
+    // is `None` (`protocol/src/openai_models.rs:430-431`, `:558`, `:750-753`).
+    let text = ctx.catalog_entry().and_then(|(slug, entry)| {
+        match catalog_field(
+            slug,
+            entry,
+            &["model_messages", "collaboration_modes", "default"],
+        )? {
+            None => Ok((slug, false)),
+            Some(Value::String(_)) => Ok((slug, true)),
+            Some(other) => Err(unparsable(slug, CONDITION, other)),
+        }
+    });
+    let slug = match text {
+        Err(why) => {
+            item.signal = Some(Ctx::catalog_gated(CONDITION, &why));
+            return Some(item);
+        }
+        Ok((slug, false)) => slug,
+        Ok((slug, true)) => {
+            item.origin.why.push(format!(
+                "models_cache.json: {slug} has {CONDITION}, the Default mode's text (core/src/context/world_state/collaboration_mode.rs:30-42)"
+            ));
+            return Some(item);
+        }
     };
-    if entry
-        .pointer("/model_messages/collaboration_modes/default")
-        .is_some_and(Value::is_string)
-    {
-        item.origin.why.push(format!(
-            "models_cache.json: {slug} has {CONDITION}, the Default mode's text (core/src/context/world_state/collaboration_mode.rs:30-42)"
-        ));
-        return Some(item);
-    }
     item.mode = Mode::None;
     item.signal = Some(format!(
         "{slug}'s catalog entry has no Default mode text: none from codex exec or debug prompt-input; the TUI sends the bundled preset"
@@ -272,21 +283,29 @@ fn multi_agent(ctx: &Ctx) -> Option<Item> {
         "/agents/enabled",
         WHY,
     )?;
-    let (Some(entry), Some(slug)) = (ctx.model.catalog.as_ref(), ctx.model.slug.as_deref()) else {
-        item.signal = ctx
-            .catalog_unknown()
-            .map(|why| Ctx::catalog_gated(CONDITION, &why));
-        return Some(item);
-    };
-    // Absent from a known entry is `None` (`skip_serializing_if`,
-    // `protocol/src/openai_models.rs:502-507`), as is a value codex does not recognise
-    // (`deserialize_optional_model_selector`, `:352-361`).
-    (entry.get("multi_agent_version").and_then(Value::as_str) == Some("v2")).then(|| {
-        item.origin.why.push(format!(
-            "models_cache.json: {slug} {CONDITION} (core/src/session/mod.rs:4244-4256)"
-        ));
-        item
-    })
+    // Missing, `null` or a string codex does not recognise is `None`; anything but a string or
+    // `null` fails the file (`deserialize_optional_model_selector`,
+    // `protocol/src/openai_models.rs:352-361`, `:502-507`).
+    let version = ctx.catalog_entry().and_then(|(slug, entry)| {
+        match catalog_field(slug, entry, &["multi_agent_version"])? {
+            None => Ok((slug, None)),
+            Some(Value::String(v)) => Ok((slug, Some(v.as_str()))),
+            Some(other) => Err(unparsable(slug, "multi_agent_version", other)),
+        }
+    });
+    match version {
+        Err(why) => {
+            item.signal = Some(Ctx::catalog_gated(CONDITION, &why));
+            Some(item)
+        }
+        Ok((slug, Some("v2"))) => {
+            item.origin.why.push(format!(
+                "models_cache.json: {slug} {CONDITION} (core/src/session/mod.rs:4244-4256)"
+            ));
+            Some(item)
+        }
+        Ok(_) => None,
+    }
 }
 
 /// The pointer that turns `features.multi_agent_v2` on — the key itself as a boolean, or its

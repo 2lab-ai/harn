@@ -42,7 +42,7 @@
 //! is a switch: no cost (`—`), no children (each part exists once in the tree), mode `always`
 //! while the plugin loads and `none` otherwise.
 
-use super::{config_knobs, hooks, new_item, Ctx};
+use super::{config_knobs, hooks, json_type, new_item, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode};
 use crate::resolve::claude::cost_na;
 use crate::resolve::claude::fs::{esc, file_name, Json};
@@ -447,17 +447,6 @@ fn read_manifest(ctx: &Ctx, root: &Path) -> Result<(PathBuf, Value), String> {
         };
     }
     Err("missing or invalid plugin.json".to_string())
-}
-
-fn json_type(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 /// Why `RawPluginManifest` (`core-plugins/src/manifest.rs:48-73`, camelCase keys, unknown keys
@@ -936,19 +925,12 @@ pub(crate) fn blocks(ctx: &Ctx, plugins: &[Plugin], tree_items: &[Item]) -> Vec<
 }
 
 /// `<plugins_instructions>` while a plugin is available: only when the model's catalog entry sets
-/// `include_plugin_usage_instructions` (`core/src/session/world_state.rs:271-272`). The flag is a
-/// plain `bool` codex always writes to `models_cache.json` (`protocol/src/openai_models.rs:434-435`),
-/// so an entry without it comes from another codex version's cache, which codex refetches
-/// (`models-manager/src/cache.rs:203`): unknown, like a missing entry.
+/// `include_plugin_usage_instructions` (`core/src/session/world_state.rs:271-272`), read as codex
+/// reads it ([`Ctx::catalog_flag`]: missing is `false`).
 fn plugins_instructions(ctx: &Ctx, bad: Option<&str>, knobs: &[Knob]) -> Option<Item> {
     const CONDITION: &str = "include_plugin_usage_instructions = true";
-    let flag = ctx
-        .model
-        .catalog
-        .as_ref()
-        .and_then(|c| c.get("include_plugin_usage_instructions"))
-        .and_then(Value::as_bool);
-    if flag == Some(false) {
+    let flag = ctx.catalog_flag("include_plugin_usage_instructions");
+    if flag == Ok(false) {
         return None;
     }
     let mut item = new_item(
@@ -962,7 +944,7 @@ fn plugins_instructions(ctx: &Ctx, bad: Option<&str>, knobs: &[Knob]) -> Option<
         "rendered when a plugin is available and the model's catalog entry sets include_plugin_usage_instructions (core/src/session/world_state.rs:271-272)".to_string(),
     ];
     let bytes = PLUGINS_INSTRUCTIONS.len() as u64;
-    if flag == Some(true) {
+    if flag == Ok(true) {
         item.cost = Cost {
             source: Some(bytes),
             predicted: Some(bytes),
@@ -971,14 +953,7 @@ fn plugins_instructions(ctx: &Ctx, bad: Option<&str>, knobs: &[Knob]) -> Option<
         item.origin.why.push(
             "models_cache.json: include_plugin_usage_instructions = true; whether a plugin is available is decided at startup".to_string(),
         );
-    } else {
-        let why = match (ctx.catalog_unknown(), ctx.model.slug.as_deref()) {
-            (Some(why), _) => why,
-            (None, slug) => format!(
-                "{}'s entry in models_cache.json does not say (codex refetches a cache written by another version)",
-                slug.unwrap_or("the model")
-            ),
-        };
+    } else if let Err(why) = flag {
         item.signal = Some(Ctx::catalog_gated(CONDITION, &why));
         item.origin
             .why
