@@ -1,6 +1,6 @@
 # harn
 
-See and trim what your AI coding agent loads before your first message.
+See and trim what your AI coding agent loads before your first message. Site: <https://harn.2lab.ai>
 
 A fresh Claude Code session in one real directory sends a 332 KB first request before it reads a
 2-byte instruction. `harn` lists every item behind those bytes without starting a session, one
