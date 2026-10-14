@@ -91,9 +91,10 @@ pub(crate) fn developer_instructions(ctx: &Ctx) -> Option<Item> {
 pub(crate) fn agents_md(ctx: &mut Ctx) -> Vec<Item> {
     let mut landed: Vec<Item> = Vec::new();
     let mut not_landed: Vec<Item> = Vec::new();
-    let global = global(ctx);
+    let (global, global_empty) = global(ctx);
     let has_global = global.is_some();
     landed.extend(global);
+    not_landed.extend(global_empty);
 
     let mut project_landed = 0usize;
     if !ctx.config.active_project.is_untrusted() {
@@ -148,9 +149,12 @@ pub(crate) fn agents_md(ctx: &mut Ctx) -> Vec<Item> {
     vec![message]
 }
 
-/// `$CODEX_HOME/AGENTS.override.md`, else `AGENTS.md`: the first with non-empty trimmed text.
-fn global(ctx: &Ctx) -> Option<Item> {
-    let mut skipped: Vec<String> = Vec::new();
+/// `$CODEX_HOME/AGENTS.override.md`, else `AGENTS.md`: the first with non-empty trimmed text
+/// (decoded lossily, `codex-home/src/instructions/mod.rs:68-79`). Unlike the project chain, a
+/// whitespace-only global override does not shadow: codex falls through to `AGENTS.md`. Returns
+/// the landed file and the whitespace-only files passed over (mode `none`).
+fn global(ctx: &Ctx) -> (Option<Item>, Vec<Item>) {
+    let mut empty: Vec<Item> = Vec::new();
     for name in [OVERRIDE, DEFAULT] {
         let path = ctx.codex_home.join(name);
         if !ctx.fs.is_file(&path) {
@@ -161,10 +165,6 @@ fn global(ctx: &Ctx) -> Option<Item> {
         };
         let text = String::from_utf8_lossy(&bytes);
         let trimmed = text.trim();
-        if trimmed.is_empty() {
-            skipped.push(format!("{} is empty, skipped", ctx.display(&path)));
-            continue;
-        }
         let real = ctx.fs.realpath(&path);
         let mut item = new_item(
             Kind::Instruction,
@@ -172,17 +172,29 @@ fn global(ctx: &Ctx) -> Option<Item> {
             &real.display().to_string(),
             &ctx.display(&path),
         );
+        item.origin.path = Some(real);
+        if trimmed.is_empty() {
+            item.mode = Mode::None;
+            item.cost = cost_na(Some(bytes.len() as u64));
+            item.origin.why = vec![
+                "global AGENTS file, whitespace only: codex skips it and tries the next name (codex-home/src/instructions/mod.rs:68-79)"
+                    .to_string(),
+            ];
+            item.knobs = vec![Knob::None {
+                reason: "not loaded (whitespace only)".to_string(),
+            }];
+            empty.push(item);
+            continue;
+        }
         item.cost = Cost {
             source: Some(bytes.len() as u64),
             predicted: Some(trimmed.len() as u64),
             ..Cost::default()
         };
-        item.origin.path = Some(real);
         item.origin.why = vec![
             "global AGENTS file ($CODEX_HOME, first non-empty of AGENTS.override.md, AGENTS.md; trimmed; outside the project_doc_max_bytes budget)"
                 .to_string(),
         ];
-        item.origin.why.extend(skipped);
         if name == OVERRIDE && ctx.fs.is_file(&ctx.codex_home.join(DEFAULT)) {
             item.origin.why.push(format!(
                 "replaces {}",
@@ -194,9 +206,16 @@ fn global(ctx: &Ctx) -> Option<Item> {
         item.knobs = vec![Knob::None {
             reason: "no config key; empty or move the file".to_string(),
         }];
-        return Some(item);
+        let lands = ctx.display(&path);
+        for e in &mut empty {
+            e.signal = Some(format!("empty: codex falls through to {lands}"));
+        }
+        return (Some(item), empty);
     }
-    None
+    for e in &mut empty {
+        e.signal = Some("empty: no global AGENTS file lands".to_string());
+    }
+    (None, empty)
 }
 
 /// The project rows (landed ones mode `always`, the rest mode `none`) and how many landed.
@@ -316,8 +335,9 @@ fn project_chain(ctx: &mut Ctx) -> (Vec<Item>, usize) {
         }
         if kept < data.len() {
             item.signal = Some(format!(
-                "truncated: {kept} of {} bytes land (project_doc_max_bytes = {max}, shared by the chain)",
-                data.len()
+                "truncated: {kept} of {} source bytes read, {} bytes land (project_doc_max_bytes = {max}, shared by the chain)",
+                data.len(),
+                text.len()
             ));
         }
         item.cost = Cost {

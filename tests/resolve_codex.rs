@@ -9,6 +9,7 @@ use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fx {
@@ -542,7 +543,7 @@ fn shared_budget_truncates_the_last_file_and_drops_the_rest() {
     assert_eq!(rows[1].cost.predicted, Some(2_768));
     assert_eq!(
         rows[1].signal.as_deref(),
-        Some("truncated: 2768 of 5000 bytes land (project_doc_max_bytes = 32768, shared by the chain)")
+        Some("truncated: 2768 of 5000 source bytes read, 2768 bytes land (project_doc_max_bytes = 32768, shared by the chain)")
     );
     assert_eq!(rows[2].mode, Mode::None);
     assert!(rows[2].cost.not_applicable);
@@ -785,4 +786,376 @@ fn no_codex_home_is_an_empty_tree_with_a_warning() {
         "{:?}",
         t.warnings
     );
+}
+
+// Review round 1 (C1): each test below fails on 393df03 except where it says it pins upstream.
+
+/// Pins upstream, no defect: Codex's AGENTS.md gate reads `projects` from every enabled layer,
+/// trusted project layers included (`config/src/state.rs:475-484`, `:548-551`;
+/// `core/src/config/mod.rs:1913-1916`, `:3460-3465`; `projects` is not on the denylist,
+/// `config/src/loader/mod.rs:88-101`, `:1137-1230`), while the config gate reads only non-project
+/// layers (`loader:336-356`). A trusted repo can re-trust a subdir for AGENTS.md, not for config.
+#[test]
+fn review_trusted_project_layer_retrusts_a_subdir_for_agents_md_only() {
+    let f = fx();
+    let child = f.repo.join("child");
+    write(&child.join("AGENTS.md"), "child doc\n");
+    write(
+        &child.join(".codex/config.toml"),
+        "include_environment_context = false\n",
+    );
+    write(
+        &f.repo.join(".codex/config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            child.display()
+        ),
+    );
+    write(
+        &f.codex.join("config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            f.repo.display(),
+            child.display()
+        ),
+    );
+    let t = resolve(&target_at(&f, &child), None);
+    assert!(
+        find(&t, "/environment_context").is_some(),
+        "the child's own config layer stays disabled"
+    );
+    let rows = project_rows(&t);
+    assert_eq!(
+        rows.last().and_then(|r| r.origin.path.clone()),
+        Some(child.join("AGENTS.md")),
+        "the AGENTS.md chain loads"
+    );
+    let s = signal(&t, "trust: untrusted");
+    assert!(
+        s.contains(&format!(
+            "AGENTS.md gate: projects.\"{}\".trust_level in {}",
+            child.display(),
+            f.repo.join(".codex/config.toml").display()
+        )),
+        "{s}"
+    );
+}
+
+#[test]
+fn review_invalid_utf8_config_is_rejected_not_rewritten() {
+    let f = fx();
+    std::fs::write(f.codex.join("config.toml"), b"model = \"a\xffb\"\n").unwrap();
+    let t = resolve(&target(&f), None);
+    let model = signal(&t, "model:");
+    assert!(model.starts_with("model: not set in config"), "{model}");
+    assert!(
+        t.warnings
+            .iter()
+            .any(|w| w.contains("not UTF-8") && w.contains("refuses to start")),
+        "{:?}",
+        t.warnings
+    );
+}
+
+#[test]
+fn review_non_finite_float_is_set_not_absent() {
+    let f = fx();
+    write(&f.repo.join("AGENTS.md"), &"x".repeat(50));
+    write(
+        &f.repo.join(".codex/config.toml"),
+        "project_doc_max_bytes = nan\ninclude_environment_context = inf\n",
+    );
+    user_config(
+        &f,
+        Some((&f.repo, "trusted")),
+        "project_doc_max_bytes = 10\n",
+    );
+    let t = resolve(&target(&f), None);
+    // Not the user layer's 10: the project layer set the key (to something codex rejects).
+    assert!(project_rows(&t).is_empty(), "{:#?}", project_rows(&t));
+    for key in ["project_doc_max_bytes", "include_environment_context"] {
+        assert!(
+            t.warnings
+                .iter()
+                .any(|w| w.contains(&format!("config.toml#/{key}")) && w.contains("non-finite")),
+            "{key}: {:?}",
+            t.warnings
+        );
+    }
+    let env = row(&t, "/environment_context");
+    assert!(
+        env.origin
+            .why
+            .iter()
+            .any(|w| w.contains("is not a boolean")),
+        "{:?}",
+        env.origin.why
+    );
+}
+
+/// No fix needed: `Target.dir` is canonical (`model.rs`, `main.rs` `target_for`), so a symlinked
+/// `--dir` into another checkout resolves by its real path. Exercised through the binary.
+#[test]
+fn review_symlinked_target_resolves_by_real_path() {
+    let f = fx();
+    let real_sub = f.repo.join("sub");
+    write(&f.repo.join("AGENTS.md"), "real doc\n");
+    std::fs::create_dir_all(&real_sub).unwrap();
+    let other = f.root.join("other");
+    write(&other.join(".git/HEAD"), "ref: refs/heads/main\n");
+    write(&other.join("AGENTS.md"), "other doc\n");
+    let link = other.join("link");
+    std::os::unix::fs::symlink(&real_sub, &link).unwrap();
+    write(
+        &f.codex.join("config.toml"),
+        &format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            f.repo.display(),
+            other.display()
+        ),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_harn"))
+        .env("HOME", &f.home)
+        .env("XDG_STATE_HOME", f.root.join("state"))
+        .env_remove("CODEX_HOME")
+        .env_remove(PROFILE_ENV)
+        .args(["--agent", "codex", "--json", "--dir"])
+        .arg(&link)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let tree = &doc["agents"][0];
+    assert_eq!(tree["target_dir"], json!(real_sub.display().to_string()));
+    let signals: Vec<&str> = tree["signals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let trust = signals.iter().find(|s| s.starts_with("trust:")).unwrap();
+    assert!(
+        trust.starts_with(&format!(
+            "trust: trusted (projects.\"{}\"",
+            f.repo.display()
+        )),
+        "{trust}"
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains(&f.repo.join("AGENTS.md").display().to_string()));
+    assert!(!text.contains(&other.join("AGENTS.md").display().to_string()));
+}
+
+#[test]
+fn review_model_catalog_json_leaves_catalog_facts_unknown() {
+    let f = fx();
+    let cache = json!({
+        "client_version": "0.160.1",
+        "models": [{
+            "slug": "test-model",
+            "context_window": 1000,
+            "max_context_window": 2000,
+            "model_messages": {"instructions_template": "t".repeat(100)}
+        }]
+    });
+    write(
+        &f.codex.join("models_cache.json"),
+        &serde_json::to_string(&cache).unwrap(),
+    );
+    for extra in ["", "model_context_window = 5000\n"] {
+        user_config(
+            &f,
+            None,
+            &format!(
+                "model = \"test-model\"\nmodel_catalog_json = \"{}\"\n{extra}",
+                f.root.join("catalog.json").display()
+            ),
+        );
+        let t = resolve(&target(&f), None);
+        let model = signal(&t, "model:");
+        assert!(
+            model.contains("context window unknown") && model.contains("model_catalog_json"),
+            "{extra:?}: {model}"
+        );
+        assert_eq!(row(&t, "/builtin/instructions").cost.predicted, None);
+    }
+}
+
+#[test]
+fn review_permissions_off_leaves_no_first_request_block() {
+    let f = fx();
+    user_config(&f, None, "");
+    let t = resolve(&target(&f), None);
+    let row = row(&t, "/permissions_instructions");
+    assert!(
+        row.origin
+            .why
+            .iter()
+            .any(|w| w.contains("renders nothing in the first request")),
+        "{:?}",
+        row.origin.why
+    );
+    user_config(&f, None, "include_permissions_instructions = false\n");
+    let t = resolve(&target(&f), None);
+    assert!(!model::walk(&t).any(|i| i.id.contains("permission") || i.id.contains("approved")));
+}
+
+#[cfg(unix)]
+#[test]
+fn review_path_skips_a_non_executable_codex() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    user_config(&f, None, "");
+    let make = |version: &str, mode: u32, dir: &str| {
+        let bin = f.root.join(format!("Caskroom/codex/{version}/bin/codex"));
+        write(&bin, "binary");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(mode)).unwrap();
+        let path_dir = f.root.join(dir);
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::os::unix::fs::symlink(&bin, path_dir.join("codex")).unwrap();
+        path_dir
+    };
+    let first = make("9.9.9", 0o644, "path-a");
+    let second = make("0.161.0", 0o755, "path-b");
+    let mut t = target(&f);
+    t.env.insert(
+        "PATH".to_string(),
+        format!("{}:{}", first.display(), second.display()),
+    );
+    assert_eq!(resolve(&t, None).agent_version.as_deref(), Some("0.161.0"));
+}
+
+#[test]
+fn review_empty_global_override_falls_through_to_agents_md() {
+    let f = fx();
+    user_config(&f, None, "");
+    write(&f.codex.join("AGENTS.override.md"), "  \n\n");
+    write(&f.codex.join("AGENTS.md"), "global\n");
+    let t = resolve(&target(&f), None);
+    let message = row(&t, "/agents-md-message");
+    let children: Vec<(PathBuf, Mode)> = message
+        .children
+        .iter()
+        .map(|c| (c.origin.path.clone().unwrap(), c.mode))
+        .collect();
+    assert_eq!(
+        children,
+        [
+            (f.codex.join("AGENTS.md"), Mode::Always),
+            (f.codex.join("AGENTS.override.md"), Mode::None)
+        ]
+    );
+    let empty = &message.children[1];
+    assert_eq!(
+        empty.signal.as_deref(),
+        Some("empty: codex falls through to ~/.codex/AGENTS.md")
+    );
+    assert!(empty.cost.not_applicable);
+    assert_eq!(message.children[0].cost.predicted, Some(6));
+    assert_eq!(message.cost.predicted, Some(framing(None, true, 0)));
+
+    // No AGENTS.md behind it: the empty override is listed on its own, no message.
+    std::fs::remove_file(f.codex.join("AGENTS.md")).unwrap();
+    let t = resolve(&target(&f), None);
+    assert!(find(&t, "/agents-md-message").is_none());
+    let empty = row(&t, "/.codex/AGENTS.override.md");
+    assert_eq!(empty.mode, Mode::None);
+    assert_eq!(
+        empty.signal.as_deref(),
+        Some("empty: no global AGENTS file lands")
+    );
+}
+
+#[test]
+fn review_competing_fallback_names_take_the_first_hit_per_dir() {
+    let f = fx();
+    user_config(
+        &f,
+        None,
+        "project_doc_fallback_filenames = [\"A.md\", \"B.md\"]\n",
+    );
+    write(&f.repo.join("A.md"), "a\n");
+    write(&f.repo.join("B.md"), "b\n");
+    let sub = f.repo.join("sub");
+    write(&sub.join("AGENTS.md"), "agents\n");
+    write(&sub.join("A.md"), "a2\n");
+    let t = resolve(&target_at(&f, &sub), None);
+    let rows = project_rows(&t);
+    let picked: Vec<PathBuf> = rows
+        .iter()
+        .map(|r| r.origin.path.clone().unwrap())
+        .collect();
+    assert_eq!(picked, [f.repo.join("A.md"), sub.join("AGENTS.md")]);
+    assert!(rows[0]
+        .origin
+        .why
+        .iter()
+        .any(|w| w.contains("shadows B.md")));
+    assert!(rows[1]
+        .origin
+        .why
+        .iter()
+        .any(|w| w.contains("shadows A.md")));
+}
+
+#[test]
+fn review_whitespace_ancestor_override_uses_no_budget() {
+    let f = fx();
+    user_config(&f, None, "");
+    write(&f.repo.join("AGENTS.override.md"), " \n");
+    write(&f.repo.join("AGENTS.md"), &"r".repeat(100));
+    let sub = f.repo.join("sub");
+    write(&sub.join("AGENTS.md"), &"s".repeat(32_768));
+    let t = resolve(&target_at(&f, &sub), None);
+    assert_eq!(
+        project_rows(&t).len(),
+        2,
+        "the shadowed AGENTS.md has no row"
+    );
+    let empty = row(&t, "repo/AGENTS.override.md");
+    assert_eq!(empty.mode, Mode::None);
+    assert_eq!(
+        empty.signal.as_deref(),
+        Some("empty, yet shadows AGENTS.md")
+    );
+    let deep = row(&t, "sub/AGENTS.md");
+    assert_eq!(
+        deep.cost.predicted,
+        Some(32_768),
+        "the whole budget is left"
+    );
+    assert_eq!(deep.signal, None);
+}
+
+#[test]
+fn review_message_children_are_in_request_order() {
+    let f = fx();
+    user_config(&f, None, "project_doc_max_bytes = 20\n");
+    write(&f.codex.join("AGENTS.md"), "global\n");
+    write(&f.repo.join("AGENTS.md"), &"r".repeat(15));
+    let a = f.repo.join("a");
+    write(&a.join("AGENTS.md"), &"a".repeat(10));
+    let b = a.join("b");
+    write(&b.join("AGENTS.md"), "late\n");
+    let t = resolve(&target_at(&f, &b), None);
+    let message = row(&t, "/agents-md-message");
+    let order: Vec<(PathBuf, Mode, Option<u64>)> = message
+        .children
+        .iter()
+        .map(|c| (c.origin.path.clone().unwrap(), c.mode, c.cost.predicted))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (f.codex.join("AGENTS.md"), Mode::Always, Some(6)),
+            (f.repo.join("AGENTS.md"), Mode::Always, Some(15)),
+            (a.join("AGENTS.md"), Mode::Always, Some(5)),
+            (b.join("AGENTS.md"), Mode::None, None),
+        ]
+    );
+    assert_eq!(message.cost.predicted, Some(framing(Some(&b), true, 2)));
 }

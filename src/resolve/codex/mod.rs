@@ -60,6 +60,10 @@ pub(crate) struct ModelFacts {
     pub catalog: Option<Value>,
     /// `client_version` of `models_cache.json`: the codex that last refreshed the catalog.
     pub catalog_version: Option<String>,
+    /// `"<file>#/model_catalog_json"` when config names its own catalog: harn does not read it,
+    /// so every catalog fact (base instructions, window) stays unknown rather than mixing in
+    /// `models_cache.json`.
+    pub catalog_unread: Option<String>,
 }
 
 impl Ctx<'_> {
@@ -345,8 +349,11 @@ fn model_signal(ctx: &Ctx) -> String {
         _ => "model: not set in config (codex picks its default from the catalog at startup)"
             .to_string(),
     };
-    let model = match (m.context_window, &m.window_from) {
-        (Some(w), Some(from)) => format!("{model} · context window {w} tokens ({from})"),
+    let model = match (m.context_window, &m.window_from, &m.catalog_unread) {
+        (Some(w), Some(from), _) => format!("{model} · context window {w} tokens ({from})"),
+        (_, _, Some(at)) => {
+            format!("{model} · context window unknown ({at}: that catalog is not read)")
+        }
         _ => format!("{model} · context window unknown"),
     };
     // The cache is rewritten by whichever codex refreshed it last (two installs on one machine
@@ -375,6 +382,14 @@ fn model_facts(
     } else if let Some((slug, layer)) = config.get_str("/model") {
         m.slug = Some(slug.to_string());
         m.slug_from = Some(layer.at("/model"));
+    }
+    if let Some((_, layer)) = config.get("/model_catalog_json") {
+        m.catalog_unread = Some(layer.at("/model_catalog_json"));
+        if let Some(w) = target.context_window {
+            m.context_window = Some(w);
+            m.window_from = Some("target".to_string());
+        }
+        return m;
     }
     let cache_path = codex_home.join("models_cache.json");
     let cache = match fs.read_json(&cache_path) {
@@ -418,15 +433,18 @@ fn model_facts(
     if let Some(w) = target.context_window {
         m.context_window = Some(w);
         m.window_from = Some("target".to_string());
-    } else if let Some((w, layer)) = config.get_u64("/model_context_window") {
-        m.context_window = Some(catalog_max.map_or(w, |max| w.min(max)));
-        m.window_from = Some(match catalog_max {
-            Some(max) if max < w => format!(
-                "{} clamped to models_cache.json max_context_window {max}",
-                layer.at("/model_context_window")
-            ),
-            _ => layer.at("/model_context_window"),
-        });
+    } else if let Some((value, layer)) = config.get("/model_context_window") {
+        // Set but not a non-negative integer: unknown, never the catalog's value instead.
+        if let Some(w) = value.as_u64() {
+            m.context_window = Some(catalog_max.map_or(w, |max| w.min(max)));
+            m.window_from = Some(match catalog_max {
+                Some(max) if max < w => format!(
+                    "{} clamped to models_cache.json max_context_window {max}",
+                    layer.at("/model_context_window")
+                ),
+                _ => layer.at("/model_context_window"),
+            });
+        }
     } else if let Some(w) = catalog_window {
         m.context_window = Some(w);
         m.window_from = Some("models_cache.json".to_string());
@@ -443,7 +461,7 @@ fn agent_version(target: &Target) -> Option<String> {
     let path = target.env.get("PATH")?;
     let exe = std::env::split_paths(path)
         .map(|d| d.join("codex"))
-        .find(|p| p.is_file())?;
+        .find(|p| is_executable(p))?;
     let real = std::fs::canonicalize(&exe).ok()?;
     let from_package = real.ancestors().skip(1).find_map(|dir| {
         let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
@@ -467,6 +485,22 @@ fn agent_version(target: &Target) -> Option<String> {
         .windows(2)
         .rfind(|w| w[0] == "codex" && version_key(w[1]).is_some_and(|k| k.len() == 3))
         .map(|w| w[1].to_string())
+}
+
+/// A regular file a shell would run from `PATH` (any execute bit on Unix).
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
 }
 
 fn version_key(v: &str) -> Option<Vec<u64>> {
@@ -604,8 +638,12 @@ mod tests {
         assert_eq!(agent_version(&target), None, "no PATH");
 
         // Homebrew cask layout: the version is a path component of the symlink target.
+        use std::os::unix::fs::PermissionsExt;
+        let exec =
+            |p: &Path| std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cask = root.join("Caskroom/codex/0.161.0/bin/codex");
         write(&cask, "binary");
+        exec(&cask);
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::os::unix::fs::symlink(&cask, root.join("bin/codex")).unwrap();
         target.env.insert(
@@ -628,6 +666,7 @@ mod tests {
             &npm.join("lib/node_modules/@openai/codex/bin/codex.js"),
             "js",
         );
+        exec(&npm.join("lib/node_modules/@openai/codex/bin/codex.js"));
         std::fs::create_dir_all(npm.join("bin")).unwrap();
         std::os::unix::fs::symlink(
             npm.join("lib/node_modules/@openai/codex/bin/codex.js"),
@@ -642,6 +681,7 @@ mod tests {
         // A version component not under `codex`, and no package.json: unknown.
         let other = root.join("other/1.2.3/bin/codex");
         write(&other, "binary");
+        exec(&other);
         target.env.insert(
             "PATH".to_string(),
             other.parent().unwrap().display().to_string(),

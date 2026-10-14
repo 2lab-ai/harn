@@ -22,16 +22,21 @@
 //! Every file is read through [`Fs`] (`RemovePath` hides it) and viewed as JSON with the overlay's
 //! `SetJson` patches applied, so `plan` computes freed bytes by re-resolving: a patch on a missing
 //! file reads as `{}` plus the patch, the way `harn off` would create it. A JSON `null` written by
-//! a patch reads as "key absent" (TOML has no null).
+//! a patch reads as "key absent" (TOML has no null). A file that is not UTF-8 is unreadable, as it
+//! is to codex (`file-system/src/lib.rs:650-659`); a non-finite float (`nan`, `inf`) reads as its
+//! TOML literal, a string, so the key stays set instead of falling back to a lower layer.
 //!
-//! Trust (`projects."<path>".trust_level`, read from the defaults, system, user, profile and
-//! managed layers — never from project layers; `loader:336-356`, `loader:1249-1268`):
+//! Trust (`projects."<path>".trust_level`):
 //! - a project layer in dir `D` is enabled iff the first entry found for `D`, else for the project
-//!   root, else for the main repository root, is `trusted` (`loader:1041-1084`);
+//!   root, else for the main repository root, is `trusted` (`loader:1041-1084`), read from the
+//!   defaults, system, user, profile and managed layers only (`loader:336-356`, `:1249-1268`);
 //! - the AGENTS.md chain is skipped iff the active project — the entry for the target dir, else for
 //!   the main repository root, with no project-root step — is `untrusted`
 //!   (`config/src/config_toml.rs:884-898`, `core/src/config/mod.rs:3459-3465`,
-//!   `core/src/agents_md.rs:63-66`);
+//!   `core/src/agents_md.rs:63-66`), read from the merged config of every *enabled* layer,
+//!   trusted project layers included: `projects` is not on the project denylist and nothing strips
+//!   it (`config/src/state.rs:475-484`, `:548-551`; `core/src/config/mod.rs:1913-1916`). So a
+//!   trusted repo's `.codex/config.toml` can re-trust a subdir for AGENTS.md, not for its config;
 //! - each lookup tries the canonical path, then the path as given (`loader:1378-1394`).
 
 use crate::model::{Overlay, OverlayOp};
@@ -161,8 +166,13 @@ pub(crate) struct Config {
 
 enum Toml {
     Missing,
-    Ok(Value),
+    /// The document and the pointers of its non-finite floats.
+    Ok(Value, Vec<String>),
+    /// Not TOML.
     Invalid(String),
+    /// Not UTF-8: codex reads config files with `String::from_utf8` and fails on the error
+    /// (`file-system/src/lib.rs:650-659`).
+    NotUtf8(String),
 }
 
 struct Reader<'a> {
@@ -186,31 +196,39 @@ impl Reader<'_> {
             let norm = fs::normalize(path);
             self.patches.iter().filter(|(f, _, _)| *f == norm).collect()
         };
-        let mut value = match self.fs.read(path) {
-            Some(bytes) => match parse(&String::from_utf8_lossy(&bytes)) {
-                Ok(v) => v,
-                Err(e) => return Toml::Invalid(e),
+        let (mut value, non_finite) = match self.fs.read(path) {
+            Some(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(text) => match parse(text) {
+                    Ok(parsed) => parsed,
+                    Err(e) => return Toml::Invalid(e),
+                },
+                Err(e) => return Toml::NotUtf8(format!("not UTF-8: {e}")),
             },
-            None if !patches.is_empty() && self.fs.is_file(path) => Value::Object(Map::new()),
+            None if !patches.is_empty() && self.fs.is_file(path) => {
+                (Value::Object(Map::new()), Vec::new())
+            }
             None => return Toml::Missing,
         };
         for (_, pointer, patch) in patches {
             fs::set_pointer(&mut value, pointer, patch.clone());
         }
-        Toml::Ok(value)
+        Toml::Ok(value, non_finite)
     }
 
     /// A non-project layer: missing → None; invalid → a warning (Codex refuses to start).
     fn layer(&self, source: Source, path: &Path, warnings: &mut Vec<String>) -> Option<LayerFile> {
         match self.read(path) {
-            Toml::Ok(value) if value.is_object() => Some(LayerFile {
-                source,
-                path: Some(self.fs.realpath(path)),
-                value,
-                disabled: None,
-            }),
-            Toml::Ok(_) | Toml::Missing => None,
-            Toml::Invalid(err) => {
+            Toml::Ok(value, non_finite) if value.is_object() => {
+                warn_non_finite(path, &non_finite, warnings);
+                Some(LayerFile {
+                    source,
+                    path: Some(self.fs.realpath(path)),
+                    value,
+                    disabled: None,
+                })
+            }
+            Toml::Ok(..) | Toml::Missing => None,
+            Toml::Invalid(err) | Toml::NotUtf8(err) => {
                 warnings.push(format!(
                     "{}: invalid TOML, codex refuses to start with it ({err})",
                     path.display()
@@ -221,46 +239,87 @@ impl Reader<'_> {
     }
 }
 
+/// A non-finite float (`nan`, `inf`) has no JSON number: the key reads as the TOML literal (a
+/// string), so it stays set — masking lower layers — and every typed reader sees a wrong type.
+fn warn_non_finite(path: &Path, pointers: &[String], warnings: &mut Vec<String>) {
+    for pointer in pointers {
+        warnings.push(format!(
+            "{}#{pointer}: non-finite float; harn keeps the key as set (no fallback to a lower layer) and codex rejects it wherever the key is not a float",
+            path.display()
+        ));
+    }
+}
+
 /// A TOML document as JSON: tables and inline tables → objects, arrays of tables → arrays,
-/// datetimes → strings.
-pub(crate) fn parse(text: &str) -> Result<Value, String> {
+/// datetimes → strings, non-finite floats → their TOML literal as a string (listed by pointer).
+pub(crate) fn parse(text: &str) -> Result<(Value, Vec<String>), String> {
     let doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| e.to_string().trim().replace('\n', " "))?;
-    Ok(table_json(doc.as_table()))
+    let mut non_finite = Vec::new();
+    let value = table_json(doc.as_table(), "", &mut non_finite);
+    Ok((value, non_finite))
 }
 
-fn table_json(table: &toml_edit::Table) -> Value {
+fn table_json(table: &toml_edit::Table, at: &str, non_finite: &mut Vec<String>) -> Value {
     let mut map = Map::new();
     for (key, item) in table.iter() {
-        if let Some(v) = item_json(item) {
+        let pointer = format!("{at}/{}", fs::esc(key));
+        if let Some(v) = item_json(item, &pointer, non_finite) {
             map.insert(key.to_string(), v);
         }
     }
     Value::Object(map)
 }
 
-fn item_json(item: &toml_edit::Item) -> Option<Value> {
+fn item_json(item: &toml_edit::Item, at: &str, non_finite: &mut Vec<String>) -> Option<Value> {
     match item {
         toml_edit::Item::None => None,
-        toml_edit::Item::Value(v) => Some(value_json(v)),
-        toml_edit::Item::Table(t) => Some(table_json(t)),
-        toml_edit::Item::ArrayOfTables(a) => Some(Value::Array(a.iter().map(table_json).collect())),
+        toml_edit::Item::Value(v) => Some(value_json(v, at, non_finite)),
+        toml_edit::Item::Table(t) => Some(table_json(t, at, non_finite)),
+        toml_edit::Item::ArrayOfTables(a) => Some(Value::Array(
+            a.iter()
+                .enumerate()
+                .map(|(i, t)| table_json(t, &format!("{at}/{i}"), non_finite))
+                .collect(),
+        )),
     }
 }
 
-fn value_json(value: &toml_edit::Value) -> Value {
+fn value_json(value: &toml_edit::Value, at: &str, non_finite: &mut Vec<String>) -> Value {
     match value {
         toml_edit::Value::String(s) => Value::String(s.value().clone()),
         toml_edit::Value::Integer(i) => Value::from(*i.value()),
-        toml_edit::Value::Float(f) => Value::from(*f.value()),
+        toml_edit::Value::Float(f) => {
+            let x = *f.value();
+            match serde_json::Number::from_f64(x) {
+                Some(n) => Value::Number(n),
+                None => {
+                    non_finite.push(at.to_string());
+                    let literal = if x.is_nan() {
+                        "nan"
+                    } else if x > 0.0 {
+                        "inf"
+                    } else {
+                        "-inf"
+                    };
+                    Value::String(literal.to_string())
+                }
+            }
+        }
         toml_edit::Value::Boolean(b) => Value::Bool(*b.value()),
         toml_edit::Value::Datetime(d) => Value::String(d.value().to_string()),
-        toml_edit::Value::Array(a) => Value::Array(a.iter().map(value_json).collect()),
+        toml_edit::Value::Array(a) => Value::Array(
+            a.iter()
+                .enumerate()
+                .map(|(i, v)| value_json(v, &format!("{at}/{i}"), non_finite))
+                .collect(),
+        ),
         toml_edit::Value::InlineTable(t) => {
             let mut map = Map::new();
             for (key, v) in t.iter() {
-                map.insert(key.to_string(), value_json(v));
+                let pointer = format!("{at}/{}", fs::esc(key));
+                map.insert(key.to_string(), value_json(v, &pointer, non_finite));
             }
             Value::Object(map)
         }
@@ -298,7 +357,7 @@ impl Config {
         let mut layers = vec![LayerFile {
             source: Source::Defaults,
             path: None,
-            value: parse(DEFAULTS_TOML).expect("the packaged defaults parse"),
+            value: parse(DEFAULTS_TOML).expect("the packaged defaults parse").0,
             disabled: None,
         }];
         let system_file = paths.system_dir.join("config.toml");
@@ -382,10 +441,24 @@ impl Config {
                 ),
             });
             let mut value = match reader.read(&config_file) {
-                Toml::Ok(v) if v.is_object() => v,
+                Toml::Ok(v, non_finite) if v.is_object() => {
+                    if disabled.is_none() {
+                        warn_non_finite(&config_file, &non_finite, warnings);
+                    }
+                    v
+                }
                 Toml::Invalid(err) if disabled.is_none() => {
                     warnings.push(format!(
                         "{}: invalid TOML in a trusted project, codex refuses to start with it ({err})",
+                        config_file.display()
+                    ));
+                    Value::Object(Map::new())
+                }
+                // A read error stops codex before the trust check, trusted or not
+                // (`loader:1743-1762`).
+                Toml::NotUtf8(err) => {
+                    warnings.push(format!(
+                        "{}: {err}; codex refuses to start (project config files are read before the trust check)",
                         config_file.display()
                     ));
                     Value::Object(Map::new())
@@ -453,19 +526,9 @@ impl Config {
             })
     }
 
-    pub fn get_bool(&self, pointer: &str) -> Option<(bool, &LayerFile)> {
-        self.get(pointer)
-            .and_then(|(v, l)| v.as_bool().map(|b| (b, l)))
-    }
-
     pub fn get_str(&self, pointer: &str) -> Option<(&str, &LayerFile)> {
         self.get(pointer)
             .and_then(|(v, l)| v.as_str().map(|s| (s, l)))
-    }
-
-    pub fn get_u64(&self, pointer: &str) -> Option<(u64, &LayerFile)> {
-        self.get(pointer)
-            .and_then(|(v, l)| v.as_u64().map(|n| (n, l)))
     }
 
     /// The enabled layers above `source` that set `pointer` (a write to `source`'s file would
@@ -487,7 +550,9 @@ impl Config {
     }
 
     /// `get_active_project(cwd, repo_root)`: the entry for the target dir, else for the main
-    /// repository root, from the effective config (`config/src/config_toml.rs:884-898`).
+    /// repository root, from the effective config of every enabled layer — trusted project
+    /// layers included, as codex does (`config/src/config_toml.rs:884-898`,
+    /// `core/src/config/mod.rs:1913-1916`, `:3460-3465`).
     fn active_project(&self, dir: &Path, warnings: &mut Vec<String>) -> Decision {
         let layers: Vec<&LayerFile> = self.layers.iter().filter(|l| l.enabled()).collect();
         let trust = Trust {
@@ -718,7 +783,7 @@ mod tests {
 
     #[test]
     fn toml_reads_as_json() {
-        let v = parse(
+        let (v, non_finite) = parse(
             "a = 1\nb = \"x\"\n[t]\nc = [true, 2.5]\nd = { e = \"f\" }\n[[arr]]\ng = 1\n[projects.\"/x/y\"]\ntrust_level = \"trusted\"\n",
         )
         .unwrap();
@@ -731,7 +796,144 @@ mod tests {
                 "projects": {"/x/y": {"trust_level": "trusted"}}
             })
         );
+        assert!(non_finite.is_empty());
         assert!(parse("a = ").is_err());
+    }
+
+    #[test]
+    fn non_finite_floats_stay_set_and_are_listed() {
+        let (v, non_finite) =
+            parse("a = nan\n[t]\nb = [1.0, -inf]\n[\"x/y\"]\nc = { d = +inf }\n").unwrap();
+        assert_eq!(
+            v,
+            json!({"a": "nan", "t": {"b": [1.0, "-inf"]}, "x/y": {"c": {"d": "inf"}}})
+        );
+        assert_eq!(non_finite, ["/a", "/t/b/1", "/x~1y/c/d"]);
+    }
+
+    #[test]
+    fn non_finite_value_masks_the_lower_layer() {
+        let t = tmp();
+        let root = &t.0;
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        write(
+            &root.join("etc/codex/config.toml"),
+            "project_doc_max_bytes = 100\n",
+        );
+        write(
+            &root.join("home/.codex/config.toml"),
+            "project_doc_max_bytes = nan\n",
+        );
+        let (c, warnings) = load(root, None);
+        let (v, from) = c.get("/project_doc_max_bytes").unwrap();
+        assert_eq!(v, &json!("nan"));
+        assert_eq!(from.source, Source::User);
+        assert_eq!(c.get("/project_doc_max_bytes").unwrap().0.as_u64(), None);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("config.toml#/project_doc_max_bytes")
+                    && w.contains("non-finite")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_invalid_not_rewritten() {
+        let t = tmp();
+        let root = &t.0;
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        write(&root.join("etc/codex/config.toml"), "model = \"sys\"\n");
+        let user = root.join("home/.codex/config.toml");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, b"model = \"a\xffb\"\n").unwrap();
+        let (c, warnings) = load(root, None);
+        // The user layer is not read at all (codex would not start); no mangled value leaks in.
+        assert_eq!(c.get_str("/model").unwrap().0, "sys");
+        assert!(c.layers.iter().all(|l| l.source != Source::User));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("not UTF-8") && w.contains("refuses to start")),
+            "{warnings:?}"
+        );
+
+        // A project file that is not UTF-8 stops codex even while the project is untrusted.
+        std::fs::write(&user, "").unwrap();
+        write(&root.join("repo/.git/HEAD"), "ref: refs/heads/main\n");
+        let project = root.join("repo/.codex/config.toml");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, b"model = \"\xff\"\n").unwrap();
+        let (_, warnings) = load(root, None);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("not UTF-8") && w.contains("before the trust check")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Codex's AGENTS.md gate reads `projects` from the merged config of every enabled layer,
+    /// trusted project layers included (`config/src/state.rs:475-484`, `:548-551`;
+    /// `core/src/config/mod.rs:1913-1916`, `:3460-3465`); `projects` is not on the project
+    /// denylist (`loader:88-101`) and `sanitize_project_config` (`loader:1137-1230`) keeps it.
+    /// The config gate reads only non-project layers (`loader:336-356`). This pins both.
+    #[test]
+    fn a_trusted_project_layer_can_retrust_a_subdir_for_agents_md_only() {
+        let t = tmp();
+        let root = &t.0;
+        write(&root.join("repo/.git/HEAD"), "ref: refs/heads/main\n");
+        let repo = root.join("repo");
+        let child = repo.join("child");
+        std::fs::create_dir_all(child.join(".codex")).unwrap();
+        write(
+            &root.join("home/.codex/config.toml"),
+            &format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+                repo.display(),
+                child.display()
+            ),
+        );
+        write(
+            &repo.join(".codex/config.toml"),
+            &format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                child.display()
+            ),
+        );
+        let fs = Fs::new(None);
+        let mut warnings = Vec::new();
+        let c = Config::load(
+            &fs,
+            None,
+            &Paths {
+                codex_home: &root.join("home/.codex"),
+                system_dir: &root.join("etc/codex"),
+                dir: &child,
+                profile: None,
+            },
+            &mut warnings,
+        );
+        assert!(
+            c.dir_decision.is_untrusted(),
+            "config gate: non-project layers only"
+        );
+        let child_layer = c
+            .layers
+            .iter()
+            .find(|l| l.path.as_deref() == Some(child.join(".codex/config.toml").as_path()))
+            .unwrap();
+        assert!(!child_layer.enabled());
+        assert!(
+            c.active_project.is_trusted(),
+            "AGENTS.md gate: every enabled layer"
+        );
+        assert!(c
+            .active_project
+            .set_at
+            .as_deref()
+            .unwrap()
+            .starts_with(&repo.join(".codex/config.toml").display().to_string()));
     }
 
     #[test]
@@ -773,12 +975,15 @@ mod tests {
             c.get_str("/developer_instructions").unwrap().1.source,
             Source::System
         );
-        assert!(!c.get_bool("/include_apps_instructions").unwrap().0);
+        assert_eq!(
+            c.get("/include_apps_instructions").unwrap().0,
+            &json!(false)
+        );
         // Managed is pushed last: it beats the user layer.
-        let (env, from) = c.get_bool("/include_environment_context").unwrap();
-        assert!(env);
+        let (env, from) = c.get("/include_environment_context").unwrap();
+        assert_eq!(env, &json!(true));
         assert_eq!(from.source, Source::Managed);
-        assert_eq!(c.get_u64("/project_doc_max_bytes").unwrap().0, 32768);
+        assert_eq!(c.get("/project_doc_max_bytes").unwrap().0, &json!(32768));
         assert_eq!(
             c.set_above(Source::User, "/include_environment_context")
                 .map(|l| l.source),
