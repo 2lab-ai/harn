@@ -675,7 +675,23 @@ fn base_instructions_and_context_window_come_from_models_cache() {
     assert_eq!(base.cost.predicted, Some(100));
     assert!(base.cost.predicted_is_estimate);
     assert_eq!(t.agent_version, None, "no codex on the target's PATH");
-    assert!(signal(&t, "model:").contains("context window 1000 tokens (models_cache.json)"));
+    // No codex found: the file stays the best snapshot, and says it may not be what codex uses.
+    assert!(
+        base.origin.why.iter().any(|w| w
+            == "from models_cache.json, which codex may refetch: codex not found: cannot tell whether it accepts models_cache.json"),
+        "{:?}",
+        base.origin.why
+    );
+    let model = signal(&t, "model:");
+    assert!(
+        model.contains("context window 1000 tokens (models_cache.json, which codex may refetch)"),
+        "{model}"
+    );
+    assert!(
+        model.ends_with(" · models_cache.json not used as is, which codex may refetch: codex not found: cannot tell whether it accepts models_cache.json"),
+        "{model}"
+    );
+    assert!(!model.contains("identity not compared"), "{model}");
     assert_eq!(t.predicted_known, 100);
 
     // `model_context_window` is clamped to the catalog's maximum.
@@ -704,7 +720,33 @@ fn base_instructions_and_context_window_come_from_models_cache() {
     assert!(!base.cost.predicted_is_estimate);
 
     // The cache's writer is reported as a fact about the file, not as the installed codex.
-    assert!(signal(&t, "model:").ends_with("models_cache.json written by codex 0.160.1"));
+    assert!(signal(&t, "model:").contains(" · models_cache.json written by codex 0.160.1 · "));
+}
+
+/// A codex `version` on the target's `PATH` (Homebrew layout, `Caskroom/codex/<v>/bin/codex`): the
+/// version codex checks `models_cache.json` against.
+fn with_codex(f: &Fx, mut t: Target, version: &str) -> Target {
+    let exe = f
+        .root
+        .join("Caskroom/codex")
+        .join(version)
+        .join("bin/codex");
+    write(&exe, "binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    t.env.insert(
+        "PATH".to_string(),
+        exe.parent().unwrap().display().to_string(),
+    );
+    t
+}
+
+/// The target with codex 0.160.1 on its `PATH`.
+fn ctarget(f: &Fx) -> Target {
+    with_codex(f, target(f), "0.160.1")
 }
 
 /// `models_cache.json` as codex 0.160.1 writes it: its own `client_version` and an `identity`
@@ -712,8 +754,22 @@ fn base_instructions_and_context_window_come_from_models_cache() {
 fn cache(f: &Fx, models: Value) {
     raw_cache(
         f,
-        json!({"client_version": "0.160.1", "identity": "test-login", "models": models}),
+        json!({"client_version": "0.160.1", "identity": "test-login", "models": with_base(models)}),
     );
+}
+
+/// Every entry codex loads has base instructions, the legacy field or the template
+/// (`protocol/src/openai_models.rs:928-938`): `"Base."` where an entry has neither.
+fn with_base(mut models: Value) -> Value {
+    for entry in models.as_array_mut().unwrap() {
+        let template = entry
+            .pointer("/model_messages/instructions_template")
+            .is_some_and(Value::is_string);
+        if !template && entry.get("base_instructions").is_none() {
+            entry["base_instructions"] = json!("Base.");
+        }
+    }
+    models
 }
 
 fn raw_cache(f: &Fx, cache: Value) {
@@ -762,9 +818,12 @@ fn gated(item: &Item) -> bool {
 /// The cache states codex would not use as they are, and a field it cannot parse: each leaves
 /// the catalog-gated rows unknown. `(cache, reason in the signal)`; `None` = no file.
 fn unusable_caches() -> Vec<(Option<Value>, &'static str)> {
-    let entry = json!([{"slug": "rich-model", "multi_agent_version": "v2"}]);
+    let entry = with_base(json!([{"slug": "rich-model", "multi_agent_version": "v2"}]));
     vec![
-        (None, "no usable models_cache.json"),
+        (
+            None,
+            "no models_cache.json yet (codex writes it on its first run)",
+        ),
         (
             Some(json!({"client_version": "0.159.0", "identity": "test-login", "models": entry})),
             "written by codex 0.159.0, not 0.160.1",
@@ -787,7 +846,7 @@ fn catalog_decides_the_collaboration_mode_block() {
 
     // The entry carries the Default mode's text: rendered (collaboration_mode.rs:30-42).
     user_config(&f, None, "model = \"rich-model\"\n");
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     let c = row(&t, "/builtin/collaboration_mode");
     assert_eq!((c.mode, c.signal.as_deref()), (Mode::Always, None));
     assert!(
@@ -797,6 +856,12 @@ fn catalog_decides_the_collaboration_mode_block() {
             .any(|w| w.contains("collaboration_modes.default")),
         "{:?}",
         c.origin.why
+    );
+    // A definite row rests on the cache: the signal says the identity was not compared.
+    assert!(
+        signal(&t, "model:").ends_with(" · catalog facts from models_cache.json (identity not compared with your login; codex refetches if they differ)"),
+        "{}",
+        signal(&t, "model:")
     );
 
     // No Default text — missing or `null` at any level, or only the Plan mode's: `codex exec` and
@@ -808,7 +873,7 @@ fn catalog_decides_the_collaboration_mode_block() {
         "v1-model",
     ] {
         user_config(&f, None, &format!("model = \"{model}\"\n"));
-        let t = resolve(&target(&f), None);
+        let t = resolve(&ctarget(&f), None);
         let c = row(&t, "/builtin/collaboration_mode");
         assert_eq!(c.mode, Mode::None, "{model}");
         assert!(!gated(c), "{model}: the entry is known: {:?}", c.signal);
@@ -836,7 +901,7 @@ fn catalog_decides_the_collaboration_mode_block() {
         ),
     ] {
         user_config(&f, None, config);
-        let t = resolve(&target(&f), None);
+        let t = resolve(&ctarget(&f), None);
         let c = row(&t, "/builtin/collaboration_mode");
         assert_eq!(c.mode, Mode::Always, "{config}");
         assert_eq!(c.cost, Default::default(), "{config}");
@@ -851,25 +916,25 @@ fn catalog_decides_the_collaboration_mode_block() {
     caches.push((
         Some(
             json!({"client_version": "0.160.1", "identity": "test-login", "models": [
-                {"slug": "rich-model", "model_messages": {"collaboration_modes": {"default": 5}}}
+                {"slug": "rich-model", "base_instructions": "B.", "model_messages": {"collaboration_modes": {"default": 5}}}
             ]}),
         ),
-        "default is a number, so codex cannot parse models_cache.json",
+        "models[0] (rich-model) model_messages.collaboration_modes.default is a number, so codex cannot parse the file",
     ));
     caches.push((
         Some(
             json!({"client_version": "0.160.1", "identity": "test-login", "models": [
-                {"slug": "rich-model", "model_messages": "text"}
+                {"slug": "rich-model", "base_instructions": "B.", "model_messages": "text"}
             ]}),
         ),
-        "model_messages is a string",
+        "models[0] (rich-model) model_messages is a string",
     ));
     for (file, why) in caches {
         match file {
             Some(c) => raw_cache(&f, c),
             None => std::fs::remove_file(f.codex.join("models_cache.json")).unwrap(),
         }
-        let t = resolve(&target(&f), None);
+        let t = resolve(&ctarget(&f), None);
         let c = row(&t, "/builtin/collaboration_mode");
         let s = c.signal.as_deref().unwrap_or_default();
         assert!(
@@ -885,7 +950,7 @@ fn catalog_decides_the_collaboration_mode_block() {
         None,
         "model = \"rich-model\"\ninclude_collaboration_mode_instructions = false\n",
     );
-    assert!(find(&resolve(&target(&f), None), "/collaboration_mode").is_none());
+    assert!(find(&resolve(&ctarget(&f), None), "/collaboration_mode").is_none());
 }
 
 #[test]
@@ -894,7 +959,7 @@ fn catalog_decides_the_multi_agent_block() {
     catalog(&f);
     let present = |config: &str| -> Option<Item> {
         user_config(&f, None, config);
-        find(&resolve(&target(&f), None), "/builtin/multi_agent").cloned()
+        find(&resolve(&ctarget(&f), None), "/builtin/multi_agent").cloned()
     };
 
     // `multi_agent_version = "v2"`: role + mode rendered (session/multi_agents.rs:14-18, :77-82),
@@ -910,7 +975,7 @@ fn catalog_decides_the_multi_agent_block() {
     }
     // The plugin blocks stay before it; without it they close the developer blocks.
     user_config(&f, None, "model = \"rich-model\"\n");
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     let order: Vec<&str> = t
         .items
         .iter()
@@ -931,7 +996,7 @@ fn catalog_decides_the_multi_agent_block() {
         "messages-only-model",
     ] {
         user_config(&f, None, &format!("model = \"{model}\"\n"));
-        let t = resolve(&target(&f), None);
+        let t = resolve(&ctarget(&f), None);
         assert!(find(&t, "/builtin/multi_agent").is_none(), "{model}");
         assert_eq!(
             t.items.last().map(|i| i.id.as_str()),
@@ -1006,10 +1071,10 @@ fn catalog_decides_the_multi_agent_block() {
     caches.push((
         Some(
             json!({"client_version": "0.160.1", "identity": "test-login", "models": [
-                {"slug": "rich-model", "multi_agent_version": 2}
+                {"slug": "rich-model", "base_instructions": "B.", "multi_agent_version": 2}
             ]}),
         ),
-        "multi_agent_version is a number",
+        "models[0] (rich-model) multi_agent_version is a number",
     ));
     for (file, why) in caches {
         match file {
@@ -1034,7 +1099,7 @@ fn multi_agent_knobs_remove_the_block_one_decider_at_a_time() {
         None,
         "model = \"rich-model\"\n[features]\nmulti_agent_v2 = true\n",
     );
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     let first = row(&t, "/builtin/multi_agent").knobs[0].clone();
     assert_eq!(setting(&first).1, "/features/multi_agent_v2");
 
@@ -1050,7 +1115,7 @@ fn multi_agent_knobs_remove_the_block_one_decider_at_a_time() {
     let mut overlay = Overlay {
         ops: vec![op(&first)],
     };
-    let after = resolve(&target(&f), Some(&overlay));
+    let after = resolve(&ctarget(&f), Some(&overlay));
     let m = row(&after, "/builtin/multi_agent");
     assert_eq!((m.mode, m.signal.as_deref()), (Mode::Always, None));
     let next = m.knobs[0].clone();
@@ -1059,10 +1124,151 @@ fn multi_agent_knobs_remove_the_block_one_decider_at_a_time() {
     // Its next knob removes it.
     overlay.ops.push(op(&next));
     assert!(find(
-        &resolve(&target(&f), Some(&overlay)),
+        &resolve(&ctarget(&f), Some(&overlay)),
         "/builtin/multi_agent"
     )
     .is_none());
+}
+
+#[test]
+fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
+    let f = fx();
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let good = json!({
+        "slug": "rich-model",
+        "multi_agent_version": "v2",
+        "base_instructions": "B.",
+        "model_messages": {"collaboration_modes": {"default": "D."}}
+    });
+    let file = |models: Value| {
+        raw_cache(
+            &f,
+            json!({"client_version": "0.160.1", "identity": "test-login", "models": models}),
+        )
+    };
+    file(json!([good.clone()]));
+    let t = resolve(&ctarget(&f), None);
+    for name in ["collaboration_mode", "multi_agent"] {
+        assert_eq!(row(&t, &format!("/builtin/{name}")).signal, None, "{name}");
+    }
+
+    let other = |extra: Value| {
+        let mut e = json!({"slug": "other", "base_instructions": "B."});
+        e.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        json!([good.clone(), e])
+    };
+    let mut bad_field = good.clone();
+    bad_field["supports_search_tool"] = json!("yes");
+    for (models, why) in [
+        // Another model's field: codex loads the whole file, so it fails for every model.
+        (
+            other(json!({"include_plugin_usage_instructions": null})),
+            "models[1] (other) include_plugin_usage_instructions is null",
+        ),
+        (
+            other(json!({"context_window": 1.5})),
+            "models[1] (other) context_window is not an integer in i64 range",
+        ),
+        (
+            other(json!({"model_messages": {"collaboration_modes": []}})),
+            "models[1] (other) model_messages.collaboration_modes is a array",
+        ),
+        (
+            json!([good.clone(), {"slug": "other"}]),
+            "models[1] (other) has neither base_instructions nor model_messages.instructions_template",
+        ),
+        (
+            json!([good.clone(), {"base_instructions": "B."}]),
+            "models[1] has no slug",
+        ),
+        // The same entry, a field no gated row reads.
+        (
+            json!([bad_field]),
+            "models[0] (rich-model) supports_search_tool is a string",
+        ),
+    ] {
+        file(models);
+        let t = resolve(&ctarget(&f), None);
+        for name in ["collaboration_mode", "multi_agent"] {
+            let r = row(&t, &format!("/builtin/{name}"));
+            let s = r.signal.as_deref().unwrap_or_default();
+            assert!(
+                r.mode == Mode::Always
+                    && gated(r)
+                    && s.contains(why)
+                    && s.contains("cannot parse the file"),
+                "{name}: {s}"
+            );
+        }
+        // The snapshot facts keep the file, saying codex would not use it.
+        let base = row(&t, "/builtin/instructions");
+        assert_eq!(base.cost.predicted, Some(2), "{why}");
+        assert!(
+            base.origin.why.iter().any(|w| w
+                .starts_with("from models_cache.json, which codex would refetch: ")
+                && w.contains(why)),
+            "{why}: {:?}",
+            base.origin.why
+        );
+        let model = signal(&t, "model:");
+        assert!(
+            model.contains(" · models_cache.json not used as is, which codex would refetch: ")
+                && !model.contains("identity not compared"),
+            "{model}"
+        );
+    }
+}
+
+#[test]
+fn without_codex_on_path_the_cache_is_not_trusted() {
+    const NOT_FOUND: &str = "codex not found: cannot tell whether it accepts models_cache.json";
+    let f = fx();
+    catalog(&f);
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let check = |t: &Tree| {
+        for name in ["collaboration_mode", "multi_agent"] {
+            let r = row(t, &format!("/builtin/{name}"));
+            let s = r.signal.as_deref().unwrap_or_default();
+            assert!(gated(r) && s.ends_with(NOT_FOUND), "{name}: {s}");
+        }
+        let model = signal(t, "model:");
+        assert!(
+            model.ends_with(&format!(
+                " · models_cache.json not used as is, which codex may refetch: {NOT_FOUND}"
+            )),
+            "{model}"
+        );
+    };
+    check(&resolve(&target(&f), None));
+    // Another version's cache: still no version claim without an installed codex.
+    raw_cache(
+        &f,
+        json!({"client_version": "0.159.0", "identity": "test-login", "models": with_base(json!([{"slug": "rich-model"}]))}),
+    );
+    let t = resolve(&target(&f), None);
+    check(&t);
+    let all: Vec<&str> = model::walk(&t)
+        .filter_map(|i| i.signal.as_deref())
+        .chain(t.signals.iter().map(String::as_str))
+        .collect();
+    assert!(
+        all.iter().all(|s| !s.contains(", not 0.")),
+        "no version-mismatch claim: {all:?}"
+    );
+
+    // With a newer codex installed, the 0.160.1 cache is another version's: refetched.
+    catalog(&f);
+    let t = resolve(&with_codex(&f, target(&f), "0.161.0"), None);
+    let s = row(&t, "/builtin/multi_agent")
+        .signal
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        s.contains("models_cache.json was written by codex 0.160.1, not 0.161.0"),
+        "{s}"
+    );
 }
 
 #[test]

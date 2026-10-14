@@ -17,7 +17,7 @@
 //! `codex exec` and `codex debug prompt-input` send nothing but the interactive TUI sends the
 //! bundled preset.
 
-use super::{catalog_field, config_knobs, new_item, unparsable, Ctx};
+use super::{config_knobs, new_item, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -123,6 +123,9 @@ pub(crate) fn base_instructions(ctx: &mut Ctx) -> Item {
                 "{}: {slug} instructions_template (the catalog may refresh at startup)",
                 ctx.display(&ctx.codex_home.join("models_cache.json"))
             )];
+            if let Some(q) = ctx.model.cache_use.qualifier() {
+                item.origin.why.push(format!("from models_cache.json, {q}"));
+            }
             if personality_none {
                 item.origin.why.push(
                     "personality = \"none\": the # Personality section is cut (models-manager/src/model_info.rs:50-57)"
@@ -200,17 +203,13 @@ fn collaboration_mode(ctx: &Ctx) -> Option<Item> {
         &["`<collaboration_mode>` developer block (core/src/session/world_state.rs:203-210)"],
     )?;
     // `model_messages`, `collaboration_modes` and `default` are all `Option`s: missing or `null`
-    // is `None` (`protocol/src/openai_models.rs:430-431`, `:558`, `:750-753`).
-    let text = ctx.catalog_entry().and_then(|(slug, entry)| {
-        match catalog_field(
-            slug,
-            entry,
-            &["model_messages", "collaboration_modes", "default"],
-        )? {
-            None => Ok((slug, false)),
-            Some(Value::String(_)) => Ok((slug, true)),
-            Some(other) => Err(unparsable(slug, CONDITION, other)),
-        }
+    // is `None` (`protocol/src/openai_models.rs:430-431`, `:558`, `:750-753`; other types have
+    // failed `validate_cache`).
+    let text = ctx.catalog_entry().map(|(slug, entry)| {
+        let has = entry
+            .pointer("/model_messages/collaboration_modes/default")
+            .is_some_and(Value::is_string);
+        (slug, has)
     });
     let slug = match text {
         Err(why) => {
@@ -283,15 +282,14 @@ fn multi_agent(ctx: &Ctx) -> Option<Item> {
         "/agents/enabled",
         WHY,
     )?;
-    // Missing, `null` or a string codex does not recognise is `None`; anything but a string or
-    // `null` fails the file (`deserialize_optional_model_selector`,
-    // `protocol/src/openai_models.rs:352-361`, `:502-507`).
-    let version = ctx.catalog_entry().and_then(|(slug, entry)| {
-        match catalog_field(slug, entry, &["multi_agent_version"])? {
-            None => Ok((slug, None)),
-            Some(Value::String(v)) => Ok((slug, Some(v.as_str()))),
-            Some(other) => Err(unparsable(slug, "multi_agent_version", other)),
-        }
+    // Missing, `null` or a string codex does not recognise is `None`
+    // (`deserialize_optional_model_selector`, `protocol/src/openai_models.rs:352-361`, `:502-507`;
+    // other types have failed `validate_cache`).
+    let version = ctx.catalog_entry().map(|(slug, entry)| {
+        (
+            slug,
+            entry.get("multi_agent_version").and_then(Value::as_str),
+        )
     });
     match version {
         Err(why) => {

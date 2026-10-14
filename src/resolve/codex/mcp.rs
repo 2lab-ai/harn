@@ -63,7 +63,7 @@ pub(crate) fn tool_search(ctx: &Ctx) -> (Option<bool>, String) {
             format!("{slug} is not in models_cache.json: supports_search_tool unknown"),
         );
     };
-    match entry.get("supports_search_tool") {
+    let (state, cause) = match entry.get("supports_search_tool") {
         Some(Value::Bool(true)) => (
             Some(true),
             format!("models_cache.json: {slug} supports_search_tool = true (MCP tools deferred behind tool_search)"),
@@ -76,6 +76,13 @@ pub(crate) fn tool_search(ctx: &Ctx) -> (Option<bool>, String) {
             Some(false),
             format!("models_cache.json: {slug} has no supports_search_tool (false)"),
         ),
+    };
+    // A best snapshot from a file codex does not (or may not) use as it is: said, not hidden
+    // (the reason is in the `model:` signal). The capture's tool-search state replaces it in
+    // verify.
+    match ctx.model.cache_use.short_qualifier() {
+        Some(q) => (state, format!("{cause}; models_cache.json, {q}")),
+        None => (state, cause),
     }
 }
 

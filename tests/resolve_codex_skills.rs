@@ -72,6 +72,24 @@ fn target(f: &Fx) -> Target {
     }
 }
 
+/// The target with codex 0.160.1 on its `PATH` (Homebrew layout): the version codex checks
+/// `models_cache.json` against.
+fn ctarget(f: &Fx) -> Target {
+    let exe = f.root.join("Caskroom/codex/0.160.1/bin/codex");
+    write(&exe, "binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut t = target(f);
+    t.env.insert(
+        "PATH".to_string(),
+        exe.parent().unwrap().display().to_string(),
+    );
+    t
+}
+
 fn resolve(t: &Target, overlay: Option<&Overlay>) -> Tree {
     Codex.resolve(t, overlay).expect("resolve")
 }
@@ -313,14 +331,14 @@ fn entry_and_framing_bytes_match_a_hand_rendered_block() {
     skill(&f.codex.join("skills"), "alpha", "Does alpha.");
     skill(&f.codex.join("skills"), "beta", "Does beta.");
     user_config(&f, "model = \"m\"\n");
-    // A cache codex 0.160.1 uses (its version, an identity) whose entry leaves out
-    // include_skills_usage_instructions: a `#[serde(default)] bool`, so no usage section
+    // A cache codex 0.160.1 uses (its version, an identity, codex 0.160.1 on PATH) whose entry
+    // leaves out include_skills_usage_instructions: a `#[serde(default)] bool`, so no usage section
     // (openai_models.rs:432-433) — the block below has none.
     write(
         &f.codex.join("models_cache.json"),
-        r#"{"client_version": "0.160.1", "identity": "test-login", "models": [{"slug": "m", "context_window": 100000}]}"#,
+        r#"{"client_version": "0.160.1", "identity": "test-login", "models": [{"slug": "m", "base_instructions": "B.", "context_window": 100000}]}"#,
     );
-    let mut t = target(&f);
+    let mut t = ctarget(&f);
     t.context_window = None;
     let tree = resolve(&t, None);
 
@@ -650,10 +668,9 @@ fn skills_usage_section_follows_the_catalog_flag() {
     let f = fx();
     skill(&f.codex.join("skills"), "alpha", "Does alpha.");
     let models = json!([
-        {"slug": "silent", "context_window": 100000},
-        {"slug": "off", "context_window": 100000, "include_skills_usage_instructions": false},
-        {"slug": "on", "context_window": 100000, "include_skills_usage_instructions": true},
-        {"slug": "null", "context_window": 100000, "include_skills_usage_instructions": null}
+        {"slug": "silent", "base_instructions": "B.", "context_window": 100000},
+        {"slug": "off", "base_instructions": "B.", "context_window": 100000, "include_skills_usage_instructions": false},
+        {"slug": "on", "base_instructions": "B.", "context_window": 100000, "include_skills_usage_instructions": true}
     ]);
     let cache = |cache: Value| {
         write(
@@ -661,13 +678,14 @@ fn skills_usage_section_follows_the_catalog_flag() {
             &serde_json::to_string(&cache).unwrap(),
         )
     };
-    cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
-    let framing = |model: &str| {
+    let usable = |models: &Value| json!({"client_version": "0.160.1", "identity": "test-login", "models": models});
+    cache(usable(&models));
+    let framing_at = |model: &str, mut t: Target| {
         user_config(&f, &format!("model = \"{model}\"\n"));
-        let mut t = target(&f);
         t.context_window = None;
         row(&resolve(&t, None), FRAMING).clone()
     };
+    let framing = |model: &str| framing_at(model, ctarget(&f));
 
     // Missing reads false, like an explicit false: no usage section.
     let without = framing("silent").cost.predicted.expect("known");
@@ -681,7 +699,7 @@ fn skills_usage_section_follows_the_catalog_flag() {
         "{with} - {without}"
     );
 
-    // Unknown, with both sizes in `why`: a flag codex cannot parse, a cache it would not use.
+    // Unknown, with both sizes in `why`.
     let unknown = |item: &Item, why: &str| {
         assert_eq!(item.cost.predicted, None, "{why}");
         assert!(
@@ -695,14 +713,29 @@ fn skills_usage_section_follows_the_catalog_flag() {
             item.origin.why
         );
     };
-    unknown(
-        &framing("null"),
-        "null's include_skills_usage_instructions is null",
-    );
+    // A `null` flag fails the whole file: unknown for this model and for every other one.
+    let mut nulled = models.clone();
+    nulled
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"slug": "null", "base_instructions": "B.", "include_skills_usage_instructions": null}));
+    cache(usable(&nulled));
+    for model in ["null", "silent", "on"] {
+        unknown(
+            &framing(model),
+            "models[3] (null) include_skills_usage_instructions is null",
+        );
+    }
+    // A cache codex would not use, or no codex to tell.
     cache(json!({"client_version": "0.159.0", "identity": "test-login", "models": models}));
     unknown(&framing("on"), "written by codex 0.159.0, not 0.160.1");
     cache(json!({"client_version": "0.160.1", "models": models}));
     unknown(&framing("silent"), "has no identity");
+    cache(usable(&models));
+    unknown(
+        &framing_at("silent", target(&f)),
+        "codex not found: cannot tell whether it accepts models_cache.json",
+    );
 }
 
 #[test]
@@ -719,16 +752,16 @@ fn plugins_instructions_follow_the_catalog_flag() {
         )
     };
     let models = json!([
-        {"slug": "on-model", "include_plugin_usage_instructions": true},
-        {"slug": "off-model", "include_plugin_usage_instructions": false},
-        {"slug": "silent-model"}
+        {"slug": "on-model", "base_instructions": "B.", "include_plugin_usage_instructions": true},
+        {"slug": "off-model", "base_instructions": "B.", "include_plugin_usage_instructions": false},
+        {"slug": "silent-model", "base_instructions": "B."}
     ]);
     cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
     let config = |model: &str| format!("{model}[plugins.\"demo@mkt\"]\nenabled = true\n");
 
     // true: rendered, the fixed text's exact size (available_plugins_instructions.rs:30-48).
     user_config(&f, &config("model = \"on-model\"\n"));
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     let r = row(&t, ID);
     assert_eq!((r.mode, r.signal.as_deref()), (Mode::Always, None));
     assert_eq!(r.cost.predicted, Some(1014));
@@ -738,14 +771,14 @@ fn plugins_instructions_follow_the_catalog_flag() {
     // uses: codex renders nothing (world_state.rs:271-272).
     for model in ["off-model", "silent-model"] {
         user_config(&f, &config(&format!("model = \"{model}\"\n")));
-        let t = resolve(&target(&f), None);
+        let t = resolve(&ctarget(&f), None);
         assert!(find(&t, ID).is_none(), "{model}");
         assert!(find(&t, "codex/system-prompt/builtin/recommended_plugins").is_some());
     }
 
     // Unknown: listed, marked not checkable, the size if rendered in `why`.
     let unknown = |why: &str| {
-        let t = resolve(&target(&f), None);
+        let t = resolve(&ctarget(&f), None);
         let r = row(&t, ID).clone();
         assert_eq!(r.mode, Mode::Always, "{why}");
         assert_eq!(r.cost.predicted, None, "{why}");
@@ -767,7 +800,7 @@ fn plugins_instructions_follow_the_catalog_flag() {
         unknown(why);
     }
     // ...or codex would not use the cache: another version's, no identity, a flag it cannot
-    // parse (`null` is not a bool), or no cache at all.
+    // parse in any entry (`null` is not a bool; codex loads the whole file), or no cache at all.
     user_config(&f, &config("model = \"off-model\"\n"));
     for (file, why) in [
         (
@@ -780,21 +813,22 @@ fn plugins_instructions_follow_the_catalog_flag() {
         ),
         (
             json!({"client_version": "0.160.1", "identity": "test-login", "models": [
-                {"slug": "off-model", "include_plugin_usage_instructions": null}
+                {"slug": "off-model", "base_instructions": "B."},
+                {"slug": "other-model", "base_instructions": "B.", "include_plugin_usage_instructions": null}
             ]}),
-            "include_plugin_usage_instructions is null, so codex cannot parse",
+            "models[1] (other-model) include_plugin_usage_instructions is null, so codex cannot parse the file",
         ),
     ] {
         cache(file);
         unknown(why);
     }
     std::fs::remove_file(f.codex.join("models_cache.json")).unwrap();
-    unknown("no usable models_cache.json");
+    unknown("no models_cache.json yet (codex writes it on its first run)");
 
     // No plugin with a part: no block, whatever the catalog says.
     cache(json!({"client_version": "0.160.1", "identity": "test-login", "models": models}));
     user_config(&f, "model = \"on-model\"\n");
-    assert!(find(&resolve(&target(&f), None), ID).is_none());
+    assert!(find(&resolve(&ctarget(&f), None), ID).is_none());
 }
 
 #[test]
