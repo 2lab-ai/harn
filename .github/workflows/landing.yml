@@ -2,7 +2,8 @@ name: Landing
 
 # docs/landing is published as-is (no build command) by the Cloudflare Pages Git integration,
 # project `harn-landing`, which builds on push to main and watches docs/landing only. Production today:
-# https://harn-landing.pages.dev (until the domain is attached). This workflow only checks the
+# https://harn.2lab.ai (DNS: CNAME harn -> harn-landing.pages.dev on the 2lab.ai zone at Vercel).
+# This workflow only checks the
 # directory, so a broken page fails here instead of shipping.
 
 on:
@@ -40,6 +41,7 @@ jobs:
           import re, sys, pathlib
           from html.parser import HTMLParser
           root = pathlib.Path(sys.argv[1]).resolve(); errs = []
+          SITE = 'https://harn.2lab.ai/'  # canonical, og:url and og:image name this host; nothing else may
           def local(ref, base, where):
               if re.match(r'^(https?:)?//', ref): errs.append(f'{where}: loads {ref} from another host'); return
               if ref.startswith(('data:', 'mailto:', '#')) or not ref: return
@@ -54,9 +56,15 @@ jobs:
                   if 'style' in a or any(k.startswith('on') for k in a): errs.append(f'{w}: inline style/handler is blocked by the CSP')
                   if tag == 'style' or (tag == 'script' and 'src' not in a): errs.append(f'{w}: inline <{tag}> is blocked by the CSP')
                   if tag == 'a' and a.get('href', '').startswith('#') and len(a['href']) > 1: s.frags.append((w, a['href'][1:]))
+                  if tag == 'link' and a.get('rel') == 'canonical':
+                      if a.get('href') != SITE: errs.append(f'{w}: canonical is {a.get("href")}, expected {SITE}')
+                      return
                   for k in ('src', 'poster') + (('href',) if tag == 'link' else ()):
                       if a.get(k): local(a[k], s.f.parent, w)
-                  if tag == 'meta' and a.get('property') == 'og:image' and not re.match(r'^https?://', a.get('content', '')): local(a['content'], s.f.parent, w)
+                  if tag == 'meta' and a.get('property') == 'og:url' and a.get('content') != SITE: errs.append(f'{w}: og:url is {a.get("content")}, expected {SITE}')
+                  if tag == 'meta' and a.get('property') == 'og:image':
+                      c = a.get('content', '')
+                      local('/' + c[len(SITE):] if c.startswith(SITE) else c, s.f.parent, w)
           for f in sorted(root.rglob('*.html')):
               p = Page(f); p.feed(f.read_text(encoding='utf-8'))
               errs += [f'{w}: #{i} has no target' for w, i in p.frags if i not in p.ids]
