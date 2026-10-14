@@ -325,7 +325,9 @@ enum NoThread {
 }
 
 /// [`leave`] on a thread of its own, waited for at most [`GRACE`]: a terminal that takes no more
-/// output (its writes block) cannot keep the process alive. A hung-up one fails at once.
+/// output (its writes block) cannot keep the process alive. A hung-up one fails at once. When no
+/// thread can be started, `no_thread` decides: [`NoThread::Skip`] keeps the bound (no restore),
+/// [`NoThread::Inline`] restores here and is unbounded again.
 fn leave_briefly(no_thread: NoThread) {
     /// A thread of this function is still in [`leave`].
     static LEAVING: AtomicBool = AtomicBool::new(false);
