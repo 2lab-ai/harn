@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 mod codex;
-pub use codex::{verify_codex, OUTSIDE_THE_DUMP, RUNTIME_DECIDED};
+pub use codex::{verify_codex, CATALOG_GATED, OUTSIDE_THE_DUMP, RUNTIME_DECIDED};
 
 /// Bytes a reproducible contribution may differ by (a trailing newline the agent adds or drops).
 pub const CONTENT_TOLERANCE: u64 = 2;
@@ -57,9 +57,11 @@ pub enum RowVerdict {
     Seen,
     PredictedNotSeen,
     SeenNotPredicted,
+    /// `observed` is None when the oracle shows the row differs but not where it ends (Codex:
+    /// an AGENTS file whose end in the message cannot be established).
     ContentMismatch {
         predicted: u64,
-        observed: u64,
+        observed: Option<u64>,
     },
     /// In the projection, but the oracle's output cannot show it (Codex: hook output, tools,
     /// base instructions); never a failure.
@@ -397,7 +399,7 @@ pub fn verify(static_tree: &mut Tree, capture: &Capture) -> VerifyReport {
             } else if p.abs_diff(o) > CONTENT_TOLERANCE {
                 verdict = RowVerdict::ContentMismatch {
                     predicted: p,
-                    observed: o,
+                    observed: Some(o),
                 };
             }
         }

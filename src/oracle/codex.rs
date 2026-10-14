@@ -58,6 +58,9 @@ pub const MANIFEST_SCHEMA: &str = "harn-codex-capture/1";
 /// `RunContext.capture_kind` of a capture made by [`run_codex`].
 pub const CAPTURE_KIND: &str = "codex-run";
 
+/// The `origin.why` prefix under which an observed listing entry carries its line.
+pub const LISTED_PREFIX: &str = "listed: ";
+
 /// How long one codex command may take before it is killed (prompt-input waits for MCP servers).
 const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -215,6 +218,9 @@ pub struct ListedSkill {
     pub name: String,
     /// The line without its trailing newline.
     pub line: String,
+    /// The `SKILL.md` its `file` locator names, through the `### Skill roots` table when the
+    /// locator is `rN/…`; None for another locator kind or an alias the table does not define.
+    pub path: Option<PathBuf>,
 }
 
 impl ListedSkill {
@@ -240,17 +246,30 @@ pub struct ListedPlugin {
     pub enabled: bool,
 }
 
+/// The files a capture dir may hold besides [`MANIFEST`]: each command's stdout and stderr. A
+/// manifest naming any other file is refused, and so is any of these that is a symlink.
+pub const ARTIFACTS: &[(&str, &str)] = &[
+    ("version.txt", "version.stderr"),
+    ("prompt-input.json", "prompt-input.stderr"),
+    ("models.json", "models.stderr"),
+    ("mcp-list.json", "mcp-list.stderr"),
+    ("plugin-list.json", "plugin-list.stderr"),
+];
+
 /// One command of a run, as recorded in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// The argv after the binary.
     pub args: Vec<String>,
-    /// Stdout file, relative to the capture dir.
+    /// Stdout file, one of [`ARTIFACTS`].
     pub stdout: String,
-    /// Stderr file, relative to the capture dir.
+    /// Stderr file, the one [`ARTIFACTS`] pairs with `stdout`.
     pub stderr: String,
     /// `None` when it was killed or could not start.
     pub exit: Option<i32>,
+    /// Why it could not run (it could not start, or harn could not wait for it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,25 +363,39 @@ pub fn run_codex(target: &Target, codex_bin: &Path) -> anyhow::Result<CodexCaptu
     let dir = capture_dir()?;
     let mut steps = Vec::new();
     for (args, stdout) in planned_steps(target) {
-        let stderr = stdout
-            .rsplit_once('.')
-            .map_or(stdout.to_string(), |(stem, _)| stem.to_string())
-            + ".stderr";
-        let exit = run_step(
+        let stderr = ARTIFACTS
+            .iter()
+            .find(|(out, _)| *out == stdout)
+            .map(|(_, err)| err.to_string())
+            .expect("every planned step has an artifact pair");
+        let run = run_step(
             target,
             codex_bin,
             &args,
             &dir.join(stdout),
             &dir.join(&stderr),
-        )?;
+            RUN_TIMEOUT,
+        );
+        let (exit, error) = match run {
+            Ok(exit) => (exit, None),
+            Err(err) => (None, Some(format!("{err:#}"))),
+        };
         if stdout == "prompt-input.json" && exit != Some(0) {
-            let tail = std::fs::read_to_string(dir.join(&stderr)).unwrap_or_default();
-            let tail: String = tail.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+            let why = match &error {
+                Some(err) => err.clone(),
+                None => {
+                    let tail = std::fs::read_to_string(dir.join(&stderr)).unwrap_or_default();
+                    let tail: String = tail.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+                    format!(
+                        "exited with {}; stderr tail: {tail}",
+                        exit.map_or("no status (killed)".to_string(), |c| c.to_string())
+                    )
+                }
+            };
             bail!(
-                "{} {} exited with {} (outputs kept in {}); stderr tail: {tail}",
+                "{} {}: {why} (outputs kept in {})",
                 codex_bin.display(),
                 args.join(" "),
-                exit.map_or("no status (killed)".to_string(), |c| c.to_string()),
                 dir.display()
             );
         }
@@ -371,10 +404,14 @@ pub fn run_codex(target: &Target, codex_bin: &Path) -> anyhow::Result<CodexCaptu
             stdout: stdout.to_string(),
             stderr,
             exit,
+            error,
         });
     }
-    let version = std::fs::read_to_string(dir.join("version.txt"))
-        .ok()
+    // The version only from a `--version` that succeeded.
+    let version = steps
+        .iter()
+        .find(|s| s.stdout == "version.txt" && s.exit == Some(0))
+        .and_then(|_| std::fs::read_to_string(dir.join("version.txt")).ok())
         .and_then(|v| parse_version(&v));
     let prompt_args = steps
         .iter()
@@ -401,7 +438,7 @@ pub fn run_codex(target: &Target, codex_bin: &Path) -> anyhow::Result<CodexCaptu
         serde_json::to_string_pretty(&manifest)? + "\n",
     )
     .with_context(|| format!("writing {}", dir.join(MANIFEST).display()))?;
-    read_capture_dir(&dir, target)
+    read_capture_dir(&dir, target).with_context(|| format!("outputs kept in {}", dir.display()))
 }
 
 /// [`BINDING_ENV`] from the target's environment.
@@ -430,27 +467,41 @@ fn capture_dir() -> anyhow::Result<PathBuf> {
         .map_or(0, |d| d.as_nanos());
     let dir =
         std::env::temp_dir().join(format!("harn-codex-capture-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    create_private_dir(&dir)?;
     Ok(std::fs::canonicalize(&dir).unwrap_or(dir))
 }
 
-/// Runs one command; its exit code, or `None` when it was killed at [`RUN_TIMEOUT`].
+/// Creates `dir`, which must not exist (an existing dir or a symlink there is an error), readable
+/// by its owner only from the start.
+fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))
+}
+
+/// Runs one command in its own process group; its exit code, or `None` when it was killed at
+/// `timeout`. On the timeout, or when waiting for it fails, the whole group is killed (the MCP
+/// servers `debug prompt-input` starts are in it) before the command is reaped, so the group id
+/// cannot have been reused.
 fn run_step(
     target: &Target,
     codex_bin: &Path,
     args: &[String],
     stdout: &Path,
     stderr: &Path,
+    timeout: std::time::Duration,
 ) -> anyhow::Result<Option<i32>> {
     use std::process::{Command, Stdio};
     let out = std::fs::File::create(stdout)?;
     let err = std::fs::File::create(stderr)?;
-    let mut child = Command::new(codex_bin)
+    let mut command = Command::new(codex_bin);
+    command
         .args(args)
         .current_dir(&target.dir)
         .env_clear()
@@ -458,22 +509,55 @@ fn run_step(
         .env("HOME", &target.home)
         .stdin(Stdio::null())
         .stdout(out)
-        .stderr(err)
+        .stderr(err);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", codex_bin.display()))?;
-    let deadline = std::time::Instant::now() + RUN_TIMEOUT;
+    let kill_all = |child: &mut std::process::Child| {
+        kill_group(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status.code());
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.code()),
+            Ok(None) => {}
+            Err(e) => {
+                kill_all(&mut child);
+                return Err(anyhow::Error::from(e).context(format!(
+                    "waiting for {} {}",
+                    codex_bin.display(),
+                    args.join(" ")
+                )));
+            }
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_all(&mut child);
             return Ok(None);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+/// SIGKILL to the process group led by `pid` (a child spawned with `process_group(0)`).
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    if let Ok(pid) = i32::try_from(pid) {
+        // SAFETY: kill(2) takes plain integers; a negative pid names the process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pid: u32) {}
 
 /// `sha256:<hex>` over the config files that decide what codex loads for `target`, in a fixed
 /// order, each hashed as `path NUL contents NUL` (`<absent>` for a missing file):
@@ -527,6 +611,9 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
         path.to_path_buf()
     };
     let manifest_path = dir.join(MANIFEST);
+    if std::fs::symlink_metadata(&manifest_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("{}: a symlink, refused", manifest_path.display());
+    }
     let text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
     let manifest: Manifest = serde_json::from_str(&text).with_context(|| {
@@ -542,31 +629,60 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
             manifest.schema
         );
     }
+    for step in &manifest.steps {
+        if !ARTIFACTS
+            .iter()
+            .any(|(out, err)| *out == step.stdout && *err == step.stderr)
+        {
+            bail!(
+                "{}: a step names {:?} / {:?}, not one of the capture's own files",
+                manifest_path.display(),
+                step.stdout,
+                step.stderr
+            );
+        }
+    }
+    // Every artifact present must be a regular file in the dir itself.
+    for name in ARTIFACTS.iter().flat_map(|(out, err)| [*out, *err]) {
+        artifact(&dir, name)?;
+    }
     let mut warnings = Vec::new();
-    let read = |file: &str, warnings: &mut Vec<String>| -> Option<String> {
+    let read = |file: &str, warnings: &mut Vec<String>| -> anyhow::Result<Option<String>> {
         let step = manifest.steps.iter().find(|s| s.stdout == file);
         if let Some(step) = step {
             if step.exit != Some(0) {
-                let tail = std::fs::read_to_string(dir.join(&step.stderr)).unwrap_or_default();
-                let tail: String = tail.lines().take(2).collect::<Vec<_>>().join(" | ");
-                warnings.push(format!(
-                    "codex {} exited with {}: not read ({tail})",
-                    step.args.join(" "),
-                    step.exit
-                        .map_or("no status (killed)".to_string(), |c| c.to_string())
-                ));
-                return None;
+                let why = match &step.error {
+                    Some(err) => err.clone(),
+                    None => {
+                        let stderr = match artifact(&dir, &step.stderr)? {
+                            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        let tail: String = stderr.lines().take(2).collect::<Vec<_>>().join(" | ");
+                        format!(
+                            "exited with {} ({tail})",
+                            step.exit
+                                .map_or("no status (killed)".to_string(), |c| c.to_string())
+                        )
+                    }
+                };
+                warnings.push(format!("codex {}: {why}; not read", step.args.join(" ")));
+                return Ok(None);
             }
         }
-        match std::fs::read_to_string(dir.join(file)) {
-            Ok(text) => Some(text),
+        let Some(path) = artifact(&dir, file)? else {
+            warnings.push(format!("{file}: missing"));
+            return Ok(None);
+        };
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
             Err(err) => {
                 warnings.push(format!("{file}: {err}"));
-                None
+                Ok(None)
             }
         }
     };
-    let prompt = read("prompt-input.json", &mut warnings).ok_or_else(|| {
+    let prompt = read("prompt-input.json", &mut warnings)?.ok_or_else(|| {
         anyhow!(
             "{}: no prompt-input.json ({})",
             dir.display(),
@@ -574,17 +690,17 @@ pub fn read_capture_dir(path: &Path, target: &Target) -> anyhow::Result<CodexCap
         )
     })?;
     let blocks = parse_prompt_input(&prompt).context("prompt-input.json")?;
-    let mcp_servers = read("mcp-list.json", &mut warnings).and_then(|t| {
+    let mcp_servers = read("mcp-list.json", &mut warnings)?.and_then(|t| {
         parse_mcp_list(&t)
             .map_err(|e| warnings.push(format!("mcp-list.json: {e:#}")))
             .ok()
     });
-    let plugins = read("plugin-list.json", &mut warnings).and_then(|t| {
+    let plugins = read("plugin-list.json", &mut warnings)?.and_then(|t| {
         parse_plugin_list(&t)
             .map_err(|e| warnings.push(format!("plugin-list.json: {e:#}")))
             .ok()
     });
-    let models = read("models.json", &mut warnings).and_then(|t| {
+    let models = read("models.json", &mut warnings)?.and_then(|t| {
         parse_models(&t)
             .map_err(|e| warnings.push(format!("models.json: {e:#}")))
             .ok()
@@ -630,14 +746,43 @@ fn drift(capture: &CodexCapture, target: &Target) -> Vec<String> {
     out
 }
 
-/// Err unless the capture is about `target.dir`.
+/// `dir/name` when it is there as a regular file; None when absent; Err when `name` is not one
+/// of [`ARTIFACTS`] or the entry is a symlink or not a regular file.
+fn artifact(dir: &Path, name: &str) -> anyhow::Result<Option<PathBuf>> {
+    if !ARTIFACTS
+        .iter()
+        .any(|(out, err)| *out == name || *err == name)
+    {
+        bail!("{name:?} is not one of the capture's own files");
+    }
+    let path = dir.join(name);
+    match std::fs::symlink_metadata(&path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow::Error::from(err).context(path.display().to_string())),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("{}: a symlink, refused", path.display())
+        }
+        Ok(meta) if !meta.is_file() => bail!("{}: not a regular file", path.display()),
+        Ok(_) => Ok(Some(path)),
+    }
+}
+
+/// Err unless the capture is about `target.dir`: every working directory the input list names
+/// (there must be one) is the manifest's, and that is the target.
 fn bind(capture: &CodexCapture, target: &Target) -> anyhow::Result<()> {
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    if let Some((cwd, evidence)) = derived_cwd(&capture.blocks) {
+    let evidence = derived_cwd(&capture.blocks);
+    if evidence.is_empty() {
+        bail!(
+            "the input list names no working directory (no <environment_context> <cwd>, no `# AGENTS.md instructions for <dir>` header); it cannot be bound to {}",
+            target.dir.display()
+        );
+    }
+    for (cwd, source) in evidence {
         let cwd = canonical(&cwd);
         if cwd != canonical(&capture.context.cwd) {
             bail!(
-                "the input list names {} ({evidence}), the manifest {}",
+                "the input list names {} ({source}), the manifest {}",
                 cwd.display(),
                 capture.context.cwd.display()
             );
@@ -653,20 +798,31 @@ fn bind(capture: &CodexCapture, target: &Target) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The working directory the input list names, and where.
-pub fn derived_cwd(blocks: &[Block]) -> Option<(PathBuf, &'static str)> {
-    if let Some(env) = blocks.iter().find(|b| b.name == names::ENVIRONMENT) {
-        let start = env.text.find("<cwd>")? + "<cwd>".len();
-        let end = env.text[start..].find("</cwd>")? + start;
-        return Some((
-            PathBuf::from(&env.text[start..end]),
-            "<environment_context> <cwd>",
-        ));
-    }
-    let agents = blocks.iter().find(|b| b.name == names::AGENTS_MD)?;
-    let first = agents.text.lines().next()?;
-    let dir = first.strip_prefix("# AGENTS.md instructions for ")?;
-    Some((PathBuf::from(dir), "AGENTS.md message header"))
+/// Every working directory the input list names, with where: the `<environment_context>`
+/// `<cwd>`, and the `# AGENTS.md instructions for <dir>` header. Only absolute paths count.
+pub fn derived_cwd(blocks: &[Block]) -> Vec<(PathBuf, &'static str)> {
+    let mut out = Vec::new();
+    let env = blocks
+        .iter()
+        .find(|b| b.name == names::ENVIRONMENT)
+        .and_then(|env| {
+            let start = env.text.find("<cwd>")? + "<cwd>".len();
+            let end = env.text[start..].find("</cwd>")? + start;
+            Some(PathBuf::from(&env.text[start..end]))
+        });
+    out.extend(env.map(|p| (p, "<environment_context> <cwd>")));
+    let header = blocks
+        .iter()
+        .find(|b| b.name == names::AGENTS_MD)
+        .and_then(|agents| {
+            let first = agents.text.lines().next()?;
+            Some(PathBuf::from(
+                first.strip_prefix("# AGENTS.md instructions for ")?,
+            ))
+        });
+    out.extend(header.map(|p| (p, "AGENTS.md message header")));
+    out.retain(|(p, _)| p.is_absolute());
+    out
 }
 
 /// The input list (`codex debug prompt-input` stdout: a JSON array of `ResponseItem`s, see
@@ -700,7 +856,20 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<Vec<Block>> {
             .as_array()
             .map(|a| a.iter().map(Value::as_str).collect())
             .unwrap_or_default();
-        let content = item["content"].as_array().cloned().unwrap_or_default();
+        let Some(content) = item["content"].as_array() else {
+            // Not the `ResponseItem::Message` shape (`content` is a list): kept, so verify
+            // reports it rather than losing it.
+            blocks.push(Block {
+                input: i,
+                role,
+                part: 0,
+                content_kind: None,
+                name: format!("input[{i}].content"),
+                known: false,
+                text: serde_json::to_string(&item["content"]).unwrap_or_default(),
+            });
+            continue;
+        };
         for (j, part) in content.iter().enumerate() {
             let content_kind = kinds.get(j).copied().flatten();
             let text = match part["text"].as_str() {
@@ -753,9 +922,13 @@ fn classify(
 /// The entry lines of a `<skills_instructions>` block: the `- ` lines after `### Available
 /// skills` up to the next `### ` heading or the closing tag (`ext/skills/src/catalog_prompt.rs:81-106`,
 /// `ext/skills/src/render.rs:258-267`). The name is the text before the first `": "`; plugin
-/// skills keep their `plugin:` prefix.
+/// skills keep their `plugin:` prefix (the plugin's manifest name, `core-plugins/src/loader.rs:906`).
+/// The `(file: …)` locator at the line's end resolves through the `### Skill roots` lines
+/// (`` - `rN` = `<dir>` ``) or is absolute.
 pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
     let mut out = Vec::new();
+    let mut roots: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut section = "";
     let mut inside = false;
     for line in text.split('\n') {
         if line == "### Available skills" {
@@ -763,6 +936,17 @@ pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
             continue;
         }
         if !inside {
+            if line.starts_with("### ") {
+                section = line;
+            } else if section == "### Skill roots" {
+                let alias_root = line
+                    .strip_prefix("- `")
+                    .and_then(|rest| rest.split_once("` = `"))
+                    .and_then(|(alias, root)| Some((alias, root.strip_suffix('`')?)));
+                if let Some((alias, root)) = alias_root {
+                    roots.insert(alias, root);
+                }
+            }
             continue;
         }
         if line.starts_with("### ") || line.starts_with("</skills_instructions>") {
@@ -775,9 +959,21 @@ pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
             Some((name, _)) => name,
             None => entry.split(" (").next().unwrap_or(entry),
         };
+        let locator = line
+            .strip_suffix(')')
+            .and_then(|l| l.rsplit_once(" (file: "))
+            .map(|(_, locator)| locator);
+        let path = locator.and_then(|locator| match locator.split_once('/') {
+            Some((alias, rest)) if roots.contains_key(alias) => {
+                Some(Path::new(roots[alias]).join(rest))
+            }
+            _ if Path::new(locator).is_absolute() => Some(PathBuf::from(locator)),
+            _ => None,
+        });
         out.push(ListedSkill {
             name: name.to_string(),
             line: line.to_string(),
+            path,
         });
     }
     out
@@ -898,6 +1094,8 @@ pub fn build(
                 for e in &entries {
                     let mut item = row(Kind::Skill, Layer::Unresolved, &e.name, Some(e.bytes()));
                     item.mode = Mode::Advertised;
+                    item.origin.path = e.path.clone();
+                    item.origin.why = vec![format!("{LISTED_PREFIX}{}", e.line)];
                     listing.children.push(item);
                 }
                 items.push(listing);
@@ -1036,10 +1234,13 @@ mod tests {
         );
         assert_eq!(
             derived_cwd(&blocks),
-            Some((
-                PathBuf::from("/synthetic/repo"),
-                "<environment_context> <cwd>"
-            ))
+            vec![
+                (
+                    PathBuf::from("/synthetic/repo"),
+                    "<environment_context> <cwd>"
+                ),
+                (PathBuf::from("/synthetic/repo"), "AGENTS.md message header"),
+            ]
         );
     }
 
@@ -1061,6 +1262,10 @@ mod tests {
         let entries = parse_listing(LISTING);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "demo:beta"]);
+        assert_eq!(
+            entries[0].path.as_deref(),
+            Some(Path::new("/synthetic/skills/alpha/SKILL.md"))
+        );
         assert_eq!(
             entries[0].bytes(),
             "- alpha: First skill. (file: r0/alpha/SKILL.md)\n".len() as u64
@@ -1194,5 +1399,103 @@ mod tests {
             Some("0.160.1")
         );
         assert_eq!(parse_version("nothing"), None);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "harn-oracle-codex-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn a_message_whose_content_is_not_an_array_is_kept_as_unknown() {
+        let input = json!([{"type": "message", "role": "developer", "content": "loose"}]);
+        let blocks = parse_prompt_input(&input.to_string()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "input[0].content");
+        assert!(!blocks[0].known);
+        assert_eq!(blocks[0].text, "\"loose\"");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_capture_dir_is_created_exclusively_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("dir");
+        let dir = root.join("capture");
+        create_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        assert!(
+            create_private_dir(&dir).is_err(),
+            "an existing dir is not reused"
+        );
+        let target = root.join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
+        assert!(
+            create_private_dir(&root.join("link")).is_err(),
+            "a symlink is not followed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_timeout_kills_the_whole_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("group");
+        let pidfile = root.join("descendant.pid");
+        let bin = root.join("codex");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n/bin/sleep 30 &\necho $! > {}\nexec /bin/sleep 30\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let target = Target {
+            dir: root.clone(),
+            home: root.clone(),
+            env: BTreeMap::new(),
+            model: None,
+            context_window: None,
+            bytes_per_token: None,
+        };
+        let exit = run_step(
+            &target,
+            &bin,
+            &[],
+            &root.join("out"),
+            &root.join("err"),
+            std::time::Duration::from_millis(1500),
+        )
+        .unwrap();
+        assert_eq!(exit, None, "killed at the timeout");
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // A killed descendant is a zombie until init reaps the orphan; poll for that.
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let survived = alive(pid);
+        if survived {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(!survived, "the descendant {pid} outlived the timeout");
     }
 }

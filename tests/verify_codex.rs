@@ -8,7 +8,9 @@
 use harn::model::{item_id, walk, Agent, Cost, Item, Kind, Layer, Mode, Origin, Target, Tree};
 use harn::oracle::codex::{self as oracle, CodexCapture};
 use harn::resolve::{Codex, Resolver};
-use harn::verify::{verify_codex, RowVerdict, VerifyReport, OUTSIDE_THE_DUMP, RUNTIME_DECIDED};
+use harn::verify::{
+    verify_codex, RowVerdict, VerifyReport, CATALOG_GATED, OUTSIDE_THE_DUMP, RUNTIME_DECIDED,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -197,9 +199,24 @@ fn statics(f: &Fx) -> Tree {
         Mode::Advertised,
         exact(entries),
     );
-    for (layer, name, line) in [
-        (Layer::User, "alpha", ALPHA),
-        (Layer::Plugin, "demo-plugin:beta", BETA),
+    let plugin_root = f
+        .home
+        .join(".codex/plugins/cache/demo-mkt/demo-plugin/local/skills");
+    for (layer, name, line, path, plugin) in [
+        (
+            Layer::User,
+            "alpha",
+            ALPHA,
+            f.home.join(".codex/skills/alpha/SKILL.md"),
+            None,
+        ),
+        (
+            Layer::Plugin,
+            "demo-plugin:beta",
+            BETA,
+            plugin_root.join("beta/SKILL.md"),
+            Some("demo-plugin@demo-mkt"),
+        ),
     ] {
         let mut skill = row(
             Kind::Skill,
@@ -209,6 +226,8 @@ fn statics(f: &Fx) -> Tree {
             exact(line.len() as u64 + 1),
         );
         skill.origin.why = vec![format!("rendered: {line}")];
+        skill.origin.path = Some(path);
+        skill.origin.plugin = plugin.map(str::to_string);
         listing.children.push(skill);
     }
     tree.items.push(listing);
@@ -564,7 +583,7 @@ fn a_file_differing_mid_text_is_a_content_mismatch_at_its_offset() {
         verdict(&report, &root),
         Some(&RowVerdict::ContentMismatch {
             predicted: 12,
-            observed: 20
+            observed: Some(20)
         })
     );
     for other in [&message, &global, &sub] {
@@ -614,7 +633,7 @@ fn text_harn_did_not_predict_is_a_message_mismatch_at_its_offset() {
         verdict(&report, &message),
         Some(&RowVerdict::ContentMismatch {
             predicted,
-            observed: predicted + "\n\nFallback rules.\n".len() as u64,
+            observed: Some(predicted + "\n\nFallback rules.\n".len() as u64),
         })
     );
     // Predicted `…Sub rules.\n` + `\n</INSTRUCTIONS>`; observed `…Sub rules.\n\n\nFallback…`.
@@ -636,17 +655,12 @@ fn text_harn_did_not_predict_is_a_message_mismatch_at_its_offset() {
 }
 
 #[test]
-fn a_same_length_header_change_is_still_a_mismatch() {
-    // The byte counts agree; only the comparison of the text catches it.
+fn a_same_length_framing_change_is_still_a_mismatch() {
+    // The byte counts agree; only the comparison of the text catches it. (The header's directory
+    // is binding evidence: a capture whose header names another directory is refused, r1.)
     let f = fx();
     let c = capture(&f, |items| {
-        replace_in(
-            items,
-            1,
-            0,
-            "/sub\n\n<INSTRUCTIONS>",
-            "/sux\n\n<INSTRUCTIONS>",
-        )
+        replace_in(items, 1, 0, "--- project-doc ---", "--- project-dox ---")
     });
     let mut tree = statics(&f);
     let report = verify_codex(&mut tree, &c);
@@ -656,7 +670,7 @@ fn a_same_length_header_change_is_still_a_mismatch() {
         verdict(&report, &message),
         Some(&RowVerdict::ContentMismatch {
             predicted,
-            observed: predicted
+            observed: Some(predicted)
         })
     );
     for file in [&global, &root, &sub] {
@@ -695,7 +709,7 @@ fn a_listing_line_with_the_same_length_but_other_text_is_a_mismatch_at_its_byte(
         verdict(&report, &alpha),
         Some(&RowVerdict::ContentMismatch {
             predicted: bytes,
-            observed: bytes
+            observed: Some(bytes)
         })
     );
     let at = ALPHA.find('.').unwrap();
@@ -835,4 +849,421 @@ fn a_plugin_without_list_entry_or_listed_skill_is_not_checkable() {
         Some(RowVerdict::NotCheckable { .. })
     ));
     assert!(report.passed);
+}
+
+// ---- review round 1: regressions ---------------------------------------------------------------
+
+/// Overwrites `prompt-input.json` of a capture dir with `items`.
+fn set_prompt(dir: &Path, items: &Value) {
+    std::fs::write(dir.join("prompt-input.json"), items.to_string()).unwrap();
+}
+
+#[test]
+fn r1_an_input_list_without_cwd_evidence_is_refused() {
+    let f = fx();
+    let dir = capture_dir(&f, |_| {});
+    set_prompt(&dir, &serde_json::json!([]));
+    let err = oracle::read_capture_dir(&dir, &target(&f))
+        .expect_err("an empty input list names no working directory")
+        .to_string();
+    assert!(err.contains("names no working directory"), "{err}");
+}
+
+#[test]
+fn r1_an_environment_block_without_cwd_falls_back_to_the_agents_header() {
+    let f = fx();
+    // No usable <cwd>; the AGENTS.md header names another directory: refused.
+    let dir = capture_dir(&f, |items| {
+        replace_in(items, 1, 1, "<cwd>", "<dir>");
+        replace_in(
+            items,
+            1,
+            0,
+            "/sub\n\n<INSTRUCTIONS>",
+            "/elsewhere\n\n<INSTRUCTIONS>",
+        );
+    });
+    let err = oracle::read_capture_dir(&dir, &target(&f))
+        .expect_err("the AGENTS.md header names another directory")
+        .to_string();
+    assert!(err.contains("AGENTS.md message header"), "{err}");
+    // The same header naming the target: bound through it.
+    let f = fx();
+    let dir = capture_dir(&f, |items| replace_in(items, 1, 1, "<cwd>", "<dir>"));
+    oracle::read_capture_dir(&dir, &target(&f)).expect("bound through the AGENTS.md header");
+}
+
+#[test]
+fn r2_a_manifest_naming_files_outside_the_artifacts_is_refused() {
+    let f = fx();
+    let outside = f.root.join("secret.txt");
+    std::fs::write(&outside, "SECRET-LINE\n").unwrap();
+    for stderr in [outside.display().to_string(), "../secret.txt".to_string()] {
+        let dir = capture_dir(&f, |_| {});
+        let manifest = dir.join(oracle::MANIFEST);
+        let text = std::fs::read_to_string(&manifest).unwrap().replacen(
+            "\"stdout\": \"models.json\", \"stderr\": \"models.stderr\", \"exit\": 0",
+            &format!("\"stdout\": \"models.json\", \"stderr\": {stderr:?}, \"exit\": 1"),
+            1,
+        );
+        std::fs::write(&manifest, text).unwrap();
+        match oracle::read_capture_dir(&dir, &target(&f)) {
+            Err(err) => assert!(!format!("{err:#}").contains("SECRET-LINE"), "{err:#}"),
+            Ok(c) => panic!("accepted {stderr}: {:?}", c.warnings),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn r2_a_symlinked_artifact_is_refused() {
+    let f = fx();
+    let dir = capture_dir(&f, |_| {});
+    let real = f.root.join("elsewhere.json");
+    std::fs::rename(dir.join("prompt-input.json"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("prompt-input.json")).unwrap();
+    let err = oracle::read_capture_dir(&dir, &target(&f))
+        .expect_err("a symlinked prompt-input.json")
+        .to_string();
+    assert!(err.contains("symlink"), "{err}");
+}
+
+#[test]
+fn r4_a_message_whose_content_is_not_an_array_is_seen_not_predicted() {
+    let f = fx();
+    let c = capture(&f, |items| {
+        items.as_array_mut().unwrap().push(
+            serde_json::json!({"type": "message", "role": "developer", "content": "loose text"}),
+        );
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Unresolved, "input[2].content")
+        ),
+        Some(&RowVerdict::SeenNotPredicted),
+        "{:#?}",
+        report.rows
+    );
+}
+
+/// A stand-in `codex`: `--version` fails (exit 1) though it prints a version, `debug
+/// prompt-input` prints a minimal input list for its `-C` dir, `debug models` removes its own
+/// execute bit so the later commands cannot start.
+#[cfg(unix)]
+fn fake_codex(f: &Fx) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = f.root.join("bin/codex");
+    write(
+        &bin,
+        r#"#!/bin/sh
+dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C) dir="$2"; shift 2;;
+    --profile) shift 2;;
+    *) break;;
+  esac
+done
+case "$1" in
+  --version) echo "codex-cli 9.9.9"; exit 1;;
+  debug)
+    if [ "$2" = "prompt-input" ]; then
+      printf '[{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\\n  <cwd>%s</cwd>\\n</environment_context>"}]}]\n' "$dir"
+      exit 0
+    fi
+    /bin/chmod -x "$0"
+    echo '{"models":[]}'
+    exit 0;;
+esac
+exit 3
+"#,
+    );
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[test]
+#[cfg(unix)]
+fn r5_side_command_failures_are_warnings_and_a_failed_version_is_not_read() {
+    let f = fx();
+    let bin = fake_codex(&f);
+    let mut t = target(&f);
+    t.env.insert(
+        "PATH".to_string(),
+        std::env::var("PATH").unwrap_or_default(),
+    );
+    let c = oracle::run_codex(&t, &bin).expect("the prompt capture is kept");
+    let dir = c.dir.clone().unwrap();
+    assert_eq!(c.context.agent_version, None, "--version exited 1");
+    assert_eq!(c.blocks.len(), 1);
+    assert_eq!(c.mcp_servers, None);
+    assert_eq!(c.plugins, None);
+    assert!(
+        c.warnings.iter().any(|w| w.contains("mcp list")),
+        "{:?}",
+        c.warnings
+    );
+    assert!(c.warnings.iter().any(|w| w.contains("plugin list")));
+    assert!(dir.join(oracle::MANIFEST).is_file());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn r6_the_runtime_exemption_is_for_blocks_only() {
+    let f = fx();
+    let c = capture(&f, |_| {});
+    let mut tree = statics(&f);
+    tree.items.push(row(
+        Kind::McpServer,
+        Layer::User,
+        "apps_instructions",
+        Mode::Always,
+        unknown(),
+    ));
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(Kind::McpServer, Layer::User, "apps_instructions")
+        ),
+        Some(&RowVerdict::PredictedNotSeen)
+    );
+}
+
+#[test]
+fn r7_a_listing_total_that_disagrees_with_its_entries_is_a_mismatch() {
+    let f = fx();
+    let c = capture(&f, |_| {});
+    let mut tree = statics(&f);
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    let total = listing.cost.predicted.unwrap();
+    listing.cost.predicted = Some(total + 7);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(&report, &id(Kind::SkillListing, Layer::Builtin, "skills")),
+        Some(&RowVerdict::ContentMismatch {
+            predicted: total + 7,
+            observed: Some(total)
+        })
+    );
+    // The framing row is compared by its bytes too.
+    let mut tree = statics(&f);
+    let framing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.id.ends_with("/skills_instructions"))
+        .unwrap();
+    let bytes = framing.cost.predicted.unwrap();
+    framing.cost.predicted = Some(bytes + 1);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions")
+        ),
+        Some(&RowVerdict::ContentMismatch {
+            predicted: bytes + 1,
+            observed: Some(bytes)
+        })
+    );
+}
+
+#[test]
+fn r8_a_multibyte_mismatch_does_not_lose_the_later_files() {
+    let f = fx();
+    write(&f.repo.join("AGENTS.md"), "Root rulé.\n");
+    let c = capture(&f, |items| {
+        replace_in(items, 1, 0, "Root rules.", "Root rulè.")
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [message, global, root, sub] = agents(&f);
+    let bytes = "Root rulé.\n".len() as u64;
+    assert_eq!(
+        verdict(&report, &root),
+        Some(&RowVerdict::ContentMismatch {
+            predicted: bytes,
+            observed: Some(bytes)
+        })
+    );
+    for other in [&message, &global, &sub] {
+        assert_eq!(verdict(&report, other), Some(&RowVerdict::Seen), "{other}");
+    }
+}
+
+#[test]
+fn r9_a_file_whose_end_is_not_established_has_no_observed_size() {
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            1,
+            0,
+            "Sub rules.\n\n</INSTRUCTIONS>",
+            "Sub rulez</INSTRUCTIONS>",
+        )
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [message, _, _, sub] = agents(&f);
+    assert_eq!(
+        verdict(&report, &sub),
+        Some(&RowVerdict::ContentMismatch {
+            predicted: "Sub rules.\n".len() as u64,
+            observed: None
+        })
+    );
+    assert_eq!(find(&tree, &sub).cost.observed, None);
+    assert_eq!(find(&tree, &message).cost.observed, None);
+}
+
+#[test]
+fn r10_a_plugin_sharing_a_skill_prefix_is_not_seen_through_anothers_skill() {
+    // The listing prefixes plugin skills with the manifest name only
+    // (core-plugins/src/loader.rs:906), so `demo-plugin:beta` cannot tell two marketplaces apart.
+    let f = fx();
+    let c = capture(&f, |_| {});
+    let mut tree = statics(&f);
+    tree.items.push(row(
+        Kind::Plugin,
+        Layer::Plugin,
+        "demo-plugin@other-mkt",
+        Mode::Always,
+        na(),
+    ));
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(Kind::Plugin, Layer::Plugin, "demo-plugin@demo-mkt")
+        ),
+        Some(&RowVerdict::Seen),
+        "its skill row is joined to the listed entry at its own path"
+    );
+    assert!(matches!(
+        verdict(
+            &report,
+            &id(Kind::Plugin, Layer::Plugin, "demo-plugin@other-mkt")
+        ),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+}
+
+#[test]
+fn r11_each_listing_line_is_compared_with_its_own_occurrence() {
+    let f = fx();
+    let repo_alpha = "- alpha: The repo alpha. (file: r2/alpha/SKILL.md)";
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### Available skills\n",
+            &format!(
+                "- `r2` = `{}`\n### Available skills\n",
+                f.repo.join(".agents/skills").display()
+            ),
+        );
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            &format!("{repo_alpha}\n### How to use skills"),
+        );
+    });
+    let mut tree = statics(&f);
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    // The repo skill is listed first in the tree; codex lists the user one first.
+    let mut repo = row(
+        Kind::Skill,
+        Layer::Project,
+        "alpha",
+        Mode::Advertised,
+        exact(repo_alpha.len() as u64 + 1),
+    );
+    repo.origin.why = vec![format!("rendered: {repo_alpha}")];
+    repo.origin.path = Some(f.repo.join(".agents/skills/alpha/SKILL.md"));
+    listing.children.insert(0, repo);
+    listing.cost.predicted = listing
+        .cost
+        .predicted
+        .map(|p| p + repo_alpha.len() as u64 + 1);
+    let framing = pristine_block(&f, "skills_instructions").len() as u64;
+    let block = c.block("skills_instructions").unwrap().bytes();
+    let report = verify_codex(&mut tree, &c);
+    for alpha in [
+        id(Kind::Skill, Layer::User, "alpha"),
+        id(Kind::Skill, Layer::Project, "alpha"),
+    ] {
+        assert_eq!(verdict(&report, &alpha), Some(&RowVerdict::Seen), "{alpha}");
+    }
+    // The roots table grew by one line: only the framing differs.
+    assert!(block > framing);
+    assert_eq!(
+        failing(&report)
+            .iter()
+            .map(|(i, _)| i.as_str())
+            .collect::<Vec<_>>(),
+        vec![id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions").as_str()]
+    );
+}
+
+#[test]
+fn r12_a_file_is_never_found_inside_the_message_header() {
+    // The global file's whole text is `instructions`; codex left it out, and the header says
+    // `# AGENTS.md instructions for …`.
+    let f = fx();
+    write(&f.home.join(".codex/AGENTS.md"), "instructions\n");
+    let c = capture(&f, |items| {
+        replace_in(items, 1, 0, "Global rules.\n\n--- project-doc ---\n\n", "")
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let [_, global, root, sub] = agents(&f);
+    assert_eq!(
+        verdict(&report, &global),
+        Some(&RowVerdict::PredictedNotSeen)
+    );
+    assert_eq!(verdict(&report, &root), Some(&RowVerdict::Seen));
+    assert_eq!(verdict(&report, &sub), Some(&RowVerdict::Seen));
+}
+
+#[test]
+fn r13_a_catalog_gated_row_codex_did_not_render_is_not_checkable() {
+    let f = fx();
+    let c = capture(&f, |_| {});
+    let mut tree = statics(&f);
+    let mut gated = row(
+        Kind::SystemPrompt,
+        Layer::Builtin,
+        "collaboration_mode",
+        Mode::Always,
+        unknown(),
+    );
+    gated.signal = Some(format!(
+        "{CATALOG_GATED} rendered only when the model's catalog entry carries its message"
+    ));
+    tree.items.push(gated);
+    let report = verify_codex(&mut tree, &c);
+    assert!(matches!(
+        verdict(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "collaboration_mode")
+        ),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    assert!(report.passed, "{:#?}", failing(&report));
 }

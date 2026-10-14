@@ -537,7 +537,7 @@ fn verify_reports_missing_mismatch_and_overflow_and_promotes() {
         verdict(&id(Kind::Instruction, Layer::Project, CLAUDE_MD)),
         Some(RowVerdict::ContentMismatch {
             predicted: 148,
-            observed: 138
+            observed: Some(138)
         })
     );
     assert!(!report.passed);

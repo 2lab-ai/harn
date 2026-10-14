@@ -1514,7 +1514,7 @@ fn verify_report_groups_rows_by_verdict() {
                 "b".to_string(),
                 RowVerdict::ContentMismatch {
                     predicted: 6_835,
-                    observed: 6_900,
+                    observed: Some(6_900),
                 },
             ),
             ("c".to_string(), RowVerdict::PredictedNotSeen),

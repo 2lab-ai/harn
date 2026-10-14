@@ -50,7 +50,7 @@ pub fn verify_report(report: &VerifyReport) -> String {
                     "  {id}   predicted {} {} observed {}",
                     exact(*predicted),
                     g.dot,
-                    exact(*observed)
+                    observed.map_or("?".to_string(), exact)
                 )),
                 _ => out.push(format!("  {id}")),
             }

@@ -3,13 +3,19 @@
 //!
 //! - **Joined** by kind + name, the layer ignored (the capture names no layer): blocks by their
 //!   [`BLOCKS`](crate::oracle::codex::BLOCKS) name, listing entries by skill name (plugin skills
-//!   keep their `plugin:` prefix), MCP servers and plugins by name; the observed
+//!   keep their `plugin:` prefix) — an entry whose `SKILL.md` (resolved through the roots table)
+//!   is a row's path joins that row first —, MCP servers and plugins by name; the observed
 //!   `developer_instructions` joins the row named `<file>#/developer_instructions`.
 //! - **Presence gate** ([`gated`]): instruction rows (the AGENTS.md message, each AGENTS file,
 //!   `developer_instructions`), the skill listing and its entries, the blocks, the environment
 //!   block, MCP servers (`codex mcp list --json`, enabled ones), plugins (`codex plugin list
-//!   --json`, installed and enabled ones; a plugin it does not list — its marketplace is not
-//!   configured — counts as seen when one of its skills is in the listing, else not checkable).
+//!   --json`, installed and enabled ones). A plugin it does not list (its marketplace is not
+//!   configured) counts as seen only through a skill of its own in the listing: the plugin's
+//!   skill row joined to an entry at the row's path, or by a name no other row has — the
+//!   listing's prefix is the plugin's manifest name, which another plugin can share
+//!   (`core-plugins/src/loader.rs:906`); otherwise it is not checkable. A row whose signal starts
+//!   with [`CATALOG_GATED`] and a block in [`RUNTIME_DECIDED`] codex did not render are not
+//!   checkable either.
 //!   Rows whose mode (or an ancestor's) is `runtime`, `none` or `on-demand` are expected absent; a
 //!   plugin row's mode is its load state. Blocks in [`RUNTIME_DECIDED`] that did not render are
 //!   a warning, not a diff.
@@ -19,9 +25,12 @@
 //!   seen when its text is where predicted, or later in the message; the row holding the first
 //!   differing byte is `content-mismatch`, and the report names that offset.
 //! - **Content conformance** (exact predictions only, never `~` or `?`): the AGENTS.md message as
-//!   above; each listing entry's line (text compared when the row carries its `rendered:` line,
-//!   else bytes); the `<skills_instructions>` framing and every other block with an exact
-//!   prediction by bytes — tolerance 0.
+//!   above; each listing entry's line against the line it joined (text compared when the row
+//!   carries its `rendered:` line, else bytes); the listing's total when its entries do not
+//!   already explain the difference; the `<skills_instructions>` framing and every other block
+//!   with an exact prediction by bytes — tolerance 0. A mismatched file's observed size is known
+//!   only when the text after it (the next file, or the closing framing) is found where it ends;
+//!   else it stays unknown.
 //! - **Not checkable** (rows of their own, never a failure): hooks, rules, tools and the base
 //!   instructions — see [`OUTSIDE_THE_DUMP`], which every report states.
 //! - **Promotion**: matched rows get `cost.observed`; `?` blocks become observed. The input list is
@@ -30,7 +39,7 @@
 
 use super::{flatten, get, get_mut, id_parts, Node, RowVerdict, VerifyReport};
 use crate::model::{item_id, Agent, Item, Kind, Layer, Mode, Tree};
-use crate::oracle::codex::{names, CodexCapture};
+use crate::oracle::codex::{names, CodexCapture, LISTED_PREFIX};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -49,6 +58,10 @@ pub const RUNTIME_DECIDED: &[(&str, &str)] = &[
         "rendered from the remote plugin catalog for the login (core/src/session/mod.rs:4330-4351, :4484-4489)",
     ),
 ];
+
+/// Prefix of a row's `signal` when its presence depends on a model-catalog entry harn could not
+/// read (the resolver's `CATALOG_GATED`): such a row codex did not render is not checkable.
+pub const CATALOG_GATED: &str = "catalog-gated:";
 
 /// The AGENTS.md message framing (`core/src/context/user_instructions.rs:23-34`).
 const AGENTS_HEADER: &str = "# AGENTS.md instructions";
@@ -161,22 +174,59 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
     }
     let mut static_of: Vec<Option<usize>> = vec![None; observed.len()];
     let mut capture_of: Vec<Option<usize>> = vec![None; statics.len()];
-    for (si, s) in statics.iter().enumerate() {
-        if in_agents(si) || not_checkable(s).is_some() {
-            continue;
+    let static_path = |si: usize| {
+        get(&static_tree.items, &statics[si].path)
+            .origin
+            .path
+            .as_deref()
+    };
+    let observed_path = |ci: usize| {
+        get(&capture.tree.items, &observed[ci].path)
+            .origin
+            .path
+            .as_deref()
+    };
+    // Pass 1: same name and the same file (listing entries); pass 2: same name.
+    for by_path in [true, false] {
+        for (si, s) in statics.iter().enumerate() {
+            if capture_of[si].is_some() || in_agents(si) || not_checkable(s).is_some() {
+                continue;
+            }
+            let candidates = by_name
+                .get(&(s.kind, join_name(s)))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let pick = candidates.iter().copied().find(|&ci| {
+                static_of[ci].is_none()
+                    && (!by_path || same_file(static_path(si), observed_path(ci)))
+            });
+            if let Some(ci) = pick {
+                static_of[ci] = Some(si);
+                capture_of[si] = Some(ci);
+            }
         }
-        let candidates = by_name
-            .get(&(s.kind, join_name(s)))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if let Some(&ci) = candidates.iter().find(|&&ci| static_of[ci].is_none()) {
-            static_of[ci] = Some(si);
-            capture_of[si] = Some(ci);
+    }
+    // Plugins with a skill of their own in the listing (see the module docs).
+    let mut owned: Vec<&str> = Vec::new();
+    for (si, s) in statics.iter().enumerate() {
+        let Some(ci) = capture_of[si].filter(|_| s.kind == Kind::Skill) else {
+            continue;
+        };
+        let Some(plugin) = get(&static_tree.items, &s.path).origin.plugin.as_deref() else {
+            continue;
+        };
+        let by_path = observed_path(ci).is_some() && same_file(static_path(si), observed_path(ci));
+        let unique = statics
+            .iter()
+            .filter(|o| o.kind == Kind::Skill && o.name == s.name)
+            .count()
+            == 1;
+        if by_path || (observed_path(ci).is_none() && unique) {
+            owned.push(plugin);
         }
     }
 
     // ---- static side ---------------------------------------------------------------------------
-    let listed_skills: Vec<&str> = capture.skills.iter().map(|e| e.name.as_str()).collect();
     let mut trimmed = 0usize;
     for (si, s) in statics.iter().enumerate() {
         if in_agents(si) {
@@ -201,36 +251,41 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
             continue;
         }
         let Some(ci) = capture_of[si] else {
-            out.rows
-                .push((s.id.clone(), unmatched(s, capture, &listed_skills)));
+            out.rows.push((s.id.clone(), unmatched(s, capture, &owned)));
             continue;
         };
         let c = &observed[ci];
         let mut verdict = RowVerdict::Seen;
         if let (Some(p), Some(o)) = (exact(s), c.cost.observed) {
             let lines = (s.kind == Kind::Skill)
-                .then(|| {
-                    rendered_line(static_tree, s)
-                        .zip(capture.skills.iter().find(|e| e.name == c.name))
-                })
+                .then(|| rendered_line(static_tree, s).zip(listed_line(capture, c)))
                 .flatten();
             let differs = match lines {
-                Some((predicted, listed)) => predicted != listed.line,
-                None => s.kind != Kind::SkillListing && p != o,
+                Some((predicted, listed)) => predicted != listed,
+                // The listing's total, unless its entries' own rows explain the difference.
+                None if s.kind == Kind::SkillListing => {
+                    let entries: u64 = statics
+                        .iter()
+                        .filter(|e| e.parent == Some(si) && !absent(e))
+                        .filter_map(|e| e.cost.predicted)
+                        .sum();
+                    p != o && entries == o
+                }
+                None => p != o,
             };
             if differs {
                 verdict = RowVerdict::ContentMismatch {
                     predicted: p,
-                    observed: o,
+                    observed: Some(o),
                 };
                 out.notes.push(match lines {
                     Some((predicted, listed)) => {
-                        let at = common_prefix(predicted.as_bytes(), listed.line.as_bytes());
+                        let at = common_prefix(predicted.as_bytes(), listed.as_bytes());
                         format!(
                             "{}: listing line differs from byte {at}: predicted {}, observed {}",
                             s.id,
                             excerpt(predicted, at),
-                            excerpt(&listed.line, at)
+                            excerpt(listed, at)
                         )
                     }
                     None => format!(
@@ -344,12 +399,22 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
     }
 }
 
-/// The verdict of a gated row codex did not show.
-fn unmatched(s: &Node, capture: &CodexCapture, listed_skills: &[&str]) -> RowVerdict {
-    if let Some((_, why)) = RUNTIME_DECIDED.iter().find(|(name, _)| *name == s.name) {
+/// The verdict of a gated row codex did not show. `owned` = plugins with a skill of their own
+/// in the listing.
+fn unmatched(s: &Node, capture: &CodexCapture, owned: &[&str]) -> RowVerdict {
+    if let Some(signal) = s.signal.as_deref().filter(|g| g.starts_with(CATALOG_GATED)) {
         return RowVerdict::NotCheckable {
-            reason: format!("not rendered in this run: {why}"),
+            reason: format!(
+                "not rendered in this run; its presence follows the model catalog: {signal}"
+            ),
         };
+    }
+    if s.kind == Kind::SystemPrompt {
+        if let Some((_, why)) = RUNTIME_DECIDED.iter().find(|(name, _)| *name == s.name) {
+            return RowVerdict::NotCheckable {
+                reason: format!("not rendered in this run: {why}"),
+            };
+        }
     }
     match s.kind {
         Kind::McpServer => match &capture.mcp_servers {
@@ -359,20 +424,41 @@ fn unmatched(s: &Node, capture: &CodexCapture, listed_skills: &[&str]) -> RowVer
             Some(_) => RowVerdict::PredictedNotSeen,
         },
         Kind::Plugin => {
-            let listed = capture.plugins.iter().flatten().any(|p| p.id == s.name);
-            let prefix = format!("{}:", s.name.split('@').next().unwrap_or(&s.name));
-            if listed {
+            if capture.plugins.iter().flatten().any(|p| p.id == s.name) {
                 // Listed, but not enabled.
                 RowVerdict::PredictedNotSeen
-            } else if listed_skills.iter().any(|n| n.starts_with(&prefix)) {
+            } else if owned.contains(&s.name.as_str()) {
                 RowVerdict::Seen
             } else {
                 RowVerdict::NotCheckable {
-                    reason: "not in `codex plugin list` (it lists configured marketplaces only) and none of its skills is in the listing".to_string(),
+                    reason: "not in `codex plugin list` (it lists configured marketplaces only) and no skill in the listing is provably its own".to_string(),
                 }
             }
         }
         _ => RowVerdict::PredictedNotSeen,
+    }
+}
+
+/// The line of an observed listing entry (the occurrence the row joined).
+fn listed_line<'a>(capture: &'a CodexCapture, node: &Node) -> Option<&'a str> {
+    get(&capture.tree.items, &node.path)
+        .origin
+        .why
+        .iter()
+        .find_map(|w| w.strip_prefix(LISTED_PREFIX))
+}
+
+/// Both paths known and naming the same file (as written, or once resolved).
+fn same_file(a: Option<&Path>, b: Option<&Path>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            a == b
+                || matches!(
+                    (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+                    (Ok(x), Ok(y)) if x == y
+                )
+        }
+        _ => false,
     }
 }
 
@@ -498,72 +584,113 @@ fn agents_md(
         ));
     }
 
-    // Compare: `d` = the first differing byte; the span holding it decides whose mismatch it is.
-    let observed_text = o.text.as_str();
-    let equal = text == observed_text;
-    let d = common_prefix(text.as_bytes(), observed_text.as_bytes());
-    let delta = observed_text.len() as i64 - text.len() as i64;
+    // Compare, on bytes: `d` = the first differing byte; the span holding it decides whose
+    // mismatch it is. A later file is looked for only inside the observed body (after the
+    // opening framing, before the closing one) and after everything already accounted for.
+    let pred = text.as_bytes();
+    let obs = o.text.as_bytes();
+    let equal = pred == obs;
+    let d = common_prefix(pred, obs);
     let holder = (!equal)
         .then(|| spans.iter().position(|s| s.start <= d && d < s.end))
         .flatten();
     // A framing span holds it, or the observed message only adds bytes at the end.
     let mut framing_mismatch = !equal && holder.is_none_or(|h| spans[h].row.is_none());
+    let body_start = find_bytes(obs, AGENTS_OPEN.as_bytes()).map_or(0, |at| at + AGENTS_OPEN.len());
+    let body_end = if obs.ends_with(AGENTS_CLOSE.as_bytes()) {
+        obs.len() - AGENTS_CLOSE.len()
+    } else {
+        obs.len()
+    };
+    // Where each file's text sits in the observed message, when established.
+    let mut placed: Vec<Option<(usize, usize)>> = vec![None; spans.len()];
+    let mut mismatched: Option<usize> = None;
     let mut cursor = 0usize;
-    let mut files_observed = 0u64;
+    for (k, span) in spans.iter().enumerate() {
+        if span.row.is_none() {
+            continue;
+        }
+        let part = &pred[span.start..span.end];
+        if equal || span.end <= d {
+            placed[k] = Some((span.start, span.end));
+            cursor = span.end;
+        } else if holder == Some(k) && span.start < d {
+            // Its first bytes are where predicted: present, but different; its end comes later.
+            mismatched = Some(k);
+            cursor = d;
+        } else {
+            let from = cursor.max(d).max(body_start);
+            let found = (!part.is_empty() && from <= body_end)
+                .then(|| find_bytes(&obs[from..body_end], part))
+                .flatten();
+            if let Some(at) = found {
+                if holder == Some(k) {
+                    // Bytes harn did not predict come before it.
+                    framing_mismatch = true;
+                }
+                placed[k] = Some((from + at, from + at + part.len()));
+                cursor = from + at + part.len();
+            }
+        }
+    }
+    // The mismatched file ends where the framing before the next file starts (that file found),
+    // or where the closing framing starts (it is the last file); else its end is unknown.
+    let mismatch_end = mismatched.and_then(|k| {
+        let start = spans[k].start;
+        let next = (k + 1..spans.len()).find(|&j| spans[j].row.is_some());
+        let (between, anchor) = match next {
+            Some(j) => (&pred[spans[k].end..spans[j].start], placed[j]?.0),
+            None => (&pred[spans[k].end..], obs.len()),
+        };
+        let end = anchor.checked_sub(between.len())?;
+        (end >= start && &obs[end..anchor] == between).then_some(end)
+    });
+    let mut files_observed = Some(0u64);
     for (k, span) in spans.iter().enumerate() {
         let Some(f) = span.row else {
             continue;
         };
-        let part = &text[span.start..span.end];
-        let len = part.len() as u64;
         let id = statics[f].id.clone();
-        if equal || span.end <= d {
-            out.rows.push((id, RowVerdict::Seen));
-            out.promote.push((statics[f].path.clone(), len));
-            files_observed += len;
-            cursor = span.end;
-        } else if holder == Some(k) && span.start < d {
-            // Its first bytes are where predicted: present, but different.
-            let obs = (len as i64 + delta).max(0) as u64;
+        let len = (span.end - span.start) as u64;
+        if mismatched == Some(k) {
+            let size = mismatch_end.map(|end| (end - span.start) as u64);
             out.rows.push((
                 id.clone(),
                 RowVerdict::ContentMismatch {
                     predicted: len,
-                    observed: obs,
+                    observed: size,
                 },
             ));
             out.notes.push(format!(
-                "{id}: first differing byte at offset {} of the file's text ({d} of the AGENTS.md message): predicted {}, observed {}",
+                "{id}: first differing byte at offset {} of the file's text ({d} of the AGENTS.md message): predicted {}, observed {}{}",
                 d - span.start,
                 excerpt(&text, d),
-                excerpt(observed_text, d)
-            ));
-            out.promote.push((statics[f].path.clone(), obs));
-            files_observed += obs;
-            cursor = d;
-        } else {
-            // At or after the first difference: present when its text comes later.
-            let found = (!part.is_empty())
-                .then(|| observed_text.get(cursor..).and_then(|rest| rest.find(part)))
-                .flatten();
-            match found {
-                Some(at) => {
-                    if holder == Some(k) {
-                        // Bytes harn did not predict come before it.
-                        framing_mismatch = true;
-                    }
-                    out.rows.push((id, RowVerdict::Seen));
-                    out.promote.push((statics[f].path.clone(), len));
-                    files_observed += len;
-                    cursor += at + part.len();
+                excerpt(&o.text, d),
+                if size.is_none() {
+                    "; where it ends in the message is not established, so its observed size is unknown"
+                } else {
+                    ""
                 }
-                None => out.rows.push((id, RowVerdict::PredictedNotSeen)),
+            ));
+            match size {
+                Some(size) => {
+                    out.promote.push((statics[f].path.clone(), size));
+                    files_observed = files_observed.map(|n| n + size);
+                }
+                None => files_observed = None,
             }
+        } else if placed[k].is_some() {
+            out.rows.push((id, RowVerdict::Seen));
+            out.promote.push((statics[f].path.clone(), len));
+            files_observed = files_observed.map(|n| n + len);
+        } else {
+            out.rows.push((id, RowVerdict::PredictedNotSeen));
         }
     }
-    let framing_observed = (observed_text.len() as u64).saturating_sub(files_observed);
-    out.promote
-        .push((statics[m].path.clone(), framing_observed));
+    let framing_observed = files_observed.map(|files| (obs.len() as u64).saturating_sub(files));
+    if let Some(framing) = framing_observed {
+        out.promote.push((statics[m].path.clone(), framing));
+    }
     if framing_mismatch {
         out.rows.push((
             statics[m].id.clone(),
@@ -576,11 +703,19 @@ fn agents_md(
             "{}: first differing byte at offset {d} of the AGENTS.md message (its framing, or text harn did not predict): predicted {}, observed {}",
             statics[m].id,
             excerpt(&text, d),
-            excerpt(observed_text, d)
+            excerpt(&o.text, d)
         ));
     } else {
         out.rows.push((statics[m].id.clone(), RowVerdict::Seen));
     }
+}
+
+/// The first position of `needle` in `haystack` (bytes; never inside a UTF-8 boundary question).
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// The text a file row predicts: the file read now, decoded lossily like codex
