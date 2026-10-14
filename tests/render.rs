@@ -869,7 +869,7 @@ fn unique_signals_keep_one_footnote_per_row() {
     assert!(html.contains(&notes), "{html}");
 }
 
-const SHARED_SIGNAL: &str = "bundled-skill: the folder holds the built-in skills last written there by the agent; the one that runs may replace them, so this skill and its listing line can change";
+const SHARED_SIGNAL: &str = "bundled-skill: the folder holds the built-in skills last written there by the agent; the one that runs may replace them, so the skills there and their listing lines can change";
 
 /// A skill row with `freed` bytes (its sort key) and `signal`.
 fn signal_skill(name: &str, freed_bytes: u64, signal: &str) -> Item {
