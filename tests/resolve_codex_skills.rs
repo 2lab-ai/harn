@@ -576,7 +576,7 @@ fn bundled_enabled_false_removes_the_system_skills() {
     // One bundled skill: the note says so in the singular.
     assert!(
         t.signals.iter().any(|s| s.starts_with("bundled skills:")
-            && s.contains(", so this skill and its listing line can change when it starts.")),
+            && s.contains(", so this skill and its listing line can change. `harn verify")),
         "{:?}",
         t.signals
     );
@@ -631,9 +631,9 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
     skill(&f.codex.join("skills"), "notes", "Keep notes.");
     user_config(&f, "");
     let signal = format!(
-        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; codex 0.160.1 writes its own copies there when they differ, so this skill and its listing line can change when it starts"
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; when codex 0.160.1 starts it replaces them with its own if another Codex version wrote them, so this skill and its listing line can change"
     );
-    let note = "bundled skills: ~/.codex/skills/.system holds Codex's built-in skills as the last Codex that started on this machine wrote them (skills/src/lib.rs:59-121); codex 0.160.1 writes its own copies there when they differ, so these 3 skills and their listing lines can change when it starts. `harn verify --run --agent codex` shows the ones Codex lists".to_string();
+    let note = "bundled skills: ~/.codex/skills/.system holds the built-in skills last written there by Codex (skills/src/lib.rs:59-121); when codex 0.160.1 starts it replaces them with its own if another Codex version wrote them, so these 3 skills and their listing lines can change. `harn verify --run --agent codex` shows the ones Codex lists".to_string();
     let t = resolve(&ctarget(&f), None);
     // The table names the bundled root (`r1`, after the user root), and the framing says so.
     let framing = row(&t, "codex/system-prompt/builtin/skills_instructions");
@@ -678,7 +678,7 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
     let r = row(&t, "codex/skill/builtin/imagegen");
     assert!(
         r.signal.as_deref().is_some_and(|s| s.contains(
-            "; no codex is on PATH; the codex that runs writes its own copies there when they differ, so"
+            "; the codex that runs replaces them with its own if another Codex version wrote them, so this skill"
         )),
         "{:?}",
         r.signal
