@@ -337,6 +337,13 @@ pub struct Line {
     pub listed: Option<Listed>,
 }
 
+impl Line {
+    /// The key of the line it sits under (its group's or its row's); None for a group line.
+    pub fn parent_key(&self) -> Option<&str> {
+        self.key.rsplit_once('\n').map(|(parent, _)| parent)
+    }
+}
+
 /// While a filter is on, a plugin's entries that a listing group shows too are not repeated
 /// under the plugin: one line per listing stands in their place and names where they are.
 /// It acts on nothing; each entry keeps its one line, in the listing.

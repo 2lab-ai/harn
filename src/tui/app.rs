@@ -686,8 +686,18 @@ impl App {
     fn rebuild(&mut self, tab: usize, keep: Option<String>) {
         let filter = (!self.filter.trim().is_empty()).then_some(self.filter.as_str());
         let t = &mut self.tabs[tab];
+        // A line standing for entries listed elsewhere goes with the filter (or with what it
+        // stood for): its plugin row takes the cursor then.
+        let parent = keep
+            .as_ref()
+            .and_then(|key| t.lines.iter().find(|l| l.listed.is_some() && l.key == *key))
+            .and_then(|l| l.parent_key())
+            .map(str::to_string);
         t.lines = t.screen.lines(&t.expanded, filter);
-        let found = keep.and_then(|key| t.lines.iter().position(|l| l.key == key));
+        let found = keep
+            .into_iter()
+            .chain(parent)
+            .find_map(|key| t.lines.iter().position(|l| l.key == key));
         t.cursor = found.unwrap_or(t.cursor.min(t.lines.len().saturating_sub(1)));
     }
 
@@ -771,20 +781,26 @@ impl App {
 
     fn apply_filter(&mut self) {
         let needle = self.filter.trim().to_lowercase();
+        if needle.is_empty() {
+            // Nothing left to search for: the list as Esc leaves it.
+            self.unfiltered();
+            return;
+        }
         for i in 0..self.tabs.len() {
             let keep = self.key_of(i);
             self.rebuild(i, keep);
-            if needle.is_empty() {
-                continue;
-            }
-            // The cursor goes to the first matching row when its line is no match.
+            // The cursor goes to the first matching row when its line is no match; a line
+            // standing for matching entries listed elsewhere keeps it.
             let tab = &mut self.tabs[i];
             let matches = |line: &Line| {
                 tab.screen
                     .line_row(line)
                     .is_some_and(|r| r.name.to_lowercase().contains(&needle))
             };
-            let on_match = tab.lines.get(tab.cursor).is_some_and(matches);
+            let on_match = tab
+                .lines
+                .get(tab.cursor)
+                .is_some_and(|l| l.listed.is_some() || matches(l));
             if !on_match {
                 if let Some(first) = tab.lines.iter().position(matches) {
                     tab.cursor = first;
@@ -795,22 +811,21 @@ impl App {
 
     fn clear_filter(&mut self) {
         self.filter.clear();
+        self.unfiltered();
+    }
+
+    /// The list without a filter: what the filter showed stays in place (the lines above the
+    /// cursor open) and the cursor keeps its line, or its plugin row for a line that stood for
+    /// entries listed elsewhere.
+    fn unfiltered(&mut self) {
         for i in 0..self.tabs.len() {
-            let shown = self.key_of(i);
-            // What the filter showed stays in place: the lines above the cursor open.
-            if let Some(key) = &shown {
+            let keep = self.key_of(i);
+            if let Some(key) = &keep {
                 let parts: Vec<&str> = key.split('\n').collect();
                 for n in 1..parts.len() {
                     self.tabs[i].expanded.insert(parts[..n].join("\n"));
                 }
             }
-            // A line standing for entries listed elsewhere is gone without the filter: the
-            // cursor goes to its plugin row.
-            let t = &self.tabs[i];
-            let keep = match t.lines.get(t.cursor) {
-                Some(line) if line.listed.is_some() => Some(t.screen.key(line.group, &line.path)),
-                _ => shown,
-            };
             self.rebuild(i, keep);
         }
     }
@@ -861,19 +876,27 @@ impl App {
 
     /// `d`: the plan for the cursor row in one card.
     fn ask_off(&mut self) {
+        // A line standing for entries listed elsewhere changes nothing, read-only or not: it
+        // says where to pick one.
+        if let Some(listed) = self.cursor_line().and_then(|l| l.listed.clone()) {
+            self.info(format!(
+                "d turns off one thing: pick one {} · d on {} {} the plugin off",
+                listed.place,
+                listed.plugin,
+                if self.opts.readonly {
+                    "would turn"
+                } else {
+                    "turns"
+                }
+            ));
+            return;
+        }
         if !self.writable("d") {
             return;
         }
         let Some(line) = self.cursor_line().cloned() else {
             return;
         };
-        if let Some(listed) = &line.listed {
-            self.info(format!(
-                "d turns off one thing: pick one {} · d on {} turns the plugin off",
-                listed.place, listed.plugin
-            ));
-            return;
-        }
         let Some(row) = self.tab().screen.line_row(&line).cloned() else {
             let group = self.tab().screen.groups[line.group].name.clone();
             self.info(format!(

@@ -79,10 +79,11 @@ Rules that produce it:
 - **Footer honesty**: `345 items · 5 shown · filter: none` only when a filter or fold hides rows
   that would otherwise be visible; otherwise no footer (the panel is the footer).
 - **A search shows each thing once**: while a filter is on, a plugin's entries that a filtered
-  listing already shows are not repeated under its row in Plugins — one grey line per listing
-  stands in their place (`8 matching skills — listed above under Skill listing › slack`), acts on
-  nothing (d and w say where to pick one), and counts as one line in the footer, while the plugin
-  row keeps its d.
+  listing already shows are not repeated under its row in Plugins — one note per listing the
+  entries are in stands in their place (`8 matching skills — listed above under Skill listing ›
+  slack`), acts on nothing (d and w say where to pick one, read-only too), and counts as one line
+  in the footer, while the plugin row keeps its d; when the search is cleared or emptied, a cursor
+  on a note goes to its plugin row.
 
 ## Rules fixed after reading the first rebuild's frames (2026-10-13 19:1x)
 
