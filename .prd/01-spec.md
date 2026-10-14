@@ -242,11 +242,14 @@ until a bound capture turns it into `observed`.
   --capture <dir>` re-checks offline. No model request; `debug prompt-input` starts the configured
   MCP servers and may write into `CODEX_HOME`. Gate 1 is presence by id over the AGENTS.md message
   and each AGENTS file, `developer_instructions`, the skill listing and its entries, the built-in
-  blocks, the environment block, MCP servers and plugins; gate 2 is content, byte for byte
-  (tolerance 0): the AGENTS.md message as harn assembles it from the files, each listing line, and
-  every block with an exact prediction. A row Codex's output cannot settle is `not-checkable` — a
-  row of its own with its reason, never a failure — so a Codex verify is partial by construction
-  and every report says what is outside Codex's dump (`research/02` §8). The classes:
+  blocks, the environment block, MCP servers and plugins; gate 2 is content: the AGENTS.md message
+  as harn assembles it from the files must match byte for byte, and each skill listing line must
+  match as text; every other row with an exact prediction must match in size, to the byte
+  (tolerance 0), so a change of the same length there is not detected (the listing's total is a
+  size check that passes when its entries' own rows explain the whole difference). A row Codex's
+  output cannot settle is `not-checkable` — a row of its own with its reason, never a failure — so
+  a Codex verify is partial by construction and every report says what is outside Codex's dump
+  (`research/02` §8). The classes:
   - *outside the dump*: tool schemas (`tools[]`, built-in and MCP), the base instructions (the
     request's `instructions` field; `debug models` has the catalog's template, not the text
     sent) and hook output (`debug prompt-input` does not run hooks);
@@ -261,6 +264,11 @@ until a bound capture turns it into `observed`.
     started, so a bundled skill that is missing on one side or listed with another line is not
     checkable; the exemption needs proof on both sides (the row's signal, and the entry's path
     under the bundled root recorded at capture time);
+  - *no MCP list*: an MCP server row harn predicted, when `codex mcp list --json` gave no list in
+    the capture;
+  - *unlisted plugins*: a plugin harn predicted that `codex plugin list --json` does not report (it
+    lists configured marketplaces only) and that has no skill in the listing provably its own; with
+    such a skill it counts as seen;
   - *account plugins*: a plugin `codex plugin list --json` reports with source `remote`
     (installed for the ChatGPT account, named by no local file) that harn did not predict.
 - **Codex's model catalog is a snapshot.** The base instructions (when the config does not set

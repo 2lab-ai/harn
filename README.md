@@ -71,9 +71,10 @@ agent with nothing in this directory (Codex never ran on this machine) gets no t
 ## Codex
 
 `harn --agent codex [DIR]` shows what the Codex CLI loads in `DIR`: the AGENTS.md files (your
-`~/.codex/AGENTS.md` and the project's, root to `DIR`, under one 32 KiB cap), the skill listing,
-plugins (each with its skills, MCP servers and hooks), your own hooks and MCP servers, rules files
-and the blocks Codex writes itself (base instructions, permissions, environment, …). The header
+global `~/.codex/AGENTS.md`, then the project's, root to `DIR`; only the project's files share the
+`project_doc_max_bytes` budget, 32 KiB by default), the skill listing, plugins (each with its
+skills, MCP servers and hooks), your own hooks and MCP servers, rules files and the blocks Codex
+writes itself (base instructions, permissions, environment, …). The header
 says whether Codex trusts the folder, because that decides whether the project's
 `.codex/config.toml`, hooks and rules load at all; `i` explains it.
 
@@ -106,9 +107,10 @@ says whether Codex trusts the folder, because that decides whether the project's
   `$CODEX_HOME`; harn says so before it runs. The outputs stay in a private directory, and
   `harn verify --agent codex --capture <dir>` re-checks them offline. Each item Codex's output can
   show (the AGENTS.md files, the skill listing and its entries, the blocks, MCP servers and
-  plugins) must be on both sides, and where harn predicts its text exactly, the text must match
-  byte for byte. Some rows cannot be checked; the report lists each one with its reason instead of
-  failing:
+  plugins) must be on both sides. The AGENTS.md message must match byte for byte and each skill
+  listing line must match as text; every other row harn predicts exactly must match in size, to
+  the byte, so a change of the same length there is not detected. Some rows cannot be checked; the
+  report lists each one with its reason instead of failing:
   - tool schemas, the base instructions and hook output, because Codex's dump does not contain
     them;
   - rules files, because they land inside the permissions block, whose text harn does not
@@ -119,6 +121,9 @@ says whether Codex trusts the folder, because that decides whether the project's
     left them out;
   - Codex's bundled skills (`$CODEX_HOME/skills/.system`) that differ, because whichever Codex
     started last wrote them;
+  - MCP servers, when `codex mcp list --json` gave no list in the capture;
+  - plugins harn finds that `codex plugin list` does not show (it lists configured marketplaces
+    only), unless a skill in the listing is provably theirs; then the plugin counts as seen;
   - plugins installed for your ChatGPT account, because no local file names them.
 
 ## How it works

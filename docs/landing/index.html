@@ -370,10 +370,10 @@ contributes 8 skills · 5 commands · 1 MCP server</pre>
       <span class="num" aria-hidden="true">03</span>
       <div class="row-copy">
         <h3>Turn one off with one card.</h3>
-        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches: a settings key, written to <code>.claude/settings.local.json</code> for this project, never a wider scope silently.</p>
+        <p>Press <kbd>d</kbd>: one card says which file it writes, what leaves with it (<kbd>→</kbd> lists every item), what it saves and how to undo. <kbd>Enter</kbd> applies, <kbd>Esc</kbd> cancels. harn only uses the agent's official switches, never a wider scope silently. For Claude Code it writes a settings key to <code>.claude/settings.local.json</code>, for this project. For Codex it writes the item's own key to the narrowest <code>config.toml</code> Codex reads: the folder's <code>.codex/config.toml</code> when Codex trusts the folder, otherwise <code>~/.codex/config.toml</code>, which every project reads. The card names the file and the key.</p>
       </div>
       <figure class="ev">
-        <figcaption>Turn off · excerpt</figcaption>
+        <figcaption>Turn off · Claude Code excerpt</figcaption>
 <pre>Turn off alpha for this project
 Writes   .claude/settings.local.json → enabledPlugins.alpha = false
 Leaves   6 at start (alpha, 2 skills, 1 MCP server, 1 MCP instructions,
@@ -388,7 +388,7 @@ Enter apply · Esc</pre>
         <p>harn snapshots the file before every write and journals the change. <kbd>u</kbd> undoes the last one, <kbd>o</kbd> turns an item back on, and <code>harn undo</code> works later from the shell. The file comes back byte for byte.</p>
       </div>
       <figure class="ev">
-        <figcaption>Undo · excerpt</figcaption>
+        <figcaption>Undo · Claude Code excerpt</figcaption>
 <pre>Undo the last change
 alpha comes back on
 restores .claude/settings.local.json byte for byte
@@ -399,7 +399,7 @@ undone: alpha back · 6 more items load at start (77 → 83)</pre>
       <span class="num" aria-hidden="true">05</span>
       <div class="row-copy">
         <h3>Or let your agent trim.</h3>
-        <p><code>harn trim</code> asks your coding agent for a plan in one headless request, with no tools and one turn. It validates the plan, prints each change with the agent's reason and the bytes it frees, and applies only when you answer <span class="nw"><kbd>y</kbd>.</span> Inside Claude Code, <code>/harn-trim</code> runs the same loop.</p>
+        <p><code>harn trim</code> asks your coding agent for a plan in one headless request, with no tools and one turn. It validates the plan, prints each change with the agent's reason and the bytes it frees, and applies only when you answer <span class="nw"><kbd>y</kbd>.</span> Inside Claude Code, <code>/harn-trim</code> runs the same loop. <code>harn trim</code> works with Claude Code for now; for Codex it refuses.</p>
       </div>
       <figure class="ev">
         <figcaption>harn trim · first line and last line</figcaption>
@@ -431,7 +431,7 @@ apply? [y/N]</pre>
   <div class="faq-grid">
     <div class="qa">
       <h3>What does it change on disk?</h3>
-      <p>Nothing until you ask. When you turn something off, harn sets one official settings key, by default in <code>.claude/settings.local.json</code> for this project only, never a wider scope silently. It snapshots the file first and journals the change (<code>harn history</code>).</p>
+      <p>Nothing until you ask. When you turn something off, harn sets one official key, never a wider scope silently. For Claude Code it is a settings key, by default in <code>.claude/settings.local.json</code> for this project only. For Codex it is the item's own key in the folder's <code>.codex/config.toml</code> when Codex trusts the folder, else in <code>~/.codex/config.toml</code>. It snapshots the file first and journals the change (<code>harn history</code>).</p>
     </div>
     <div class="qa">
       <h3>How do I undo?</h3>

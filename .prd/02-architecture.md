@@ -66,9 +66,11 @@ src/
                      only in the files where it takes effect), config.rs (layers:
                      defaults · /etc/codex · user · profile · trusted .codex/config.toml root→cwd ·
                      managed, overlay applied to TOML; the three trust gates), instructions.rs
-                     (developer_instructions, the AGENTS message: one row per file + its framing,
-                     32 KiB shared budget), builtins.rs (base instructions, permissions,
-                     collaboration, apps, environment, multi-agent; `include_*`/`agents.enabled`),
+                     (developer_instructions, the AGENTS message: one row per file + its framing;
+                     the project chain shares one project_doc_max_bytes budget, 32 KiB by default,
+                     and the global AGENTS file is outside it), builtins.rs (base instructions,
+                     permissions, collaboration, apps, environment, multi-agent;
+                     `include_*`/`agents.enabled`),
                      skills.rs (roots trust-independent, 2 %/10k-token budget, listing + its
                      framing row), plugins.rs (plugin rows are switches; parts tagged
                      origin.plugin), hooks.rs (per handler; trusted_hash; `off:` rows), rules.rs,
@@ -105,10 +107,14 @@ src/
                      matched rows and regions
   verify/codex.rs    the Codex projection over codex's inspection output: gate 1 presence (AGENTS
                      message and files, developer_instructions, skill listing and entries, blocks,
-                     environment, MCP servers, plugins), gate 2 byte-exact content; not-checkable
-                     rows with their reason, never a failure: outside the dump (tools[], base
-                     instructions, hook output), rules files, runtime-decided blocks, catalog-gated
-                     rows, bundled .system skills, account plugins (source remote)
+                     environment, MCP servers, plugins), gate 2 content (the AGENTS message byte
+                     for byte, each skill listing line as text, every other exactly predicted row
+                     by size only, to the byte: a change of the same length there is not
+                     detected); not-checkable rows with their reason, never a failure: outside the
+                     dump (tools[], base instructions, hook output), rules files, runtime-decided
+                     blocks, catalog-gated rows, bundled .system skills, MCP servers when `mcp
+                     list` gave no list, plugins `plugin list` does not show and no listed skill
+                     is provably their own, account plugins (source remote)
   render/
     common.rs        shared cells: costs, freed, compact knobs (JSON pointer for Claude Code
                      settings, the dotted TOML key for Codex config.toml), header facts per agent
