@@ -42,8 +42,8 @@
 //! LEGACY RULE: an old capture binds a bundled root only when the recorded `CODEX_HOME` is unset
 //! (then `.codex` under the target's home) or is an absolute path with no `.` or `..` component,
 //! and only when codex listed exactly `<that home>/skills/.system` in its `### Skill roots`
-//! table. In every other case — a relative `CODEX_HOME` included — it binds nothing and warns.
-//! The reason: without the filesystem as it was at capture time, harn cannot prove what a
+//! table. In every other case — a relative `CODEX_HOME` included — it binds nothing, and warns
+//! when codex listed any skill (with an empty listing no row depends on the root). The reason: without the filesystem as it was at capture time, harn cannot prove what a
 //! relative or dotted home resolved to (`link/..` cancelled lexically is not where codex went
 //! when `link` was a symlink), nor whether a home was reached through a symlink.
 //!
