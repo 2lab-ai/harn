@@ -42,13 +42,14 @@
 //! descriptions round-robin (render.rs:331-453); that cut is not modelled: the rows keep their
 //! full size as an estimate and the listing says so.
 //!
-//! Bundled skills: codex writes its embedded skill set into `$CODEX_HOME/skills/.system` when it
-//! starts, and rewrites the folder whenever the fingerprint in its `.codex-system-skills.marker`
-//! differs from the embedded set's (`skills/src/lib.rs:59-121`). The set depends on the codex
-//! version, and every codex on a machine (an app, a daemon, the CLI) rewrites the same folder, so
-//! it holds the set of whichever codex started last. harn cannot know a codex's embedded set
-//! without its binary: each `.system` row carries a [`BUNDLED_SKILL`] signal, the tree one note
-//! ([`bundled_note`]), and verify does not count a `.system` difference as a failure.
+//! Bundled skills: when codex starts it compares the fingerprint of its embedded skill set with
+//! the one in `$CODEX_HOME/skills/.system/.codex-system-skills.marker`, and replaces the folder
+//! with its own set only when they differ (`skills/src/lib.rs:59-121`, the skip at `:84-99`). The
+//! set depends on the codex version, and every codex on a machine (an app, a daemon, the CLI)
+//! shares the folder, so it holds the set of the last codex whose fingerprint differed. harn
+//! cannot know a codex's embedded set without its binary: each `.system` row carries a
+//! [`BUNDLED_SKILL`] signal, the tree one note ([`bundled_note`]), and verify does not count a
+//! `.system` difference as a failure.
 //!
 //! Attribution (as the AGENTS.md message): each entry row costs its line + `\n`; the
 //! `skills_instructions` row costs the rest of the block (tags, intro, roots table, usage), so a
@@ -69,14 +70,14 @@ pub const CAP_STATE_UNKNOWN: &str =
     "codex skill listing budget unknown (the model's context window is unknown: see the model: signal); fit state unknown until a capture";
 
 /// Signal prefix of a skill row found in `$CODEX_HOME/skills/.system` (see the module docs): its
-/// presence and listing line are what the folder holds now, which the codex that runs may
-/// replace with its own set when it starts. Verify treats `item.signal.starts_with(BUNDLED_SKILL)`
+/// presence and listing line are what the folder holds now, which the codex that runs replaces
+/// with its own set when it starts if that set's fingerprint differs. Verify treats `item.signal.starts_with(BUNDLED_SKILL)`
 /// as not checkable when codex lists it otherwise or not at all.
 pub const BUNDLED_SKILL: &str = "bundled-skill:";
 
 /// What the `.system` folder holds, after its path; shared by the rows' signal, the tree note and
 /// verify's reasons.
-pub const BUNDLED_SKILLS_WHY: &str = "holds the system skills of the codex that started last (each codex rewrites it with its own embedded set when it starts, skills/src/lib.rs:59-121)";
+pub const BUNDLED_SKILLS_WHY: &str = "holds the system skills of the last codex that installed its set there (a codex replaces it with its own embedded set when that set's fingerprint differs from the folder's marker, skills/src/lib.rs:59-121)";
 
 /// The `origin.why` prefix under which the framing row records each line of the roots table it
 /// predicts (`` - `rN` = `<dir>` ``).
@@ -1288,12 +1289,14 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
 /// Which codex replaces the `.system` folder at start, as far as harn knows.
 fn installs_at_start(ctx: &Ctx) -> String {
     match &ctx.installed {
-        Installed::Version(v) => format!("the installed codex {v} installs its own set at start"),
+        Installed::Version(v) => {
+            format!("the installed codex {v} replaces it at start when its set's fingerprint differs")
+        }
         Installed::Unversioned => {
-            "the installed codex (version unknown) installs its own set at start".to_string()
+            "the installed codex (version unknown) replaces it at start when its set's fingerprint differs".to_string()
         }
         Installed::NotFound => {
-            "no codex is on PATH; the codex that runs installs its own set at start".to_string()
+            "no codex is on PATH; the codex that runs replaces it at start when its set's fingerprint differs".to_string()
         }
     }
 }

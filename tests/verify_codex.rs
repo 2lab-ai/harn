@@ -185,7 +185,13 @@ fn replace_in(items: &mut Value, input: usize, part: usize, from: &str, to: &str
 /// The Codex resolver's tree for the fixture, plus rows shaped like C2's skills/plugins and
 /// C3's hooks/rules/MCP rows, predicting what the unedited capture shows.
 fn statics(f: &Fx) -> Tree {
-    let mut tree = Codex.resolve(&target(f), None).expect("resolve");
+    statics_for(f, &target(f), true)
+}
+
+/// [`statics`] resolved for `t`; without the hand-built skill rows (framing and listing) when
+/// `with_skills` is false, so the resolver's own listing (if any) stands alone.
+fn statics_for(f: &Fx, t: &Target, with_skills: bool) -> Tree {
+    let mut tree = Codex.resolve(t, None).expect("resolve");
     let block = pristine_block(f, "skills_instructions");
     let entries = (ALPHA.len() + 1 + BETA.len() + 1) as u64;
     let mut framing = row(
@@ -205,7 +211,9 @@ fn statics(f: &Fx) -> Tree {
     .enumerate()
     .map(|(i, root)| format!("{ROOT_PREFIX}- `r{i}` = `{}`", root.display()))
     .collect();
-    tree.items.push(framing);
+    if with_skills {
+        tree.items.push(framing);
+    }
     let mut listing = row(
         Kind::SkillListing,
         Layer::Builtin,
@@ -244,7 +252,9 @@ fn statics(f: &Fx) -> Tree {
         skill.origin.plugin = plugin.map(str::to_string);
         listing.children.push(skill);
     }
-    tree.items.push(listing);
+    if with_skills {
+        tree.items.push(listing);
+    }
     tree.items.push(row(
         Kind::SystemPrompt,
         Layer::Builtin,
@@ -1709,7 +1719,7 @@ const SYS_PLUGIN: &str = "- plugin-creator: Create plugins. (file: r2/plugin-cre
 /// The resolver's signal on a `.system` row (`src/resolve/codex/skills.rs`).
 fn bundled_signal() -> String {
     format!(
-        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 installs its own set at start, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
     )
 }
 
@@ -2229,9 +2239,32 @@ fn any_other_framing_or_line_difference_beside_the_bundled_root_still_fails() {
 fn a_bundled_root_only_harn_read_is_not_a_framing_or_alias_failure() {
     // The other way round: the folder harn read had a bundled skill (r1), codex lists none.
     let f = fx();
-    let system = f.home.join(".codex/skills/.system");
     let c = capture(&f, |_| {});
-    let mut tree = statics(&f);
+    let mut tree = harn_read_bundled(&f, "imagegen", "Generate images.");
+    let report = verify_codex(&mut tree, &c);
+    assert!(failing(&report).is_empty(), "{:#?}", failing(&report));
+    let side = "only harn's prediction has (codex lists no bundled skill)";
+    assert_eq!(
+        reason(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions")
+        ),
+        shift_reason(
+            "the framing differs only in its `### Skill roots` table",
+            side
+        )
+    );
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Plugin, "demo-plugin:beta")),
+        shift_reason("its line differs only by its root's alias", side)
+    );
+}
+
+/// [`statics`] where the folder harn read holds one bundled skill: the `.system` root is `r1` of
+/// the predicted table (after the user root, before the plugin root, now `r2`).
+fn harn_read_bundled(f: &Fx, name: &str, description: &str) -> Tree {
+    let system = f.home.join(".codex/skills/.system");
+    let mut tree = statics(f);
     let added = format!("- `r1` = `{}`", system.display());
     let framing = tree
         .items
@@ -2258,56 +2291,33 @@ fn a_bundled_root_only_harn_read_is_not_a_framing_or_alias_failure() {
         .find(|c| c.label == "demo-plugin:beta")
         .unwrap();
     beta.origin.why = vec![format!("rendered: {}", BETA.replacen("r1/", "r2/", 1))];
-    let line = "- imagegen: Generate images. (file: r1/imagegen/SKILL.md)";
+    let line = format!("- {name}: {description} (file: r1/{name}/SKILL.md)");
     let mut sys = row(
         Kind::Skill,
         Layer::Builtin,
-        "imagegen",
+        name,
         Mode::Advertised,
         exact(line.len() as u64 + 1),
     );
     sys.origin.why = vec![format!("rendered: {line}")];
-    sys.origin.path = Some(system.join("imagegen/SKILL.md"));
+    sys.origin.path = Some(system.join(name).join("SKILL.md"));
     sys.signal = Some(bundled_signal());
     listing.children.insert(0, sys);
     listing.cost.predicted = listing.cost.predicted.map(|p| p + line.len() as u64 + 1);
-    let report = verify_codex(&mut tree, &c);
-    assert!(failing(&report).is_empty(), "{:#?}", failing(&report));
-    let side = "only harn's prediction has (codex lists no bundled skill)";
-    assert_eq!(
-        reason(
-            &report,
-            &id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions")
-        ),
-        shift_reason(
-            "the framing differs only in its `### Skill roots` table",
-            side
-        )
-    );
-    assert_eq!(
-        reason(&report, &id(Kind::Skill, Layer::Plugin, "demo-plugin:beta")),
-        shift_reason("its line differs only by its root's alias", side)
-    );
+    tree
 }
 
 #[test]
 fn a_listing_of_bundled_skills_only_where_harn_predicts_none_is_not_checkable() {
     // harn read no skill at all; the codex of the run lists only its bundled ones.
     let f = fx();
-    let system = f.home.join(".codex/skills/.system");
-    let only_bundled = |extra: &str| {
-        format!(
-            "<skills_instructions>\n## Skills\nA skill is a set of local instructions.\n### Skill roots\n- `r0` = `{}`\n### Available skills\n- imagegen: Generate images. (file: r0/imagegen/SKILL.md)\n{extra}</skills_instructions>",
-            system.display()
-        )
-    };
     let without_listing = |f: &Fx| {
         let mut tree = statics(f);
         tree.items
             .retain(|i| !i.id.ends_with("/skills_instructions") && i.kind != Kind::SkillListing);
         tree
     };
-    let block = only_bundled("");
+    let block = bundled_only_block(&f, "");
     let c = capture(&f, |items| *text_mut(items, 0, 1) = Value::String(block));
     let mut tree = without_listing(&f);
     let report = verify_codex(&mut tree, &c);
@@ -2324,10 +2334,13 @@ fn a_listing_of_bundled_skills_only_where_harn_predicts_none_is_not_checkable() 
 
     // One entry of another root: the listing is a prediction miss again.
     let f = fx();
-    let block = only_bundled(&format!(
-        "- alpha: The alpha skill. (file: {})\n",
-        f.home.join(".codex/skills/alpha/SKILL.md").display()
-    ));
+    let block = bundled_only_block(
+        &f,
+        &format!(
+            "- alpha: The alpha skill. (file: {})\n",
+            f.home.join(".codex/skills/alpha/SKILL.md").display()
+        ),
+    );
     let c = capture(&f, |items| *text_mut(items, 0, 1) = Value::String(block));
     let mut tree = without_listing(&f);
     let report = verify_codex(&mut tree, &c);
@@ -2341,4 +2354,249 @@ fn a_listing_of_bundled_skills_only_where_harn_predicts_none_is_not_checkable() 
             "codex/system-prompt/builtin/skills_instructions",
         ]
     );
+}
+
+// ---- review round: an exemption needs proof the contribution is bundled ---------------------------
+
+#[test]
+fn a_bundled_row_never_joins_a_user_skill_of_the_same_name() {
+    // The folder harn read held the old bundled `plugin-creator`; codex lists none, but the user
+    // root has a `plugin-creator` of its own.
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            "- plugin-creator: Mine. (file: r0/plugin-creator/SKILL.md)\n### How to use skills",
+        )
+    });
+    let mut tree = harn_read_bundled(&f, "plugin-creator", "Create plugins.");
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Builtin, "plugin-creator")),
+        format!("not in codex's listing in this run; {}", bundled_signal())
+    );
+    assert_eq!(
+        failing(&report)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<(String, RowVerdict)>>(),
+        vec![(
+            id(Kind::Skill, Layer::Unresolved, "plugin-creator"),
+            RowVerdict::SeenNotPredicted
+        )]
+    );
+    assert!(!report.passed);
+}
+
+#[test]
+fn a_user_row_never_joins_a_bundled_skill_of_the_same_name() {
+    // The reverse: harn predicts a user `imagegen`, codex lists only its bundled one.
+    let f = fx();
+    let c = capture(&f, |items| system_root_added(&f, items));
+    let mut tree = statics(&f);
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    let line = "- imagegen: Generate images. (file: r0/imagegen/SKILL.md)";
+    let mut user = row(
+        Kind::Skill,
+        Layer::User,
+        "imagegen",
+        Mode::Advertised,
+        exact(line.len() as u64 + 1),
+    );
+    user.origin.why = vec![format!("rendered: {line}")];
+    user.origin.path = Some(f.home.join(".codex/skills/imagegen/SKILL.md"));
+    listing.children.push(user);
+    listing.cost.predicted = listing.cost.predicted.map(|p| p + line.len() as u64 + 1);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(&report, &id(Kind::Skill, Layer::User, "imagegen")),
+        Some(&RowVerdict::PredictedNotSeen)
+    );
+    assert!(matches!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    assert!(!report.passed);
+}
+
+#[test]
+fn user_skills_of_a_codex_home_under_a_skills_system_dir_are_still_checked() {
+    // CODEX_HOME sits inside an unrelated `x/skills/.system/…`: only its own skills/.system is
+    // the bundled root (codex checks hidden dirs below the scan root only,
+    // ext/skills/src/loader/discovery.rs:179-185).
+    let f = fx();
+    let nested = f.root.join("x/skills/.system/state/codex-home");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::rename(f.home.join(".codex"), &nested).unwrap();
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), nested.display().to_string());
+    let dir = capture_dir(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            &format!("- `r0` = `{}`", f.home.join(".codex/skills").display()),
+            &format!("- `r0` = `{}`", nested.join("skills").display()),
+        );
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            "- gamma: Not in the tree. (file: r0/gamma/SKILL.md)\n### How to use skills",
+        );
+    });
+    let manifest = dir.join(oracle::MANIFEST);
+    let text = std::fs::read_to_string(&manifest).unwrap().replacen(
+        "\"CODEX_HOME\": null",
+        &format!("\"CODEX_HOME\": \"{}\"", nested.display()),
+        1,
+    );
+    std::fs::write(&manifest, text).unwrap();
+    let c = oracle::read_capture_dir(&dir, &t).unwrap();
+    assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    let mut tree = statics_for(&f, &t, true);
+    // The framing harn predicts names the user root under CODEX_HOME, as the resolver does.
+    let entries: u64 = c.skills.iter().map(|s| s.bytes()).sum();
+    let framing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.id.ends_with("/skills_instructions"))
+        .unwrap();
+    framing.cost = exact(c.block("skills_instructions").unwrap().bytes() - entries);
+    framing.origin.why[0] = format!(
+        "{ROOT_PREFIX}- `r0` = `{}`",
+        nested.join("skills").display()
+    );
+    let report = verify_codex(&mut tree, &c);
+    // gamma's line is the only difference, and it is checked.
+    assert_eq!(
+        failing(&report)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<(String, RowVerdict)>>(),
+        vec![(
+            id(Kind::Skill, Layer::Unresolved, "gamma"),
+            RowVerdict::SeenNotPredicted
+        )]
+    );
+    assert!(!report.passed);
+}
+
+/// The fixture with `home/.codex/skills/.system/imagegen` hidden from the listing
+/// (`allow_implicit_invocation: false`): the folder harn reads lists nothing.
+fn quiet_bundled(f: &Fx) {
+    let dir = f.home.join(".codex/skills/.system/imagegen");
+    write(
+        &dir.join("SKILL.md"),
+        "---\nname: imagegen\ndescription: Old images.\n---\nbody\n",
+    );
+    write(
+        &dir.join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    );
+}
+
+/// The whole `<skills_instructions>` block codex renders with only bundled entries (and `extra`
+/// lines after them).
+fn bundled_only_block(f: &Fx, extra: &str) -> String {
+    format!(
+        "<skills_instructions>\n## Skills\nA skill is a set of local instructions.\n### Skill roots\n- `r0` = `{}`\n### Available skills\n- imagegen: Generate images. (file: r0/imagegen/SKILL.md)\n{extra}</skills_instructions>",
+        f.home.join(".codex/skills/.system").display()
+    )
+}
+
+#[test]
+fn a_retained_inactive_listing_with_only_bundled_entries_observed_is_not_checkable() {
+    // The resolver keeps the listing as `none` (every bundled skill it read is hidden); the
+    // codex of the run advertises its own bundled copy.
+    let f = fx();
+    quiet_bundled(&f);
+    let block = bundled_only_block(&f, "");
+    let c = capture(&f, |items| *text_mut(items, 0, 1) = Value::String(block));
+    let mut tree = statics_for(&f, &target(&f), false);
+    let container = find(&tree, &id(Kind::SkillListing, Layer::Builtin, "skills"));
+    assert_eq!(container.mode, Mode::None, "the resolver's own container");
+    assert_eq!(container.children.len(), 1);
+    let report = verify_codex(&mut tree, &c);
+    assert!(report.passed, "{:#?}", failing(&report));
+    for row in [
+        id(Kind::SkillListing, Layer::Builtin, "skills"),
+        id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions"),
+        id(Kind::Skill, Layer::Builtin, "imagegen"),
+    ] {
+        assert!(
+            matches!(
+                verdict(&report, &row),
+                Some(RowVerdict::NotCheckable { .. })
+            ),
+            "{row}: {:?}",
+            verdict(&report, &row)
+        );
+    }
+
+    // An ordinary entry beside it: a prediction miss again.
+    let f = fx();
+    quiet_bundled(&f);
+    let block = bundled_only_block(
+        &f,
+        &format!(
+            "- alpha: The alpha skill. (file: {})\n",
+            f.home.join(".codex/skills/alpha/SKILL.md").display()
+        ),
+    );
+    let c = capture(&f, |items| *text_mut(items, 0, 1) = Value::String(block));
+    let mut tree = statics_for(&f, &target(&f), false);
+    let report = verify_codex(&mut tree, &c);
+    let mut failing_ids: Vec<&str> = failing(&report).iter().map(|(i, _)| i.as_str()).collect();
+    failing_ids.sort();
+    assert_eq!(
+        failing_ids,
+        vec![
+            "codex/skill-listing/builtin/skills",
+            "codex/skill/unresolved/alpha",
+            "codex/system-prompt/builtin/skills_instructions",
+        ]
+    );
+}
+
+#[test]
+fn an_alias_is_exempt_only_when_the_tables_agree_without_the_bundled_root() {
+    // Codex adds the bundled root and also a repo root harn did not predict: beta's alias moves
+    // for a reason that is not the bundled root, so its line is a mismatch again.
+    let f = fx();
+    let c = capture(&f, |items| {
+        system_root_added(&f, items);
+        replace_in(
+            items,
+            0,
+            1,
+            "### Available skills\n",
+            &format!(
+                "- `r3` = `{}`\n### Available skills\n",
+                f.repo.join(".agents/skills").display()
+            ),
+        );
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(matches!(
+        verdict(&report, &id(Kind::Skill, Layer::Plugin, "demo-plugin:beta")),
+        Some(RowVerdict::ContentMismatch { .. })
+    ));
+    assert!(matches!(
+        verdict(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions")
+        ),
+        Some(RowVerdict::ContentMismatch { .. })
+    ));
 }

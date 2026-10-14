@@ -623,10 +623,10 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
     skill(&f.codex.join("skills"), "notes", "Keep notes.");
     user_config(&f, "");
     let signal = format!(
-        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 installs its own set at start, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
     );
     let note = format!(
-        "bundled skills: ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 installs its own set at start, so the presence and listing lines of its 3 skills are confirmed by `harn verify --run --agent codex`"
+        "bundled skills: ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 replaces it at start when its set's fingerprint differs, so the presence and listing lines of its 3 skills are confirmed by `harn verify --run --agent codex`"
     );
     let t = resolve(&ctarget(&f), None);
     for name in ["imagegen", "skill-creator", "quiet"] {
@@ -657,7 +657,7 @@ fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
     let r = row(&t, "codex/skill/builtin/imagegen");
     assert!(
         r.signal.as_deref().is_some_and(|s| s.contains(
-            "; no codex is on PATH; the codex that runs installs its own set at start, so"
+            "; no codex is on PATH; the codex that runs replaces it at start when its set's fingerprint differs, so"
         )),
         "{:?}",
         r.signal

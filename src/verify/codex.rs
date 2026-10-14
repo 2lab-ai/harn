@@ -20,16 +20,20 @@
 //!   account, named by no local file) that harn did not predict is not checkable
 //!   ([`ACCOUNT_PLUGIN`]); a skill it brings into the listing is still an entry of its own.
 //! - **Bundled skills** (`$CODEX_HOME/skills/.system`, [`BUNDLED_SKILL`]): the folder holds the
-//!   set of whichever codex started last, so a `.system` skill harn predicted and codex did not
-//!   list, one codex listed from its `.system` root that harn did not predict, and one listed with
-//!   another line are not checkable, never a failure. The static side is known by the row's
-//!   signal, the capture side by the entry's `SKILL.md` path ([`in_bundled_root`]). When the
-//!   bundled root's line is in only one of the two `### Skill roots` tables ([`RootShift`]: codex
+//!   set of the last codex that installed one, so a `.system` skill harn predicted and codex did
+//!   not list, one codex listed from its `.system` root that harn did not predict, and one listed
+//!   with another line are not checkable, never a failure. An exemption needs proof that the
+//!   contribution is bundled: on the static side the row's signal, on the capture side the
+//!   entry's `SKILL.md` path under the bundled root of this run ([`BundledRoot`]:
+//!   `<CODEX_HOME>/skills/.system`, as a path prefix, never a dir name). A bundled row and an
+//!   entry not proven bundled (or the reverse) are never joined, even by name. When the bundled
+//!   root's line is in only one of the two `### Skill roots` tables ([`RootShift`]: codex
 //!   installs `.system` at start where harn read none, or lists none where harn read some), the
-//!   roots after it are renumbered: the framing row whose difference is only that line and those
-//!   aliases, and an entry whose line differs only by its root's alias, are not checkable with a
-//!   [`BUNDLED_SKILL`] reason; any other difference still fails. A listing codex renders where
-//!   harn predicts none is not checkable when every entry in it is from the bundled root.
+//!   roots after it are renumbered: once the tables are equal without that line and renumbered,
+//!   the framing row whose size differs only by it, and an entry whose line differs only by its
+//!   root's alias, are not checkable with a [`BUNDLED_SKILL`] reason; any other difference still
+//!   fails. A listing codex renders where harn predicts none, or keeps as `none` (every skill it
+//!   read hidden from the listing), is not checkable when every entry in it is proven bundled.
 //!   Rows whose mode (or an ancestor's) is `runtime`, `none` or `on-demand` are expected absent; a
 //!   plugin row's mode is its load state. Blocks in [`RUNTIME_DECIDED`] that did not render are
 //!   a warning, not a diff.
@@ -61,8 +65,7 @@ use crate::oracle::codex::{
     names, parse_root_line, parse_skill_roots, CodexCapture, LISTED_PREFIX, REMOTE_SOURCE,
 };
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What codex's inspection commands do not show (acceptance A8); stated in every Codex report.
 pub const OUTSIDE_THE_DUMP: &str = "outside codex's dump, not verified: tools[] (built-in and MCP tool schemas), the base instructions sent as the request's `instructions` field (`codex debug models` has the catalog template, not the text sent), and hook output (SessionStart / UserPromptSubmit run inside run_turn, which `codex debug prompt-input` does not enter: core/src/prompt_debug.rs:89)";
@@ -215,6 +218,11 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
             .path
             .as_deref()
     };
+    // Provenance: a skill row joins an entry only if both are bundled or neither is.
+    let root = BundledRoot::new(static_tree, capture);
+    let same_provenance = |s: &Node, ci: usize| {
+        s.kind != Kind::Skill || bundled(s).is_some() == root.holds(observed_path(ci))
+    };
     // Pass 1: same name and the same file (listing entries); pass 2: same name.
     for by_path in [true, false] {
         for (si, s) in statics.iter().enumerate() {
@@ -227,6 +235,7 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                 .unwrap_or(&[]);
             let pick = candidates.iter().copied().find(|&ci| {
                 static_of[ci].is_none()
+                    && same_provenance(s, ci)
                     && (!by_path || same_file(static_path(si), observed_path(ci)))
             });
             if let Some(ci) = pick {
@@ -256,7 +265,16 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
     }
 
     // ---- static side ---------------------------------------------------------------------------
-    let shift = RootShift::new(static_tree, &statics, capture);
+    let shift = RootShift::new(static_tree, &statics, capture, &root);
+    let only_bundled =
+        !capture.skills.is_empty() && capture.skills.iter().all(|e| root.holds(e.path.as_deref()));
+    let whole_block = || {
+        RowVerdict::NotCheckable {
+        reason: format!(
+            "{BUNDLED_SKILL} every entry codex lists is from its skills/.system folder, and harn read no skill to list: that folder {BUNDLED_SKILLS_WHY}"
+        ),
+    }
+    };
     let mut trimmed = 0usize;
     for (si, s) in statics.iter().enumerate() {
         if in_agents(si) {
@@ -270,6 +288,8 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                         Some(signal) => RowVerdict::NotCheckable {
                             reason: format!("listed by codex in this run, not predicted; {signal}"),
                         },
+                        // Kept as `none` (every skill harn read is hidden from the listing).
+                        None if s.kind == Kind::SkillListing && only_bundled => whole_block(),
                         None => RowVerdict::SeenNotPredicted,
                     },
                 ));
@@ -394,7 +414,7 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                 relayer(&mut item, statics[sp].layer);
                 attach.push((statics[sp].path.clone(), item));
             }
-            _ if c.kind == Kind::Skill && in_bundled_root(observed_path(ci)) => {
+            _ if c.kind == Kind::Skill && root.holds(observed_path(ci)) => {
                 out.rows.push((
                     c.id.clone(),
                     RowVerdict::NotCheckable {
@@ -409,23 +429,12 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                     },
                 ));
             }
-            // The whole block, where harn read no skill: every entry is a bundled one.
+            // The whole block, where harn predicts none: every entry is a bundled one.
             _ if (c.kind == Kind::SkillListing
                 || (c.kind == Kind::SystemPrompt && c.name == names::SKILLS_FRAMING))
-                && !capture.skills.is_empty()
-                && capture
-                    .skills
-                    .iter()
-                    .all(|e| in_bundled_root(e.path.as_deref())) =>
+                && only_bundled =>
             {
-                out.rows.push((
-                    c.id.clone(),
-                    RowVerdict::NotCheckable {
-                        reason: format!(
-                            "{BUNDLED_SKILL} every entry codex lists is from its skills/.system folder, and harn read no skill to list: that folder {BUNDLED_SKILLS_WHY}"
-                        ),
-                    },
-                ));
+                out.rows.push((c.id.clone(), whole_block()));
             }
             _ if c.kind == Kind::Plugin && account_plugin(capture, &c.name) => {
                 out.rows.push((
@@ -559,25 +568,50 @@ fn bundled(node: &Node) -> Option<&str> {
         .filter(|g| node.kind == Kind::Skill && g.starts_with(BUNDLED_SKILL))
 }
 
-/// Whether a listed `SKILL.md` lies in codex's bundled root, `$CODEX_HOME/skills/.system`: its
-/// nearest hidden ancestor is `.system` inside a `skills` dir. Codex prunes hidden dirs when it
-/// walks a root (`ext/skills/src/loader/discovery.rs:54-191`), so no dir below a root is hidden
-/// and only the bundled root puts `.system` there — whether the line names it through the
-/// `### Skill roots` table or by its absolute path.
-fn in_bundled_root(path: Option<&Path>) -> bool {
-    let hidden = |dir: &&Path| {
-        dir.file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|n| n.starts_with('.'))
-    };
-    path.and_then(|p| p.ancestors().skip(1).find(hidden))
-        .is_some_and(bundled_dir)
-}
+/// Codex's bundled root for this run, `<CODEX_HOME>/skills/.system` (`ext/skills/src/host_roots.rs:56-131`):
+/// `CODEX_HOME` as the run saw it, else `.codex` in the tree's home
+/// (`utils/home-dir/src/lib.rs:13-17`), as written and resolved (codex prints the resolved root).
+/// Empty when neither is known: then nothing is proven bundled.
+struct BundledRoot(Vec<PathBuf>);
 
-/// `…/skills/.system`: the bundled root.
-fn bundled_dir(dir: &Path) -> bool {
-    dir.file_name() == Some(OsStr::new(".system"))
-        && dir.parent().and_then(Path::file_name) == Some(OsStr::new("skills"))
+impl BundledRoot {
+    fn new(tree: &Tree, capture: &CodexCapture) -> BundledRoot {
+        let home = match capture
+            .env
+            .get("CODEX_HOME")
+            .and_then(Option::as_deref)
+            .filter(|v| !v.is_empty())
+        {
+            Some(v) => Some(PathBuf::from(v)),
+            None => tree.home.as_ref().map(|h| h.join(".codex")),
+        };
+        let mut out: Vec<PathBuf> = Vec::new();
+        if let Some(home) = home {
+            let root = home.join("skills/.system");
+            let resolved = [
+                std::fs::canonicalize(&root).ok(),
+                std::fs::canonicalize(&home)
+                    .ok()
+                    .map(|h| h.join("skills/.system")),
+            ];
+            for p in std::iter::once(root).chain(resolved.into_iter().flatten()) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        BundledRoot(out)
+    }
+
+    /// Whether `path` (a listed `SKILL.md`) lies under the bundled root, by path components.
+    fn holds(&self, path: Option<&Path>) -> bool {
+        path.is_some_and(|p| self.0.iter().any(|r| p != r && p.starts_with(r)))
+    }
+
+    /// Whether `dir` (a roots-table value) is the bundled root.
+    fn is(&self, dir: &str) -> bool {
+        self.0.iter().any(|r| Path::new(dir) == r)
+    }
 }
 
 /// The roots table harn predicts (its framing row's [`ROOT_PREFIX`] lines) and codex's, when the
@@ -589,10 +623,18 @@ struct RootShift {
     listed: Vec<(String, String)>,
     /// Whether the bundled root's line is codex's (else harn's).
     in_listing: bool,
+    /// The two tables are equal without the bundled root's line, aliases renumbered: only then
+    /// can that line explain a difference.
+    agree: bool,
 }
 
 impl RootShift {
-    fn new(tree: &Tree, statics: &[Node], capture: &CodexCapture) -> Option<RootShift> {
+    fn new(
+        tree: &Tree,
+        statics: &[Node],
+        capture: &CodexCapture,
+        root: &BundledRoot,
+    ) -> Option<RootShift> {
         let framing = statics
             .iter()
             .find(|s| s.kind == Kind::SystemPrompt && s.name == names::SKILLS_FRAMING)?;
@@ -610,28 +652,27 @@ impl RootShift {
                 .into_iter()
                 .map(owned)
                 .collect();
-        let bundled =
-            |roots: &[(String, String)]| roots.iter().any(|(_, r)| bundled_dir(Path::new(r)));
+        let bundled = |roots: &[(String, String)]| roots.iter().any(|(_, r)| root.is(r));
         let in_listing = bundled(&listed);
+        let agree = renumbered(&predicted, root) == renumbered(&listed, root);
         (in_listing != bundled(&predicted)).then_some(RootShift {
             predicted,
             listed,
             in_listing,
+            agree,
         })
     }
 
-    /// A framing of `p` predicted and `o` observed bytes: the same size without the roots
-    /// section, and the same tables once the bundled root's line is dropped and the aliases
-    /// renumbered.
+    /// A framing of `p` predicted and `o` observed bytes: the tables agree, and the size is the
+    /// same without the roots section.
     fn explains_framing(&self, p: u64, o: u64) -> bool {
         let rest = |total: u64, roots: &[(String, String)]| total as i128 - section(roots) as i128;
-        rest(p, &self.predicted) == rest(o, &self.listed)
-            && renumbered(&self.predicted) == renumbered(&self.listed)
+        self.agree && rest(p, &self.predicted) == rest(o, &self.listed)
     }
 
-    /// Two listing lines that name the same file once each alias is expanded.
+    /// The tables agree, and the two lines name the same file once each alias is expanded.
     fn explains_line(&self, predicted: &str, listed: &str) -> bool {
-        expand(predicted, &self.predicted) == expand(listed, &self.listed)
+        self.agree && expand(predicted, &self.predicted) == expand(listed, &self.listed)
     }
 
     fn reason(&self, what: &str) -> String {
@@ -665,10 +706,10 @@ fn root_line(alias: &str, root: &str) -> String {
 }
 
 /// The table without the bundled root, aliases numbered again from `r0`.
-fn renumbered(roots: &[(String, String)]) -> Vec<String> {
+fn renumbered(roots: &[(String, String)], bundled: &BundledRoot) -> Vec<String> {
     roots
         .iter()
-        .filter(|(_, root)| !bundled_dir(Path::new(root)))
+        .filter(|(_, root)| !bundled.is(root))
         .enumerate()
         .map(|(i, (_, root))| root_line(&format!("r{i}"), root))
         .collect()
@@ -1048,21 +1089,23 @@ mod tests {
     }
 
     #[test]
-    fn only_the_bundled_root_is_a_bundled_path() {
-        let yes = |p: &str| in_bundled_root(Some(Path::new(p)));
+    fn only_paths_under_this_runs_bundled_root_are_bundled() {
+        let root = BundledRoot(vec![PathBuf::from("/h/.codex/skills/.system")]);
+        let yes = |p: &str| root.holds(Some(Path::new(p)));
         assert!(yes("/h/.codex/skills/.system/imagegen/SKILL.md"));
         assert!(yes("/h/.codex/skills/.system/a/b/SKILL.md"));
-        assert!(yes("/h/custom-home/skills/.system/imagegen/SKILL.md"));
-        // The user root, a plugin cache root, a dir only named like it.
+        // Another codex home's, a dir only spelled like it, a prefix that is not a component.
+        assert!(!yes("/other/.codex/skills/.system/imagegen/SKILL.md"));
+        assert!(!yes("/h/.codex/skills/.system-old/imagegen/SKILL.md"));
         assert!(!yes("/h/.codex/skills/alpha/SKILL.md"));
-        assert!(!yes(
-            "/h/.codex/plugins/cache/m/p/1.0.0/skills/beta/SKILL.md"
-        ));
-        assert!(!yes("/h/x/.system/alpha/SKILL.md"));
-        assert!(!yes("/etc/codex/skills/admin/SKILL.md"));
-        // A root under such a dir: its own hidden dir comes first.
-        assert!(!yes("/w/skills/.system/repo/.agents/skills/alpha/SKILL.md"));
-        assert!(!in_bundled_root(None));
+        assert!(!yes("/h/.codex/skills/.system"));
+        assert!(!root.holds(None));
+        assert!(root.is("/h/.codex/skills/.system"));
+        assert!(!root.is("/w/skills/.system"));
+        // Nothing is bundled without a known root.
+        assert!(
+            !BundledRoot(Vec::new()).holds(Some(Path::new("/h/.codex/skills/.system/x/SKILL.md")))
+        );
     }
 
     #[test]
