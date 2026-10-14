@@ -42,6 +42,14 @@
 //! descriptions round-robin (render.rs:331-453); that cut is not modelled: the rows keep their
 //! full size as an estimate and the listing says so.
 //!
+//! Bundled skills: codex writes its embedded skill set into `$CODEX_HOME/skills/.system` when it
+//! starts, and rewrites the folder whenever the fingerprint in its `.codex-system-skills.marker`
+//! differs from the embedded set's (`skills/src/lib.rs:59-121`). The set depends on the codex
+//! version, and every codex on a machine (an app, a daemon, the CLI) rewrites the same folder, so
+//! it holds the set of whichever codex started last. harn cannot know a codex's embedded set
+//! without its binary: each `.system` row carries a [`BUNDLED_SKILL`] signal, the tree one note
+//! ([`bundled_note`]), and verify does not count a `.system` difference as a failure.
+//!
 //! Attribution (as the AGENTS.md message): each entry row costs its line + `\n`; the
 //! `skills_instructions` row costs the rest of the block (tags, intro, roots table, usage), so a
 //! sum over rows counts every byte once. The `skills` listing row is a container (its cost is the
@@ -49,7 +57,7 @@
 
 use super::config::Source;
 use super::plugins::Plugin;
-use super::{config_knobs, new_item, Ctx};
+use super::{config_knobs, new_item, Ctx, Installed};
 use crate::model::{item_id, Agent, Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use crate::resolve::claude::{cost_na, frontmatter, fs};
 use serde_json::{json, Value};
@@ -59,6 +67,16 @@ use std::path::{Path, PathBuf};
 /// Pushed to `Tree.warnings` when the budget cannot be computed (the window is unknown to harn).
 pub const CAP_STATE_UNKNOWN: &str =
     "codex skill listing budget unknown (the model's context window is unknown: see the model: signal); fit state unknown until a capture";
+
+/// Signal prefix of a skill row found in `$CODEX_HOME/skills/.system` (see the module docs): its
+/// presence and listing line are what the folder holds now, which the codex that runs may
+/// replace with its own set when it starts. Verify treats `item.signal.starts_with(BUNDLED_SKILL)`
+/// as not checkable when codex lists it otherwise or not at all.
+pub const BUNDLED_SKILL: &str = "bundled-skill:";
+
+/// What the `.system` folder holds, after its path; shared by the rows' signal, the tree note and
+/// verify's reasons.
+pub const BUNDLED_SKILLS_WHY: &str = "holds the system skills of the codex that started last (each codex rewrites it with its own embedded set when it starts, skills/src/lib.rs:59-121)";
 
 /// The listing container's id name and the framing row's id name.
 pub(crate) const LISTING: &str = "skills";
@@ -1200,6 +1218,11 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
             (SkillScope::System, None) => {
                 knobs.extend(bundled_knob.iter().cloned());
                 item.origin.why.extend(bundled_bad.clone());
+                item.signal = Some(format!(
+                    "{BUNDLED_SKILL} {} {BUNDLED_SKILLS_WHY}; {}, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`",
+                    ctx.display(&ctx.codex_home.join("skills/.system")),
+                    installs_at_start(ctx)
+                ));
             }
             _ => {}
         }
@@ -1256,6 +1279,41 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
     }
     out.push(container);
     out
+}
+
+/// Which codex replaces the `.system` folder at start, as far as harn knows.
+fn installs_at_start(ctx: &Ctx) -> String {
+    match &ctx.installed {
+        Installed::Version(v) => format!("the installed codex {v} installs its own set at start"),
+        Installed::Unversioned => {
+            "the installed codex (version unknown) installs its own set at start".to_string()
+        }
+        Installed::NotFound => {
+            "no codex is on PATH; the codex that runs installs its own set at start".to_string()
+        }
+    }
+}
+
+/// The tree's one note on the `.system` folder, when a listing row came from it.
+pub(crate) fn bundled_note(ctx: &Ctx, items: &[Item]) -> Option<String> {
+    let rows = items
+        .iter()
+        .filter(|i| i.kind == Kind::SkillListing)
+        .flat_map(|l| &l.children)
+        .filter(|c| {
+            c.signal
+                .as_deref()
+                .is_some_and(|g| g.starts_with(BUNDLED_SKILL))
+        })
+        .count();
+    (rows > 0).then(|| {
+        format!(
+            "bundled skills: {} {BUNDLED_SKILLS_WHY}; {}, so the presence and listing lines of its {rows} skill{} are confirmed by `harn verify --run --agent codex`",
+            ctx.display(&ctx.codex_home.join("skills/.system")),
+            installs_at_start(ctx),
+            if rows == 1 { "" } else { "s" }
+        )
+    })
 }
 
 /// The block minus its entry lines: tags, intro, roots table, usage section.

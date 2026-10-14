@@ -9,7 +9,8 @@ use harn::model::{item_id, walk, Agent, Cost, Item, Kind, Layer, Mode, Origin, T
 use harn::oracle::codex::{self as oracle, CodexCapture};
 use harn::resolve::{Codex, Resolver};
 use harn::verify::{
-    verify_codex, RowVerdict, VerifyReport, CATALOG_GATED, OUTSIDE_THE_DUMP, RUNTIME_DECIDED,
+    verify_codex, RowVerdict, VerifyReport, ACCOUNT_PLUGIN, BUNDLED_SKILL, BUNDLED_SKILLS_WHY,
+    CATALOG_GATED, OUTSIDE_THE_DUMP, RUNTIME_DECIDED,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -1686,4 +1687,376 @@ fn rr4_a_fifo_manifest_is_refused_without_blocking() {
         .expect("read_capture_dir blocked on a FIFO")
         .expect_err("a FIFO manifest is refused");
     assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+}
+
+// ---- bundled skills and account plugins ----------------------------------------------------------
+
+const SYS_CREATOR: &str = "- skill-creator: Create skills. (file: r2/skill-creator/SKILL.md)";
+const SYS_PLUGIN: &str = "- plugin-creator: Create plugins. (file: r2/plugin-creator/SKILL.md)";
+
+/// The resolver's signal on a `.system` row (`src/resolve/codex/skills.rs`).
+fn bundled_signal() -> String {
+    format!(
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 installs its own set at start, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
+    )
+}
+
+/// The fixture with a `.system` root (`r2`) whose folder, as harn read it, holds `skill-creator`
+/// and `plugin-creator`, while the codex of the run lists its own set: `imagegen`, and
+/// `skill-creator` with another description (as two codex versions rewriting `.system` leave
+/// it). `edit` changes the capture further. The static framing predicts the roots table with the
+/// `.system` root, as the resolver does when it lists a `.system` skill.
+fn bundled_case(f: &Fx, edit: impl FnOnce(&mut Value)) -> (Tree, CodexCapture) {
+    let system = f.home.join(".codex/skills/.system");
+    let c = capture(f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### Available skills\n",
+            &format!("- `r2` = `{}`\n### Available skills\n", system.display()),
+        );
+        // Catalog order: System first.
+        replace_in(
+            items,
+            0,
+            1,
+            "### Available skills\n",
+            "### Available skills\n- imagegen: Generate images. (file: r2/imagegen/SKILL.md)\n- skill-creator: Create or update skills. (file: r2/skill-creator/SKILL.md)\n",
+        );
+        edit(items);
+    });
+    let mut tree = statics(f);
+    let entries: u64 = c.skills.iter().map(|s| s.bytes()).sum();
+    let observed_framing = c.block("skills_instructions").unwrap().bytes() - entries;
+    tree.items
+        .iter_mut()
+        .find(|i| i.id.ends_with("/skills_instructions"))
+        .unwrap()
+        .cost = exact(observed_framing);
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    for (name, line) in [
+        ("skill-creator", SYS_CREATOR),
+        ("plugin-creator", SYS_PLUGIN),
+    ] {
+        let bytes = line.len() as u64 + 1;
+        let mut skill = row(
+            Kind::Skill,
+            Layer::Builtin,
+            name,
+            Mode::Advertised,
+            exact(bytes),
+        );
+        skill.origin.why = vec![format!("rendered: {line}")];
+        skill.origin.path = Some(system.join(name).join("SKILL.md"));
+        skill.signal = Some(bundled_signal());
+        listing.children.insert(0, skill);
+        listing.cost.predicted = listing.cost.predicted.map(|p| p + bytes);
+    }
+    (tree, c)
+}
+
+fn reason<'a>(report: &'a VerifyReport, id: &str) -> &'a str {
+    match verdict(report, id) {
+        Some(RowVerdict::NotCheckable { reason }) => reason,
+        other => panic!("{id}: not checkable expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn bundled_skills_codex_lists_otherwise_are_not_checkable() {
+    let f = fx();
+    let (mut tree, c) = bundled_case(&f, |_| {});
+    let report = verify_codex(&mut tree, &c);
+    assert!(failing(&report).is_empty(), "{:#?}", failing(&report));
+    assert!(report.passed);
+
+    let signal = bundled_signal();
+    // Predicted from the folder, not listed by codex.
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Builtin, "plugin-creator")),
+        format!("not in codex's listing in this run; {signal}")
+    );
+    // Listed by codex from its `.system` root, not in the folder harn read.
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        format!(
+            "{BUNDLED_SKILL} listed by codex 0.160.1 from its skills/.system folder, not predicted: that folder {BUNDLED_SKILLS_WHY}"
+        )
+    );
+    // In both, with another line: the line's first differing byte stays in the notes.
+    let creator = id(Kind::Skill, Layer::Builtin, "skill-creator");
+    assert_eq!(
+        reason(&report, &creator),
+        format!("codex lists it with another line (see the note); {signal}")
+    );
+    let at = SYS_CREATOR.find("skills.").unwrap();
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.starts_with(&creator) && n.contains(&format!("differs from byte {at}"))),
+        "{:#?}",
+        report.notes
+    );
+    // The listing's total: its entries explain the whole difference.
+    assert_eq!(
+        verdict(&report, &id(Kind::SkillListing, Layer::Builtin, "skills")),
+        Some(&RowVerdict::Seen)
+    );
+    // The other entries are checked as before.
+    for row in [
+        id(Kind::Skill, Layer::User, "alpha"),
+        id(Kind::Skill, Layer::Plugin, "demo-plugin:beta"),
+        id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions"),
+    ] {
+        assert_eq!(verdict(&report, &row), Some(&RowVerdict::Seen), "{row}");
+    }
+}
+
+#[test]
+fn a_bundled_skill_the_folder_keeps_out_of_the_listing_is_not_checkable_when_listed() {
+    // The folder's copy sets `allow_implicit_invocation: false`; the codex of the run lists its
+    // own copy.
+    let f = fx();
+    let (mut tree, c) = bundled_case(&f, |_| {});
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    let mut quiet = row(
+        Kind::Skill,
+        Layer::Builtin,
+        "imagegen",
+        Mode::OnDemand,
+        na(),
+    );
+    quiet.origin.path = Some(f.home.join(".codex/skills/.system/imagegen/SKILL.md"));
+    quiet.signal = Some(bundled_signal());
+    listing.children.insert(0, quiet);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Builtin, "imagegen")),
+        format!(
+            "listed by codex in this run, not predicted; {}",
+            bundled_signal()
+        )
+    );
+    assert_eq!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        None,
+        "joined to the row: not reported twice"
+    );
+    assert!(report.passed, "{:#?}", failing(&report));
+}
+
+#[test]
+fn a_bundled_skill_listed_by_absolute_path_is_known_by_its_folder() {
+    // Without a roots table codex names the file in full; the `.system` dir still says where
+    // it is from.
+    let f = fx();
+    let path = f.home.join(".codex/skills/.system/imagegen/SKILL.md");
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### Available skills\n",
+            &format!(
+                "### Available skills\n- imagegen: Generate images. (file: {})\n",
+                path.display()
+            ),
+        )
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(matches!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    assert!(report.passed, "{:#?}", failing(&report));
+}
+
+#[test]
+fn other_skill_differences_still_fail_beside_bundled_ones() {
+    // The negative control: the same capture, plus an entry of the user root harn did not
+    // predict and another line for a user skill.
+    let f = fx();
+    let (mut tree, c) = bundled_case(&f, |items| {
+        replace_in(items, 0, 1, "The alpha skill.", "The alpha skill, changed.");
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            "- gamma: Not in the tree. (file: r0/gamma/SKILL.md)\n### How to use skills",
+        );
+    });
+    let report = verify_codex(&mut tree, &c);
+    let mut failing: Vec<(String, RowVerdict)> = failing(&report).into_iter().cloned().collect();
+    failing.sort_by(|a, b| a.0.cmp(&b.0));
+    let alpha = ALPHA.len() as u64 + 1;
+    assert_eq!(
+        failing,
+        vec![
+            (
+                id(Kind::Skill, Layer::Unresolved, "gamma"),
+                RowVerdict::SeenNotPredicted
+            ),
+            (
+                id(Kind::Skill, Layer::User, "alpha"),
+                RowVerdict::ContentMismatch {
+                    predicted: alpha,
+                    observed: Some(alpha + ", changed".len() as u64)
+                }
+            ),
+        ]
+    );
+    assert!(!report.passed);
+    for row in [
+        id(Kind::Skill, Layer::Builtin, "plugin-creator"),
+        id(Kind::Skill, Layer::Builtin, "skill-creator"),
+        id(Kind::Skill, Layer::Unresolved, "imagegen"),
+    ] {
+        assert!(
+            matches!(
+                verdict(&report, &row),
+                Some(RowVerdict::NotCheckable { .. })
+            ),
+            "{row}"
+        );
+    }
+}
+
+/// Writes `plugin-list.json` of a capture dir with `installed` entries and reads the capture.
+fn with_plugins(f: &Fx, dir: &Path, installed: Value) -> CodexCapture {
+    std::fs::write(
+        dir.join("plugin-list.json"),
+        serde_json::json!({"installed": installed, "available": []}).to_string(),
+    )
+    .unwrap();
+    oracle::read_capture_dir(dir, &target(f)).unwrap()
+}
+
+/// An account plugin as `codex plugin list --json` prints it (ids are synthetic).
+fn account_plugin(name: &str) -> Value {
+    serde_json::json!({
+        "pluginId": format!("{name}@openai-curated-remote"),
+        "name": name,
+        "marketplaceName": "openai-curated-remote",
+        "installed": true,
+        "enabled": true,
+        "source": {"source": "remote", "id": format!("plugin_connector_{name}_000")}
+    })
+}
+
+#[test]
+fn an_account_plugin_harn_cannot_see_is_not_checkable() {
+    let f = fx();
+    let dir = capture_dir(&f, |_| {});
+    let c = with_plugins(&f, &dir, serde_json::json!([account_plugin("mail")]));
+    assert_eq!(
+        c.plugins.as_ref().unwrap()[0].source.as_deref(),
+        Some("remote")
+    );
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert_eq!(
+        verdict(
+            &report,
+            &id(
+                Kind::Plugin,
+                Layer::Unresolved,
+                "mail@openai-curated-remote"
+            )
+        ),
+        Some(&RowVerdict::NotCheckable {
+            reason: ACCOUNT_PLUGIN.to_string()
+        })
+    );
+    assert!(report.passed, "{:#?}", failing(&report));
+}
+
+#[test]
+fn a_skill_an_account_plugin_brings_is_still_an_entry_of_its_own() {
+    let f = fx();
+    let path = f
+        .home
+        .join(".codex/plugins/cache/openai-curated-remote/mail/1.0.0/skills/search/SKILL.md");
+    let dir = capture_dir(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "### How to use skills",
+            &format!(
+                "- mail:search: Search mail. (file: {})\n### How to use skills",
+                path.display()
+            ),
+        )
+    });
+    let c = with_plugins(&f, &dir, serde_json::json!([account_plugin("mail")]));
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(matches!(
+        verdict(
+            &report,
+            &id(
+                Kind::Plugin,
+                Layer::Unresolved,
+                "mail@openai-curated-remote"
+            )
+        ),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    let failing: Vec<(String, RowVerdict)> = failing(&report).into_iter().cloned().collect();
+    assert_eq!(
+        failing,
+        vec![(
+            id(Kind::Skill, Layer::Unresolved, "mail:search"),
+            RowVerdict::SeenNotPredicted
+        )]
+    );
+    assert!(!report.passed);
+}
+
+#[test]
+fn a_local_plugin_harn_did_not_predict_is_still_seen_not_predicted() {
+    let f = fx();
+    let dir = capture_dir(&f, |_| {});
+    let local = serde_json::json!({
+        "pluginId": "docs@demo-mkt",
+        "name": "docs",
+        "marketplaceName": "demo-mkt",
+        "installed": true,
+        "enabled": true,
+        "source": {"source": "local", "path": f.home.join("plugins/docs").display().to_string()}
+    });
+    let c = with_plugins(&f, &dir, serde_json::json!([account_plugin("mail"), local]));
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let failing: Vec<(String, RowVerdict)> = failing(&report).into_iter().cloned().collect();
+    assert_eq!(
+        failing,
+        vec![(
+            id(Kind::Plugin, Layer::Unresolved, "docs@demo-mkt"),
+            RowVerdict::SeenNotPredicted
+        )]
+    );
+    assert!(matches!(
+        verdict(
+            &report,
+            &id(
+                Kind::Plugin,
+                Layer::Unresolved,
+                "mail@openai-curated-remote"
+            )
+        ),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
 }

@@ -4,7 +4,9 @@
 //! tests assume absent; the admin root (`/etc/codex/skills`) is covered in `src/resolve/codex`.
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
-use harn::resolve::codex::{CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV};
+use harn::resolve::codex::{
+    BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV,
+};
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -560,6 +562,15 @@ fn bundled_enabled_false_removes_the_system_skills() {
 
     let after = resolve(&target(&f), Some(&overlay_of(bundled)));
     assert_eq!(skill_ids(&after), ["codex/skill/user/notes"]);
+    // No `.system` row, no note on the folder.
+    assert!(
+        !after
+            .signals
+            .iter()
+            .any(|s| s.starts_with("bundled skills:")),
+        "{:?}",
+        after.signals
+    );
 
     // A missing `.system` while bundled skills are on: codex installs it at startup.
     std::fs::remove_dir_all(f.codex.join("skills/.system")).unwrap();
@@ -570,6 +581,80 @@ fn bundled_enabled_false_removes_the_system_skills() {
             .any(|w| w.contains("codex installs its bundled skills")),
         "{:?}",
         t.warnings
+    );
+}
+
+#[test]
+fn bundled_rows_carry_the_signal_and_the_tree_one_note() {
+    // The folder holds the set of whichever codex started last (skills/src/lib.rs:59-121): its
+    // rows are listed as found, with a signal; the tree says it once.
+    let f = fx();
+    skill(
+        &f.codex.join("skills/.system"),
+        "imagegen",
+        "Generate images.",
+    );
+    skill(
+        &f.codex.join("skills/.system"),
+        "skill-creator",
+        "Create skills.",
+    );
+    // Not in the listing (`allow_implicit_invocation: false`), still from the folder.
+    write(
+        &skill(&f.codex.join("skills/.system"), "quiet", "Invoked by name.")
+            .parent()
+            .unwrap()
+            .join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    );
+    skill(&f.codex.join("skills"), "notes", "Keep notes.");
+    user_config(&f, "");
+    let signal = format!(
+        "{BUNDLED_SKILL} ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 installs its own set at start, so this skill's presence and listing line are confirmed by `harn verify --run --agent codex`"
+    );
+    let note = format!(
+        "bundled skills: ~/.codex/skills/.system {BUNDLED_SKILLS_WHY}; the installed codex 0.160.1 installs its own set at start, so the presence and listing lines of its 3 skills are confirmed by `harn verify --run --agent codex`"
+    );
+    let t = resolve(&ctarget(&f), None);
+    for name in ["imagegen", "skill-creator", "quiet"] {
+        let r = row(&t, &format!("codex/skill/builtin/{name}"));
+        assert_eq!(r.signal.as_deref(), Some(signal.as_str()), "{name}");
+    }
+    assert_eq!(
+        row(&t, "codex/skill/builtin/quiet").mode,
+        Mode::OnDemand,
+        "the signal does not depend on the listing"
+    );
+    assert_eq!(row(&t, "codex/skill/user/notes").signal, None);
+    assert_eq!(listing(&t).signal, None);
+    let notes: Vec<&String> = t
+        .signals
+        .iter()
+        .filter(|s| s.starts_with("bundled skills:"))
+        .collect();
+    assert_eq!(notes, [&note]);
+    assert!(
+        !t.signals.iter().any(|s| s.starts_with(BUNDLED_SKILL)),
+        "the note is not a row signal: {:?}",
+        t.signals
+    );
+
+    // Which codex rewrites the folder, as far as the files say.
+    let t = resolve(&target(&f), None);
+    let r = row(&t, "codex/skill/builtin/imagegen");
+    assert!(
+        r.signal.as_deref().is_some_and(|s| s.contains(
+            "; no codex is on PATH; the codex that runs installs its own set at start, so"
+        )),
+        "{:?}",
+        r.signal
+    );
+    assert_eq!(
+        t.signals
+            .iter()
+            .filter(|s| s.starts_with("bundled skills:"))
+            .count(),
+        1
     );
 }
 

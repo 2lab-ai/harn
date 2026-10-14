@@ -16,6 +16,14 @@
 //!   (`core-plugins/src/loader.rs:906`); otherwise it is not checkable. A row whose signal starts
 //!   with [`CATALOG_GATED`] and a block in [`RUNTIME_DECIDED`] codex did not render are not
 //!   checkable either.
+//!   A plugin codex lists with source `remote` ([`REMOTE_SOURCE`]: installed for the ChatGPT
+//!   account, named by no local file) that harn did not predict is not checkable
+//!   ([`ACCOUNT_PLUGIN`]); a skill it brings into the listing is still an entry of its own.
+//! - **Bundled skills** (`$CODEX_HOME/skills/.system`, [`BUNDLED_SKILL`]): the folder holds the
+//!   set of whichever codex started last, so a `.system` skill harn predicted and codex did not
+//!   list, one codex listed from its `.system` root that harn did not predict, and one listed with
+//!   another line are not checkable, never a failure. The static side is known by the row's
+//!   signal, the capture side by the entry's `SKILL.md` path ([`in_bundled_root`]).
 //!   Rows whose mode (or an ancestor's) is `runtime`, `none` or `on-demand` are expected absent; a
 //!   plugin row's mode is its load state. Blocks in [`RUNTIME_DECIDED`] that did not render are
 //!   a warning, not a diff.
@@ -43,8 +51,9 @@
 
 use super::{flatten, get, get_mut, id_parts, Node, RowVerdict, VerifyReport};
 use crate::model::{item_id, Agent, Item, Kind, Layer, Mode, Tree};
-use crate::oracle::codex::{names, CodexCapture, LISTED_PREFIX};
+use crate::oracle::codex::{names, CodexCapture, LISTED_PREFIX, REMOTE_SOURCE};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::Path;
 
 /// What codex's inspection commands do not show (acceptance A8); stated in every Codex report.
@@ -66,6 +75,13 @@ pub const RUNTIME_DECIDED: &[(&str, &str)] = &[
 /// Prefix of a row's `signal` when its presence depends on a model-catalog entry harn could not
 /// read: such a row codex did not render is not checkable. Defined by the resolver.
 pub use crate::resolve::codex::CATALOG_GATED;
+
+/// Prefix of a `.system` skill row's `signal`; defined by the resolver (see the module docs).
+pub use crate::resolve::codex::{BUNDLED_SKILL, BUNDLED_SKILLS_WHY};
+
+/// Why a plugin codex lists with source `remote` that harn did not predict is not checkable.
+pub const ACCOUNT_PLUGIN: &str =
+    "installed for your account on the server; harn does not see account plugins statically";
 
 /// The AGENTS.md message framing (`core/src/context/user_instructions.rs:23-34`).
 const AGENTS_HEADER: &str = "# AGENTS.md instructions";
@@ -238,7 +254,15 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
         }
         if absent(s) {
             if capture_of[si].is_some() && gated(s.kind) {
-                out.rows.push((s.id.clone(), RowVerdict::SeenNotPredicted));
+                out.rows.push((
+                    s.id.clone(),
+                    match bundled(s) {
+                        Some(signal) => RowVerdict::NotCheckable {
+                            reason: format!("listed by codex in this run, not predicted; {signal}"),
+                        },
+                        None => RowVerdict::SeenNotPredicted,
+                    },
+                ));
             }
             continue;
         }
@@ -287,9 +311,16 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                 None => p != o,
             };
             if differs {
-                verdict = RowVerdict::ContentMismatch {
-                    predicted: p,
-                    observed: Some(o),
+                verdict = match bundled(s) {
+                    Some(signal) => RowVerdict::NotCheckable {
+                        reason: format!(
+                            "codex lists it with another line (see the note); {signal}"
+                        ),
+                    },
+                    None => RowVerdict::ContentMismatch {
+                        predicted: p,
+                        observed: Some(o),
+                    },
                 };
                 out.notes.push(match lines {
                     Some((predicted, listed)) => {
@@ -339,6 +370,29 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                 let mut item = get(&capture.tree.items, &c.path).clone();
                 relayer(&mut item, statics[sp].layer);
                 attach.push((statics[sp].path.clone(), item));
+            }
+            _ if c.kind == Kind::Skill && in_bundled_root(observed_path(ci)) => {
+                out.rows.push((
+                    c.id.clone(),
+                    RowVerdict::NotCheckable {
+                        reason: format!(
+                            "{BUNDLED_SKILL} listed by {} from its skills/.system folder, not predicted: that folder {BUNDLED_SKILLS_WHY}",
+                            capture
+                                .context
+                                .agent_version
+                                .as_deref()
+                                .map_or_else(|| "codex".to_string(), |v| format!("codex {v}"))
+                        ),
+                    },
+                ));
+            }
+            _ if c.kind == Kind::Plugin && account_plugin(capture, &c.name) => {
+                out.rows.push((
+                    c.id.clone(),
+                    RowVerdict::NotCheckable {
+                        reason: ACCOUNT_PLUGIN.to_string(),
+                    },
+                ));
             }
             _ if gated(c.kind) => out.rows.push((c.id.clone(), RowVerdict::SeenNotPredicted)),
             _ => {}
@@ -422,6 +476,11 @@ fn unmatched(s: &Node, capture: &CodexCapture, owned: &[&str]) -> RowVerdict {
             ),
         };
     }
+    if let Some(signal) = bundled(s) {
+        return RowVerdict::NotCheckable {
+            reason: format!("not in codex's listing in this run; {signal}"),
+        };
+    }
     if s.kind == Kind::SystemPrompt {
         if let Some((_, why)) = RUNTIME_DECIDED.iter().find(|(name, _)| *name == s.name) {
             return RowVerdict::NotCheckable {
@@ -450,6 +509,40 @@ fn unmatched(s: &Node, capture: &CodexCapture, owned: &[&str]) -> RowVerdict {
         }
         _ => RowVerdict::PredictedNotSeen,
     }
+}
+
+/// The [`BUNDLED_SKILL`] signal of a `.system` skill row, or None.
+fn bundled(node: &Node) -> Option<&str> {
+    node.signal
+        .as_deref()
+        .filter(|g| node.kind == Kind::Skill && g.starts_with(BUNDLED_SKILL))
+}
+
+/// Whether a listed `SKILL.md` lies in codex's bundled root, `$CODEX_HOME/skills/.system`: its
+/// nearest hidden ancestor is `.system` inside a `skills` dir. Codex prunes hidden dirs when it
+/// walks a root (`ext/skills/src/loader/discovery.rs:54-191`), so no dir below a root is hidden
+/// and only the bundled root puts `.system` there — whether the line names it through the
+/// `### Skill roots` table or by its absolute path.
+fn in_bundled_root(path: Option<&Path>) -> bool {
+    let hidden = |dir: &&Path| {
+        dir.file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|n| n.starts_with('.'))
+    };
+    path.and_then(|p| p.ancestors().skip(1).find(hidden))
+        .is_some_and(|dir| {
+            dir.file_name() == Some(OsStr::new(".system"))
+                && dir.parent().and_then(Path::file_name) == Some(OsStr::new("skills"))
+        })
+}
+
+/// Whether codex lists `id` as a plugin installed for the account (source `remote`).
+fn account_plugin(capture: &CodexCapture, id: &str) -> bool {
+    capture
+        .plugins
+        .iter()
+        .flatten()
+        .any(|p| p.id == id && p.source.as_deref() == Some(REMOTE_SOURCE))
 }
 
 /// The line of an observed listing entry (the occurrence the row joined).
@@ -798,6 +891,24 @@ mod tests {
         let text = "ab한글cd";
         assert_eq!(excerpt(text, 3), "\"한글cd\"");
         assert_eq!(excerpt(text, 100), "\"\"");
+    }
+
+    #[test]
+    fn only_the_bundled_root_is_a_bundled_path() {
+        let yes = |p: &str| in_bundled_root(Some(Path::new(p)));
+        assert!(yes("/h/.codex/skills/.system/imagegen/SKILL.md"));
+        assert!(yes("/h/.codex/skills/.system/a/b/SKILL.md"));
+        assert!(yes("/h/custom-home/skills/.system/imagegen/SKILL.md"));
+        // The user root, a plugin cache root, a dir only named like it.
+        assert!(!yes("/h/.codex/skills/alpha/SKILL.md"));
+        assert!(!yes(
+            "/h/.codex/plugins/cache/m/p/1.0.0/skills/beta/SKILL.md"
+        ));
+        assert!(!yes("/h/x/.system/alpha/SKILL.md"));
+        assert!(!yes("/etc/codex/skills/admin/SKILL.md"));
+        // A root under such a dir: its own hidden dir comes first.
+        assert!(!yes("/w/skills/.system/repo/.agents/skills/alpha/SKILL.md"));
+        assert!(!in_bundled_root(None));
     }
 
     #[test]

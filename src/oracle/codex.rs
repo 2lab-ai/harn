@@ -17,7 +17,9 @@
 //!   included, with `enabled` (`cli/src/mcp_cmd.rs:664-745`);
 //! - `codex -C <dir> plugin list --json` — plugins of the configured marketplaces
 //!   (`cli/src/plugin_cmd.rs:445-519`). A plugin enabled in config whose marketplace is not
-//!   configured still loads but is not listed (measured on 0.160.1, 2026-10-14).
+//!   configured still loads but is not listed (measured on 0.160.1, 2026-10-14). Plugins installed
+//!   for the ChatGPT account are listed with `source.source = "remote"` (marketplace
+//!   `openai-curated-remote`); no local file names them (measured on 0.160.1, 2026-10-14).
 //!
 //! `--profile` (from [`PROFILE_ENV`], as the resolver reads it) goes to prompt-input and mcp list
 //! only: codex rejects it for every other subcommand (`cli/src/main.rs:1861-1889`). No other flag
@@ -253,7 +255,13 @@ pub struct ListedPlugin {
     /// `name@marketplace`.
     pub id: String,
     pub enabled: bool,
+    /// `source.source` as written: `local` (a path) or [`REMOTE_SOURCE`] (an account plugin).
+    #[serde(default)]
+    pub source: Option<String>,
 }
+
+/// `source.source` of a plugin installed for the ChatGPT account on the server.
+pub const REMOTE_SOURCE: &str = "remote";
 
 /// The files a capture dir may hold besides [`MANIFEST`]: each command's stdout and stderr. A
 /// manifest naming any other file is refused, and so is any of these that is a symlink.
@@ -1083,8 +1091,8 @@ pub fn parse_mcp_list(text: &str) -> anyhow::Result<Vec<ListedServer>> {
         .collect())
 }
 
-/// `codex plugin list --json`: `{installed: [{pluginId, enabled, …}], available: […]}`; only
-/// `installed` entries are kept.
+/// `codex plugin list --json`: `{installed: [{pluginId, enabled, source: {source, …}, …}],
+/// available: […]}`; only `installed` entries are kept.
 pub fn parse_plugin_list(text: &str) -> anyhow::Result<Vec<ListedPlugin>> {
     let v: Value = serde_json::from_str(text.trim()).context("not JSON")?;
     let installed = v["installed"]
@@ -1097,6 +1105,7 @@ pub fn parse_plugin_list(text: &str) -> anyhow::Result<Vec<ListedPlugin>> {
             Some(ListedPlugin {
                 id: e["pluginId"].as_str()?.to_string(),
                 enabled: e["enabled"].as_bool().unwrap_or(false),
+                source: e["source"]["source"].as_str().map(str::to_string),
             })
         })
         .collect())
@@ -1226,7 +1235,12 @@ pub fn build(
     }
     for p in plugins.iter().flatten().filter(|p| p.enabled) {
         let mut item = row(Kind::Plugin, Layer::Unresolved, &p.id, None);
-        item.origin.why = vec!["codex plugin list --json: installed, enabled".to_string()];
+        item.origin.why = vec![match p.source.as_deref() {
+            Some(source) => {
+                format!("codex plugin list --json: installed, enabled, source {source}")
+            }
+            None => "codex plugin list --json: installed, enabled".to_string(),
+        }];
         items.push(item);
     }
     let tree = Tree {
