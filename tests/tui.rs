@@ -3223,6 +3223,123 @@ fn hooks_a_managed_policy_turns_off_read_off_by_policy_and_offer_neither_d_nor_o
     );
 }
 
+/// Claude Code, with a managed `allowManagedHooksOnly` on every resolve (refresh included)
+/// once the flag is set: a policy that arrives while the view is open.
+struct UnderPolicy(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Resolver for UnderPolicy {
+    fn agent(&self) -> model::Agent {
+        ClaudeCode.agent()
+    }
+
+    fn rules_verified_against(&self) -> &'static str {
+        ClaudeCode.rules_verified_against()
+    }
+
+    fn resolve(
+        &self,
+        target: &model::Target,
+        overlay: Option<&model::Overlay>,
+    ) -> anyhow::Result<Tree> {
+        let mut ops = overlay.map(|o| o.ops.clone()).unwrap_or_default();
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            ops.push(model::OverlayOp::SetJson {
+                file: PathBuf::from(
+                    "/Library/Application Support/ClaudeCode/managed-settings.json",
+                ),
+                pointer: "/allowManagedHooksOnly".to_string(),
+                value: serde_json::json!(true),
+            });
+        }
+        ClaudeCode.resolve(target, Some(&model::Overlay { ops }))
+    }
+}
+
+/// harn turns every hook off (`d` on the SessionStart hook, Enter); then a managed policy
+/// arrives. Returns the app and the item count at start under that policy.
+fn hooks_off_then_policy(f: &Fixture) -> (App, usize) {
+    let policy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let t = target(f);
+    let tree = UnderPolicy(policy.clone()).resolve(&t, None).unwrap();
+    let mut app = App::new(
+        t,
+        vec![(
+            Box::new(UnderPolicy(policy.clone())) as Box<dyn Resolver>,
+            tree,
+        )],
+        journal(f),
+        Opts {
+            unicode: true,
+            color: false,
+            readonly: false,
+        },
+    );
+    let hook = model::walk(app.tree())
+        .find(|i| i.label.starts_with("SessionStart hook"))
+        .unwrap()
+        .id
+        .clone();
+    assert!(app.select(&hook));
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        message(&app).starts_with("turned off all hooks"),
+        "{}",
+        message(&app)
+    );
+    policy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let items = app.screen().title.items;
+    (app, items)
+}
+
+const STAY_OFF: &str = "3 hooks stay off by policy";
+
+#[test]
+fn o_under_a_policy_that_arrived_since_restores_the_file_and_says_the_hooks_stay_off() {
+    let f = fixture();
+    let words = forbidden(&f);
+    let local_before = std::fs::read(local_settings(&f)).unwrap();
+    let (mut app, items) = hooks_off_then_policy(&f);
+    press(&mut app, KeyCode::Char('o'));
+    card(&screen(&app, 80, 24), "Turn all hooks back on");
+    press(&mut app, KeyCode::Enter);
+    // The undo of harn's own write stands; no claim that the hooks run again.
+    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
+    assert_eq!(
+        message(&app),
+        format!(
+            "all hooks: file restored, but {STAY_OFF} · still {items} items load at start · \
+             takes effect next session"
+        )
+    );
+    let (g, path) = app.screen().find(&app.cursor_id().unwrap()).unwrap();
+    assert_eq!(
+        app.screen().row(g, &path).unwrap().absent,
+        Some("off by policy")
+    );
+    clean_both(&app, &words, "o under a policy that arrived since");
+}
+
+#[test]
+fn u_under_a_policy_that_arrived_since_restores_the_file_and_says_the_hooks_stay_off() {
+    let f = fixture();
+    let words = forbidden(&f);
+    let local_before = std::fs::read(local_settings(&f)).unwrap();
+    let (mut app, items) = hooks_off_then_policy(&f);
+    press(&mut app, KeyCode::Char('u'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
+    assert_eq!(
+        message(&app),
+        format!(
+            "undone: the hooks switch, but {STAY_OFF} · still {items} items load at start · \
+             .claude/settings.local.json restored byte for byte"
+        )
+    );
+    assert!(!message(&app).contains("back on"));
+    clean_both(&app, &words, "u under a policy that arrived since");
+}
+
 #[test]
 fn a_server_turned_off_that_stays_listed_says_off_and_why() {
     let f = fixture();

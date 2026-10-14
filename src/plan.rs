@@ -510,6 +510,32 @@ pub fn on_refusal(item: &Item) -> Option<Refused> {
     Some(Refused(format!("{}: {reason}", item.id)))
 }
 
+/// After harn restored the files of a change (`harn on`, `o`, `u`): which of `ids` the
+/// re-resolved `tree` still lists as switched off (mode none, an `off:` signal) — a managed
+/// policy that arrived since, or another layer's switch, keeps them off. The restore stands; a
+/// claim that they run again would not.
+pub fn still_off<'t>(tree: &'t Tree, ids: &[&str]) -> Vec<&'t Item> {
+    model::walk(tree)
+        .filter(|item| ids.contains(&item.id.as_str()) && switched_off(item))
+        .collect()
+}
+
+/// Why an item [`still_off`] lists does not run, to follow "stays off": ` by policy: your
+/// organisation allows only its own hooks (allowManagedHooksOnly)`, `: your settings turn every
+/// hook off (disableAllHooks)`, else its signal in parentheses.
+pub fn stays_off_why(item: &Item) -> String {
+    use crate::resolve::claude::{OFF_ALL_HOOKS, OFF_MANAGED_HOOKS_ONLY};
+    match item.signal.as_deref() {
+        Some(OFF_MANAGED_HOOKS_ONLY) => {
+            " by policy: your organisation allows only its own hooks (allowManagedHooksOnly)"
+                .to_string()
+        }
+        Some(OFF_ALL_HOOKS) => ": your settings turn every hook off (disableAllHooks)".to_string(),
+        Some(signal) => format!(" ({signal})"),
+        None => String::new(),
+    }
+}
+
 struct Pick<'a> {
     item: &'a Item,
     knob: &'a Knob,

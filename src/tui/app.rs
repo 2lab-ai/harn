@@ -1125,15 +1125,25 @@ impl App {
         let before = self.tab().screen.title.items;
         match journal::undo_entry(&mut self.journal, entry_id) {
             Ok(entry) => {
-                let mut parts = if entry.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+                let all_hooks = entry.ops.iter().any(|op| is_all_hooks(&op.knob));
+                let mut parts = if all_hooks {
                     vec![t("all hooks are back on")]
                 } else {
-                    vec![item, t(" is back on")]
+                    vec![item.clone(), t(" is back on")]
                 };
                 // How the header's count moved, as apply says it.
                 match self.refresh() {
                     Some(err) => parts.push(self.said(format!(" · refresh failed: {err}"))),
                     None => {
+                        // Restored, but still off (a managed policy that arrived since): no
+                        // "back on".
+                        if let Some(stays) = self.stays_off(&entry, all_hooks) {
+                            parts = vec![
+                                if all_hooks { t("all hooks") } else { item },
+                                t(": file restored, but "),
+                            ];
+                            parts.extend(stays);
+                        }
                         let after = self.tab().screen.title.items;
                         parts.push(t(format!(
                             " · {} · takes effect next session",
@@ -1149,6 +1159,44 @@ impl App {
                 self.say(Tone::Error, parts);
             }
         }
+    }
+
+    /// After `entry`'s files are restored and the tree refreshed: what of it still does not run
+    /// — every hook, for the hooks switch — in its row's words, short enough for the message
+    /// line (`3 hooks stay off by policy`, `it stays off, with every other hook`); None when all
+    /// of it runs again.
+    fn stays_off(&self, entry: &JournalEntry, all_hooks: bool) -> Option<Vec<Part>> {
+        let tree = &self.tab().tree;
+        let ids: Vec<&str> = if all_hooks {
+            data::walk(tree)
+                .filter(|i| i.kind == data::Kind::Hook)
+                .map(|i| i.id.as_str())
+                .collect()
+        } else {
+            entry.ops.iter().map(|op| op.item_id.as_str()).collect()
+        };
+        let off = plan::still_off(tree, &ids);
+        let why = match off.first()?.signal.as_deref() {
+            Some(crate::resolve::claude::OFF_MANAGED_HOOKS_ONLY) => " by policy",
+            Some(crate::resolve::claude::OFF_ALL_HOOKS) => ", with every other hook",
+            _ => "",
+        };
+        let verb = if off.len() == 1 { "stays" } else { "stay" };
+        let mut parts = Vec::new();
+        if all_hooks {
+            parts.push(t(model::count(off.len(), "hook")));
+        } else if entry.ops.len() == 1 {
+            parts.push(t("it"));
+        } else {
+            for (i, item) in off.iter().enumerate() {
+                if i > 0 {
+                    parts.push(t(", "));
+                }
+                parts.push(self.item(&item.id));
+            }
+        }
+        parts.push(t(format!(" {verb} off{why}")));
+        Some(parts)
     }
 
     fn ask_undo(&mut self) {
@@ -1238,22 +1286,40 @@ impl App {
         }
         // Named as their rows are now, before the refresh brings them back; the hooks switch
         // brings every hook back, not only the one `d` was pressed on.
+        let all_hooks = expected.ops.iter().any(|op| is_all_hooks(&op.knob));
+        let mut names = Vec::new();
+        for (i, op) in expected.ops.iter().enumerate() {
+            if i > 0 {
+                names.push(t(", "));
+            }
+            names.push(self.item(&op.item_id));
+        }
         let mut parts = vec![t("undone: ")];
-        if expected.ops.iter().any(|op| is_all_hooks(&op.knob)) {
+        if all_hooks {
             parts.push(t("all hooks back on"));
         } else {
-            for (i, op) in expected.ops.iter().enumerate() {
-                if i > 0 {
-                    parts.push(t(", "));
-                }
-                parts.push(self.item(&op.item_id));
-            }
+            parts.extend(names.iter().cloned());
             parts.push(t(" back"));
         }
         let before = self.tab().screen.title.items;
         match journal::undo_entry(&mut self.journal, &expected.id) {
             Ok(entry) => {
                 let refresh = self.refresh();
+                // Restored, but still off (a managed policy that arrived since): no "back".
+                if let Some(stays) = refresh
+                    .is_none()
+                    .then(|| self.stays_off(&entry, all_hooks))
+                    .flatten()
+                {
+                    parts = vec![t("undone: ")];
+                    if all_hooks {
+                        parts.push(t("the hooks switch"));
+                    } else {
+                        parts.extend(names);
+                    }
+                    parts.push(t(", but "));
+                    parts.extend(stays);
+                }
                 // How the header's count moved, as apply says it; the files last, the first
                 // clause to drop when the row is narrow.
                 if refresh.is_none() {

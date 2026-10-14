@@ -487,6 +487,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 Err(err) => return Err(err),
             };
             print_entries(cli, std::slice::from_ref(&entry))?;
+            print_still_off(cli, std::slice::from_ref(&entry));
         }
         Some(Cmd::Edit { selector }) => {
             let target = target(cli, None)?;
@@ -750,6 +751,36 @@ fn target_for(dir: &Path) -> Result<Target> {
 
 fn open_journal() -> Result<Journal> {
     Journal::open()
+}
+
+/// After a restore, one line per restored item that still does not run (a managed policy that
+/// arrived since, or another layer's switch): the files are back, the item is not. On stderr
+/// under `--json`, so stdout stays one JSON value. Best effort: a tree that does not resolve
+/// says nothing.
+fn print_still_off(cli: &Cli, entries: &[journal::JournalEntry]) {
+    for entry in entries {
+        let Ok(target) = target_for(&entry.context.cwd) else {
+            continue;
+        };
+        let Ok(trees) = resolve_trees(cli, &target) else {
+            continue;
+        };
+        let ids: Vec<&str> = entry.ops.iter().map(|op| op.item_id.as_str()).collect();
+        for resolved in &trees {
+            for item in plan::still_off(&resolved.tree, &ids) {
+                let line = format!(
+                    "{}: file restored, but it stays off{}",
+                    item.id,
+                    plan::stays_off_why(item)
+                );
+                if cli.json {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
+            }
+        }
+    }
 }
 
 fn print_entries(cli: &Cli, entries: &[journal::JournalEntry]) -> Result<()> {

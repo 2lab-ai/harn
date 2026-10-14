@@ -674,6 +674,50 @@ fn off_and_on_refuse_a_hook_a_managed_policy_turned_off() {
     }
 }
 
+#[test]
+fn on_restores_harns_change_but_a_hook_a_policy_keeps_off_is_said_to_stay_off() {
+    let f = fixture();
+    let t = target(&f);
+    let mut journal = harn::journal::Journal {
+        dir: f.root.join("state"),
+    };
+    let tree = resolve(&f, None);
+    let hook = of_kind(&tree, Kind::Hook)
+        .into_iter()
+        .find(|h| h.label.starts_with("SessionStart hook"))
+        .unwrap()
+        .id
+        .clone();
+    let local_before = std::fs::read(local_settings(&f)).unwrap();
+    // harn turns every hook off; a managed policy arrives after.
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &hook, None).unwrap();
+    harn::writers::apply(&plan, &mut journal).unwrap();
+    // `harn on` is the undo of harn's own write: the file comes back byte for byte.
+    let entry = harn::journal::on(&mut journal, &t, &hook).unwrap();
+    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
+    let ids: Vec<&str> = entry.ops.iter().map(|op| op.item_id.as_str()).collect();
+    assert_eq!(ids, [hook.as_str()]);
+    // Re-resolved under the policy, the hook still does not run, and it is said so.
+    let after = resolve(&f, Some(&managed_hooks_only(&f, false)));
+    let off = plan::still_off(&after, &ids);
+    assert_eq!(off.len(), 1);
+    assert_eq!(off[0].signal.as_deref(), Some(OFF_MANAGED_HOOKS_ONLY));
+    assert_eq!(
+        plan::stays_off_why(off[0]),
+        " by policy: your organisation allows only its own hooks (allowManagedHooksOnly)"
+    );
+    // Under the user's own `disableAllHooks`, set again by hand: also off, said by that
+    // switch.
+    let all_off = resolve(&f, Some(&managed_hooks_only(&f, true)));
+    let off = plan::still_off(&all_off, &ids);
+    assert_eq!(
+        plan::stays_off_why(off[0]),
+        ": your settings turn every hook off (disableAllHooks)"
+    );
+    // Without either: it runs again, nothing more to say.
+    assert!(plan::still_off(&resolve(&f, None), &ids).is_empty());
+}
+
 /// The side effects naming `label` (one line per item that leaves).
 fn effects_naming<'p>(plan: &'p plan::ActionPlan, label: &str) -> Vec<&'p String> {
     plan.side_effects
