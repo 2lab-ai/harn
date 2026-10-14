@@ -569,7 +569,9 @@ pub(crate) fn resolve_with(
         codex: None,
     };
     if !fs.is_dir(&codex_home) {
-        // A set `CODEX_HOME` must exist and be a directory (`utils/home-dir/src/lib.rs:26-41`).
+        // A set `CODEX_HOME` must exist and be a directory, classified as codex does
+        // (`utils/home-dir/src/lib.rs:26-41`): its metadata first (missing, or unreadable), then
+        // anything that is not a directory (a file, a FIFO, a socket).
         let why = match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
             Some(v) => {
                 let relative = if Path::new(v).is_relative() {
@@ -577,10 +579,12 @@ pub(crate) fn resolve_with(
                 } else {
                     ""
                 };
-                let (what, at) = if fs.is_file(&codex_home) {
-                    ("is not a directory", "37-41")
-                } else {
-                    ("does not exist", "26-35")
+                let (what, at) = match fs.metadata(&codex_home) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        ("does not exist".to_string(), "26-35")
+                    }
+                    Err(e) => (format!("cannot be read ({e})"), "26-35"),
+                    Ok(_) => ("is not a directory".to_string(), "37-41"),
                 };
                 format!(
                     "CODEX_HOME {v:?}{relative} {what}; codex refuses to start (utils/home-dir/src/lib.rs:{at})"

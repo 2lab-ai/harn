@@ -755,45 +755,63 @@ fn cli_off_dry_run_history_undo_and_on() {
 }
 
 #[test]
-fn cli_off_dry_run_writes_a_relative_codex_home_under_the_target_dir() {
+fn cli_off_and_undo_write_a_relative_codex_home_under_the_target_dir() {
     // Codex takes a relative CODEX_HOME from the folder it runs in, the target dir. harn runs
     // from another folder holding a home of the same name: that one is never the file written.
     let f = fx();
     let home = f.repo.join("codex-rel");
-    write(&home.join("config.toml"), USER_CONFIG);
+    let user = home.join("config.toml");
+    write(&user, USER_CONFIG);
     let elsewhere = f.root.join("elsewhere");
     let decoy = elsewhere.join("codex-rel/config.toml");
     write(&decoy, USER_CONFIG);
-    let out = Command::new(env!("CARGO_BIN_EXE_harn"))
-        .current_dir(&elsewhere)
-        .env("HOME", &f.home)
-        .env("XDG_STATE_HOME", f.root.join("state"))
-        .env("CODEX_HOME", "codex-rel")
-        .env_remove("HARN_CODEX_PROFILE")
-        .env_remove("COLUMNS")
-        .args(["--json", "--agent", "codex", "--dir"])
-        .arg(&f.repo)
-        .args(["off", "environment_context", "--dry-run"])
-        .output()
-        .expect("run harn");
-    assert!(out.status.success(), "{out:?}");
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    let want = home.join("config.toml").display().to_string();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_harn"))
+            .current_dir(&elsewhere)
+            .env("HOME", &f.home)
+            .env("XDG_STATE_HOME", f.root.join("state"))
+            .env("CODEX_HOME", "codex-rel")
+            .env_remove("HARN_CODEX_PROFILE")
+            .env_remove("COLUMNS")
+            .args(["--agent", "codex", "--dir"])
+            .arg(&f.repo)
+            .args(args)
+            .output()
+            .expect("run harn")
+    };
+
+    let dry = run(&["--json", "off", "environment_context", "--dry-run"]);
+    assert!(dry.status.success(), "{dry:?}");
+    let v: Value = serde_json::from_slice(&dry.stdout).unwrap();
+    let want = user.display().to_string();
     let ops = v["plan"]["ops"].as_array().expect("ops");
     assert_eq!(ops.len(), 1, "{v:#}");
     assert_eq!(ops[0]["file"], Value::from(want.clone()));
     assert_eq!(ops[0]["knob"]["file"], Value::from(want));
     assert!(v["entry"].is_null(), "{v:#}");
-    assert_eq!(read(&home.join("config.toml")), USER_CONFIG);
-    assert_eq!(read(&decoy), USER_CONFIG);
+    assert_eq!(read(&user), USER_CONFIG);
+    assert_eq!(std::fs::read(&decoy).unwrap(), USER_CONFIG.as_bytes());
+
+    // Applied: the target dir's home holds the key, the decoy is untouched.
+    let off = run(&["off", "environment_context"]);
+    assert!(off.status.success(), "{off:?}");
+    assert!(
+        read(&user).contains("include_environment_context = false\n"),
+        "{}",
+        read(&user)
+    );
+    assert_eq!(std::fs::read(&decoy).unwrap(), USER_CONFIG.as_bytes());
+
+    // Undone through the journal: the target dir's file is back, the decoy still untouched.
+    let undo = run(&["undo"]);
+    assert!(undo.status.success(), "{undo:?}");
+    assert_eq!(std::fs::read(&user).unwrap(), USER_CONFIG.as_bytes());
+    assert_eq!(std::fs::read(&decoy).unwrap(), USER_CONFIG.as_bytes());
 
     // The warning that Codex rewrites its user config is about the same file.
     let mut target = f.target();
     target
         .env
         .insert("CODEX_HOME".to_string(), "codex-rel".to_string());
-    assert!(
-        plan::codex_config_warning(&target, &[home.join("config.toml").as_path()], || true)
-            .is_some()
-    );
+    assert!(plan::codex_config_warning(&target, &[user.as_path()], || true).is_some());
 }

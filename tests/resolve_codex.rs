@@ -1772,6 +1772,69 @@ fn a_relative_codex_home_codex_would_refuse_is_named_where_codex_looks() {
 }
 
 #[test]
+#[cfg(unix)]
+fn a_codex_home_that_is_a_fifo_is_not_a_directory() {
+    // Codex reads the metadata first: an existing FIFO is "not a directory"
+    // (`utils/home-dir/src/lib.rs:37-41`), never "does not exist".
+    use std::os::unix::ffi::OsStrExt;
+    let f = fx();
+    let fifo = f.repo.join("codex-fifo");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+    let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "codex-fifo".to_string());
+    let tree = resolve(&t, None);
+    assert!(tree.items.is_empty());
+    assert_eq!(
+        tree.warnings,
+        vec![format!(
+            "no codex home at {}: CODEX_HOME \"codex-fifo\" (relative: codex takes it from the folder it runs in, the target dir) is not a directory; codex refuses to start (utils/home-dir/src/lib.rs:37-41); nothing to list",
+            fifo.display()
+        )]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_codex_home_whose_metadata_cannot_be_read_says_so() {
+    // Neither missing nor a file: codex fails to read it (`utils/home-dir/src/lib.rs:31-34`).
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through a mode-000 folder");
+        return;
+    }
+    let f = fx();
+    let locked = f.repo.join("locked");
+    std::fs::create_dir_all(locked.join("home")).unwrap();
+    let mode = |m: u32| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(m));
+    mode(0o000).unwrap();
+    let mut t = target(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), "locked/home".to_string());
+    let tree = resolve(&t, None);
+    // Restored before asserting, so the fixture can be removed.
+    mode(0o755).unwrap();
+    assert!(tree.items.is_empty());
+    let prefix = format!(
+        "no codex home at {}: CODEX_HOME \"locked/home\" (relative: codex takes it from the folder it runs in, the target dir) cannot be read (",
+        locked.join("home").display()
+    );
+    assert_eq!(tree.warnings.len(), 1, "{:?}", tree.warnings);
+    let w = &tree.warnings[0];
+    assert!(
+        w.starts_with(&prefix)
+            && w.ends_with(
+                "); codex refuses to start (utils/home-dir/src/lib.rs:26-35); nothing to list"
+            ),
+        "{w}"
+    );
+}
+
+#[test]
 fn the_settings_fingerprint_reads_a_relative_codex_home_under_the_target_dir() {
     let f = fx();
     assert_ne!(std::env::current_dir().unwrap(), f.repo);
