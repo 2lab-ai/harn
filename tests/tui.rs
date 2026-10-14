@@ -3223,11 +3223,17 @@ fn hooks_a_managed_policy_turns_off_read_off_by_policy_and_offer_neither_d_nor_o
     );
 }
 
-/// Claude Code, with a managed `allowManagedHooksOnly` on every resolve (refresh included)
-/// once the flag is set: a policy that arrives while the view is open.
-struct UnderPolicy(std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// What changes after harn's `d` while the view is open: nothing yet, a managed policy arrives,
+/// or every resolve (the refresh after a restore included) fails.
+const LATER_NOTHING: u8 = 0;
+const LATER_POLICY: u8 = 1;
+const LATER_FAILS: u8 = 2;
 
-impl Resolver for UnderPolicy {
+/// Claude Code, with a managed `allowManagedHooksOnly` on every resolve (refresh included)
+/// once the switch says [`LATER_POLICY`], failing once it says [`LATER_FAILS`].
+struct Later(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl Resolver for Later {
     fn agent(&self) -> model::Agent {
         ClaudeCode.agent()
     }
@@ -3242,7 +3248,11 @@ impl Resolver for UnderPolicy {
         overlay: Option<&model::Overlay>,
     ) -> anyhow::Result<Tree> {
         let mut ops = overlay.map(|o| o.ops.clone()).unwrap_or_default();
-        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+        let later = self.0.load(std::sync::atomic::Ordering::SeqCst);
+        if later == LATER_FAILS {
+            anyhow::bail!("the settings could not be read");
+        }
+        if later == LATER_POLICY {
             ops.push(model::OverlayOp::SetJson {
                 file: PathBuf::from(
                     "/Library/Application Support/ClaudeCode/managed-settings.json",
@@ -3255,18 +3265,15 @@ impl Resolver for UnderPolicy {
     }
 }
 
-/// harn turns every hook off (`d` on the SessionStart hook, Enter); then a managed policy
-/// arrives. Returns the app and the item count at start under that policy.
-fn hooks_off_then_policy(f: &Fixture) -> (App, usize) {
-    let policy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+/// harn turns every hook off (`d` on the SessionStart hook, Enter); then `later` happens.
+/// Returns the app and the item count at start then.
+fn hooks_off_then(f: &Fixture, later: u8) -> (App, usize) {
+    let switch = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(LATER_NOTHING));
     let t = target(f);
-    let tree = UnderPolicy(policy.clone()).resolve(&t, None).unwrap();
+    let tree = Later(switch.clone()).resolve(&t, None).unwrap();
     let mut app = App::new(
         t,
-        vec![(
-            Box::new(UnderPolicy(policy.clone())) as Box<dyn Resolver>,
-            tree,
-        )],
+        vec![(Box::new(Later(switch.clone())) as Box<dyn Resolver>, tree)],
         journal(f),
         Opts {
             unicode: true,
@@ -3287,7 +3294,7 @@ fn hooks_off_then_policy(f: &Fixture) -> (App, usize) {
         "{}",
         message(&app)
     );
-    policy.store(true, std::sync::atomic::Ordering::SeqCst);
+    switch.store(later, std::sync::atomic::Ordering::SeqCst);
     let items = app.screen().title.items;
     (app, items)
 }
@@ -3299,7 +3306,7 @@ fn o_under_a_policy_that_arrived_since_restores_the_file_and_says_the_hooks_stay
     let f = fixture();
     let words = forbidden(&f);
     let local_before = std::fs::read(local_settings(&f)).unwrap();
-    let (mut app, items) = hooks_off_then_policy(&f);
+    let (mut app, items) = hooks_off_then(&f, LATER_POLICY);
     press(&mut app, KeyCode::Char('o'));
     card(&screen(&app, 80, 24), "Turn all hooks back on");
     press(&mut app, KeyCode::Enter);
@@ -3325,7 +3332,7 @@ fn u_under_a_policy_that_arrived_since_restores_the_file_and_says_the_hooks_stay
     let f = fixture();
     let words = forbidden(&f);
     let local_before = std::fs::read(local_settings(&f)).unwrap();
-    let (mut app, items) = hooks_off_then_policy(&f);
+    let (mut app, items) = hooks_off_then(&f, LATER_POLICY);
     press(&mut app, KeyCode::Char('u'));
     press(&mut app, KeyCode::Enter);
     assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
@@ -3338,6 +3345,39 @@ fn u_under_a_policy_that_arrived_since_restores_the_file_and_says_the_hooks_stay
     );
     assert!(!message(&app).contains("back on"));
     clean_both(&app, &words, "u under a policy that arrived since");
+}
+
+#[test]
+fn o_and_u_whose_refresh_fails_say_the_file_is_restored_and_never_back_on() {
+    let refresh_failed = "(refresh failed: claude-code: the settings could not be read)";
+    // `o`: the file comes back; whether the hooks run is not known, and said so.
+    let f = fixture();
+    let local_before = std::fs::read(local_settings(&f)).unwrap();
+    let (mut app, _) = hooks_off_then(&f, LATER_FAILS);
+    press(&mut app, KeyCode::Char('o'));
+    card(&screen(&app, 80, 24), "Turn all hooks back on");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
+    assert_eq!(
+        message(&app),
+        format!("all hooks: file restored; whether they run could not be checked {refresh_failed}")
+    );
+    assert!(!message(&app).contains("back on"));
+    // `u`: the same, with the restored file named.
+    let f = fixture();
+    let local_before = std::fs::read(local_settings(&f)).unwrap();
+    let (mut app, _) = hooks_off_then(&f, LATER_FAILS);
+    press(&mut app, KeyCode::Char('u'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(std::fs::read(local_settings(&f)).unwrap(), local_before);
+    assert_eq!(
+        message(&app),
+        format!(
+            "undone: the hooks switch; whether they run could not be checked {refresh_failed} · \
+             .claude/settings.local.json restored byte for byte"
+        )
+    );
+    assert!(!message(&app).contains("back"));
 }
 
 #[test]

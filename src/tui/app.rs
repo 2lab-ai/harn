@@ -1126,31 +1126,37 @@ impl App {
         match journal::undo_entry(&mut self.journal, entry_id) {
             Ok(entry) => {
                 let all_hooks = entry.ops.iter().any(|op| is_all_hooks(&op.knob));
-                let mut parts = if all_hooks {
-                    vec![t("all hooks are back on")]
-                } else {
-                    vec![item.clone(), t(" is back on")]
-                };
-                // How the header's count moved, as apply says it.
-                match self.refresh() {
-                    Some(err) => parts.push(self.said(format!(" · refresh failed: {err}"))),
+                let name = if all_hooks { t("all hooks") } else { item };
+                // The file is back; "back on" only once the refreshed tree shows it runs.
+                let parts = match self.refresh() {
+                    Some(err) => vec![
+                        name,
+                        t(format!(
+                            ": file restored; whether {} could not be checked",
+                            if all_hooks { "they run" } else { "it runs" }
+                        )),
+                        self.said(format!(" (refresh failed: {err})")),
+                    ],
                     None => {
-                        // Restored, but still off (a managed policy that arrived since): no
-                        // "back on".
-                        if let Some(stays) = self.stays_off(&entry, all_hooks) {
-                            parts = vec![
-                                if all_hooks { t("all hooks") } else { item },
-                                t(": file restored, but "),
-                            ];
-                            parts.extend(stays);
-                        }
+                        let mut parts = match self.stays_off(&entry, all_hooks) {
+                            // Still off (a managed policy that arrived since).
+                            Some(stays) => {
+                                let mut parts = vec![name, t(": file restored, but ")];
+                                parts.extend(stays);
+                                parts
+                            }
+                            None if all_hooks => vec![t("all hooks are back on")],
+                            None => vec![name, t(" is back on")],
+                        };
+                        // How the header's count moved, as apply says it.
                         let after = self.tab().screen.title.items;
                         parts.push(t(format!(
                             " · {} · takes effect next session",
                             model::start_count(before, after)
                         )));
+                        parts
                     }
-                }
+                };
                 self.select(item_id);
                 self.say(Tone::Info, parts);
             }
@@ -1294,44 +1300,54 @@ impl App {
             }
             names.push(self.item(&op.item_id));
         }
-        let mut parts = vec![t("undone: ")];
-        if all_hooks {
-            parts.push(t("all hooks back on"));
-        } else {
-            parts.extend(names.iter().cloned());
-            parts.push(t(" back"));
-        }
         let before = self.tab().screen.title.items;
         match journal::undo_entry(&mut self.journal, &expected.id) {
             Ok(entry) => {
-                let refresh = self.refresh();
-                // Restored, but still off (a managed policy that arrived since): no "back".
-                if let Some(stays) = refresh
-                    .is_none()
-                    .then(|| self.stays_off(&entry, all_hooks))
-                    .flatten()
-                {
-                    parts = vec![t("undone: ")];
+                // The files are back; "back" only once the refreshed tree shows it runs.
+                let mut parts = vec![t("undone: ")];
+                let what = |parts: &mut Vec<Part>| {
                     if all_hooks {
                         parts.push(t("the hooks switch"));
                     } else {
-                        parts.extend(names);
+                        parts.extend(names.iter().cloned());
                     }
-                    parts.push(t(", but "));
-                    parts.extend(stays);
+                };
+                match self.refresh() {
+                    Some(err) => {
+                        what(&mut parts);
+                        parts.push(t(format!(
+                            "; whether {} could not be checked",
+                            if all_hooks || expected.ops.len() > 1 {
+                                "they run"
+                            } else {
+                                "it runs"
+                            }
+                        )));
+                        parts.push(self.said(format!(" (refresh failed: {err})")));
+                    }
+                    None => {
+                        match self.stays_off(&entry, all_hooks) {
+                            // Still off (a managed policy that arrived since).
+                            Some(stays) => {
+                                what(&mut parts);
+                                parts.push(t(", but "));
+                                parts.extend(stays);
+                            }
+                            None if all_hooks => parts.push(t("all hooks back on")),
+                            None => {
+                                parts.extend(names.iter().cloned());
+                                parts.push(t(" back"));
+                            }
+                        }
+                        // How the header's count moved, as apply says it.
+                        let after = self.tab().screen.title.items;
+                        parts.push(t(format!(" · {}", model::start_count(before, after))));
+                    }
                 }
-                // How the header's count moved, as apply says it; the files last, the first
-                // clause to drop when the row is narrow.
-                if refresh.is_none() {
-                    let after = self.tab().screen.title.items;
-                    parts.push(t(format!(" · {}", model::start_count(before, after))));
-                }
+                // The files last, the first clause to drop when the row is narrow.
                 parts.push(t(" · "));
                 parts.extend(self.paths(entry.snapshots.iter().map(|s| s.path.as_path())));
                 parts.push(t(" restored byte for byte"));
-                if let Some(err) = refresh {
-                    parts.push(self.said(format!(" · refresh failed: {err}")));
-                }
                 self.say(Tone::Info, parts);
             }
             Err(err) => {

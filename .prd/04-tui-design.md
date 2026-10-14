@@ -113,7 +113,9 @@ Rules that produce it:
   off by policy the same way in the table and `harn why`. When `o` or `u` restores a change of
   harn's and what it turned off still does not run (a policy arrived since), the message says the
   file is restored and what stays off ("3 hooks stay off by policy"), never "back on"; `harn on`
-  adds the same as a line after the journal line.
+  adds the same as a line after the journal line. "Back on" is said only once the refreshed tree
+  shows it runs: when that check cannot run (the refresh fails), the message says the file is
+  restored and that whether it runs could not be checked.
 - **Agent listing** is a group of its own (31 entries, 15 KB on zbrain); the catch-all `Other`
   exists but is empty on known trees; status-line and permission rules are never shown (they are
   never in the request).
