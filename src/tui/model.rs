@@ -6,7 +6,8 @@
 //! `view.rs` draws a [`Screen`]; `app.rs` acts on the item ids its rows carry.
 
 use crate::model::{
-    self, Agent, Item, Kind, Knob, Layer, Mode, Scope, Tree, Trust, TrustGate, TrustLevel,
+    self, Agent, CatalogState, CatalogWhy, CodexFacts, Item, Kind, Knob, Layer, Mode, Scope, Tree,
+    Trust, TrustGate, TrustLevel,
 };
 use crate::plan::{default_scope, knob_scope, ActionPlan};
 use crate::render::common::{
@@ -70,6 +71,9 @@ pub struct Places {
     pub home: Option<PathBuf>,
     /// Whose files these are: scopes and config files are worded per agent.
     pub agent: Agent,
+    /// The Codex home the tree was resolved with (`CODEX_HOME`, else `~/.codex`): a root a
+    /// config file may start at, even outside home.
+    pub codex_home: Option<PathBuf>,
 }
 
 impl Places {
@@ -78,6 +82,7 @@ impl Places {
             dir: tree.target_dir.clone(),
             home: tree.home.clone(),
             agent: tree.agent,
+            codex_home: tree.codex.as_ref().map(|c| c.home.clone()),
         }
     }
 
@@ -1169,10 +1174,14 @@ fn reason_words(reason: &str) -> String {
 ///    ([`citation_word`], [`citation_end`]). Everything else stays byte for byte, including
 ///    ordinary text that follows a citation inside the same parenthesis.
 /// 2. A config file is bound, and shortened or reworded, only when it is one of the item's own
-///    files or starts at a recognized root and runs to the `#/` reference ([`codex_words`]). If
-///    neither holds, the sentence is left as written: no binding, no shortening.
+///    files or starts at a recognized root (the target dir and its ancestors, home, the Codex
+///    home, `/etc/codex`) and runs to the `#/` reference ([`codex_words`]). If neither holds, the
+///    sentence is left as written: no binding, no shortening.
 /// 3. Shortening a home prefix applies only at the start of a path — a bound file from its own
-///    start, other text where a path starts — never inside another path.
+///    start, other text where a path starts (the text's start, or after a space, `(` or quote) —
+///    never inside another path. In text with no binding one case stays ambiguous: a folder name
+///    with a space before a home path in it (`/srv/copy of /home/me/x`) reads as two paths, so
+///    its `/home/me` is shortened.
 ///
 /// When unsure, verbatim. Here that means:
 ///
@@ -1656,19 +1665,31 @@ impl Builder<'_> {
                                 it, so every MCP tool schema loads in the first request; no \
                                 Codex setting changes that."
                     .to_string(),
-                None => format!(
-                    "Tool search cannot be decided from the files{}: MCP servers are shown as \
-                     loading up front.",
-                    tree.tool_search_cause
-                        .as_deref()
-                        .map(|c| codex_words(c, places))
-                        .filter(|c| !c.is_empty())
-                        .map(|c| format!(" ({c})"))
-                        .unwrap_or_default()
-                ),
+                None => match tree.codex.as_ref().and_then(|c| catalog_unused(c, places)) {
+                    Some(unused) => format!(
+                        "Tool search cannot be decided because {unused}; MCP servers are shown \
+                         as loading up front."
+                    ),
+                    None => format!(
+                        "Tool search cannot be decided from the files{}: MCP servers are shown \
+                         as loading up front.",
+                        tree.tool_search_cause
+                            .as_deref()
+                            .map(|c| codex_words(c, places))
+                            .filter(|c| !c.is_empty())
+                            .map(|c| format!(" ({c})"))
+                            .unwrap_or_default()
+                    ),
+                },
             }));
         }
         for signal in signals {
+            // The model note is written from the resolver's facts; its `model:` signal (the same
+            // facts for the CLI) is not repeated.
+            if let (Some(codex), true) = (&tree.codex, signal.starts_with("model: ")) {
+                notes.push(note(model_note(codex, places)));
+                continue;
+            }
             let text = codex_words(signal, places);
             if !text.is_empty() {
                 notes.push(note(sentence(&text)));
@@ -2747,6 +2768,9 @@ impl Builder<'_> {
                     format!("{} of your first request.", size(b))
                 }
             }
+            (None, None) if is_base_instructions(item) && self.tree.codex.is_some() => {
+                base_size_unknown(self.tree.codex.as_ref().expect("checked"), &self.places)
+            }
             (None, None) if codex_unmeasurable(item).is_some() => {
                 codex_unmeasurable(item).unwrap_or_default().to_string()
             }
@@ -3515,7 +3539,8 @@ fn codex_block_phrase(item: &Item) -> &'static str {
 /// is certain; None otherwise. Certain means one of two things:
 /// - `head` ends with one of `known`, the files the item's own facts name (its switches, its
 ///   origin, a plan's files);
-/// - a folder harn recognizes as a root — the target dir and its ancestors, home, `/etc/codex` —
+/// - a folder harn recognizes as a root — the target dir and its ancestors, home, the Codex home
+///   (`CODEX_HOME`, even outside home), `/etc/codex` —
 ///   starts a path there (after a space, a `(` or the start of the text) that runs to the
 ///   reference with no other path starting inside it. The root nearest the reference is taken,
 ///   so a sentence naming another file first (`compare ~/.codex/config.toml with
@@ -3539,6 +3564,7 @@ fn bound_file_start(head: &str, places: &Places, known: &[String]) -> Option<usi
                 .filter(|p| p.len() > 1)
                 .collect();
             roots.extend(places.home.iter().map(|h| h.display().to_string()));
+            roots.extend(places.codex_home.iter().map(|h| h.display().to_string()));
             roots.push("/etc/codex".to_string());
             let at = roots
                 .iter()
@@ -4148,6 +4174,136 @@ fn number_duplicates(rows: &mut [Row]) {
             row.name = format!("{} {n}", row.name);
         }
     }
+}
+
+/// Codex's base instructions row (`codex/system-prompt/builtin/instructions`).
+fn is_base_instructions(item: &Item) -> bool {
+    item_agent(item) == Agent::Codex
+        && item.kind == Kind::SystemPrompt
+        && id_tail(item) == "instructions"
+}
+
+/// Codex's model catalog file (`<home>/models_cache.json`) in words when its facts do not count
+/// here — what it is and why — or None when they do.
+fn catalog_unused(codex: &CodexFacts, places: &Places) -> Option<String> {
+    let file = places.path(&codex.home.join("models_cache.json"));
+    let why = match &codex.catalog.state {
+        CatalogState::Used { .. } => return None,
+        CatalogState::Missing => {
+            return Some(format!(
+                "Codex's model catalog ({file}) does not exist yet; Codex writes it on its first \
+                 run"
+            ))
+        }
+        CatalogState::Elsewhere { set_in } => {
+            let at = set_in
+                .as_deref()
+                .map(|f| format!(" in {}", places.path(f)))
+                .unwrap_or_default();
+            return Some(format!(
+                "your config names its own model catalog (model_catalog_json{at}), which harn \
+                 does not read"
+            ));
+        }
+        CatalogState::NotUsed { why } => why,
+    };
+    let refetch = "so Codex fetches a new catalog when it starts";
+    let unknown = "so harn cannot tell whether Codex accepts it";
+    let words = match why {
+        CatalogWhy::NotJson => format!("it is not valid JSON, {refetch}"),
+        CatalogWhy::Rejected { detail } => format!("Codex cannot read it ({detail}), {refetch}"),
+        CatalogWhy::UnreadShape { detail } => {
+            format!("it has a shape harn does not read ({detail}), {unknown}")
+        }
+        CatalogWhy::CodexNotFound => format!("codex is not on PATH, {unknown}"),
+        CatalogWhy::CodexVersionUnknown => {
+            format!("the installed codex's version cannot be read, {unknown}")
+        }
+        CatalogWhy::NoClientVersion => format!("it does not say which codex wrote it, {refetch}"),
+        CatalogWhy::OtherVersion {
+            written_by,
+            installed,
+        } => format!("codex {written_by} wrote it and codex {installed} is installed, {refetch}"),
+        CatalogWhy::NoIdentity => format!("it is an older file with no login in it, {refetch}"),
+    };
+    Some(format!(
+        "Codex's model catalog ({file}) is not used: {words}"
+    ))
+}
+
+/// The model note: the model and where it is set, its context window, and where the facts that
+/// depend on it come from — the catalog snapshot with what was not checked (when it was fetched
+/// as the file says, that Codex re-checks an older one when it starts, that the login is not
+/// compared, that `harn verify --run --agent codex` confirms), or why they are unknown.
+fn model_note(codex: &CodexFacts, places: &Places) -> String {
+    let m = &codex.model;
+    let window = match m.context_window {
+        Some(w) => format!(", with a context window of {w} tokens"),
+        None => ", its context window unknown".to_string(),
+    };
+    let model = match (&m.slug, &m.set_in) {
+        (Some(slug), Some(file)) => {
+            format!("The model is {slug} (set in {}){window}", places.path(file))
+        }
+        (Some(slug), None) => format!("The model is {slug}{window}"),
+        (None, Some(file)) => format!(
+            "The model setting in {} is not text, so Codex refuses to start",
+            places.path(file)
+        ),
+        (None, None) => {
+            "No model is set in the files; Codex picks its default when it starts".to_string()
+        }
+    };
+    let unknown = "sizes that depend on the model are unknown";
+    let facts = match (&m.slug, catalog_unused(codex, places), &codex.catalog.state) {
+        (None, _, _) => format!("Until it is known, {unknown}."),
+        (_, Some(unused), _) => format!("{unused}; {unknown}."),
+        (Some(slug), None, CatalogState::Used { fetched_at }) if !codex.catalog.lists_model => {
+            format!(
+                "Codex's model catalog ({}, fetched at {fetched_at}) has no entry for {slug}; \
+                 {unknown}.",
+                places.path(&codex.home.join("models_cache.json"))
+            )
+        }
+        (Some(_), None, CatalogState::Used { fetched_at }) => format!(
+            "Sizes that depend on the model come from Codex's model catalog as fetched at \
+             {fetched_at} ({}); Codex re-checks a catalog older than 5 minutes when it starts, \
+             and harn does not check it was fetched for your login, so `harn verify --run \
+             --agent codex` confirms them.",
+            places.path(&codex.home.join("models_cache.json"))
+        ),
+        (Some(_), None, _) => format!("{}.", capitalized(unknown)),
+    };
+    format!("{model}. {facts}")
+}
+
+/// The base instructions' detail when their size is unknown: why, from the facts.
+fn base_size_unknown(codex: &CodexFacts, places: &Places) -> String {
+    let m = &codex.model;
+    let why = match (&m.slug, &m.set_in, catalog_unused(codex, places)) {
+        (None, Some(file), _) => format!(
+            "the model setting in {} is not text, so Codex refuses to start",
+            places.path(file)
+        ),
+        (None, None, _) => {
+            "no model is set in the files, so Codex picks one when it starts".to_string()
+        }
+        (Some(_), _, Some(unused)) => unused,
+        (Some(slug), _, None) => format!("{slug} is not in Codex's model catalog"),
+    };
+    format!(
+        "Its size is unknown: {why}; Codex sends these instructions outside its dump, so harn \
+         cannot measure them."
+    )
+}
+
+/// `text` with its first letter up.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// Codex trusts the target dir (its own `.codex/config.toml` loads).
@@ -4784,6 +4940,7 @@ mod tests {
             dir: PathBuf::from("/home/me/2lab.ai/zbrain"),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::ClaudeCode,
+            codex_home: None,
         }
     }
 
@@ -4857,6 +5014,7 @@ mod tests {
             dir: PathBuf::from(dir),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::ClaudeCode,
+            codex_home: None,
         }
     }
 
@@ -4866,6 +5024,7 @@ mod tests {
             dir: PathBuf::from("/home/me/repo"),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::Codex,
+            codex_home: None,
         };
         assert_eq!(
             without_repeated_root(
@@ -4900,6 +5059,7 @@ mod tests {
                 dir: PathBuf::from(format!("{home}/work/repo")),
                 home: Some(PathBuf::from(home)),
                 agent: Agent::Codex,
+                codex_home: None,
             };
             assert_eq!(
                 codex_words(
@@ -4935,6 +5095,7 @@ mod tests {
             dir: PathBuf::from("/home/me/a  b/repo"),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::Codex,
+            codex_home: None,
         };
         // No citation: the text as written.
         for keep in [
@@ -4970,6 +5131,7 @@ mod tests {
             dir: PathBuf::from("/home/me/repo"),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::Codex,
+            codex_home: None,
         };
         // Two paths from different roots in one sentence, either way round.
         assert_eq!(
@@ -5067,6 +5229,7 @@ mod tests {
             dir: PathBuf::from("/home/me/repo/child"),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::Codex,
+            codex_home: None,
         };
         let gate = |level: Option<TrustLevel>, key: &str, file: Option<&str>| TrustGate {
             level,
@@ -5207,6 +5370,161 @@ mod tests {
         // A research file by name is not a reference.
         let keep = "see research/notes-2.md for 3 cases";
         assert_eq!(h(keep).as_deref(), Some(keep));
+    }
+
+    #[test]
+    fn the_codex_home_is_a_root_a_config_reference_binds_at() {
+        let at = |codex_home: Option<&str>| Places {
+            dir: PathBuf::from("/home/me/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: codex_home.map(PathBuf::from),
+        };
+        let signal = "model: gpt-x (/srv/codex/config.toml#/model) · window unknown";
+        assert_eq!(
+            codex_words(signal, &at(Some("/srv/codex"))),
+            "model: gpt-x (model in /srv/codex/config.toml) · window unknown"
+        );
+        assert_eq!(
+            codex_words(
+                "compare /home/me/.codex/config.toml with /srv/codex/config.toml#/model",
+                &at(Some("/srv/codex"))
+            ),
+            "compare ~/.codex/config.toml with model in /srv/codex/config.toml"
+        );
+        // Without it, the same text is not certain: as written.
+        assert_eq!(codex_words(signal, &at(None)), signal);
+        // A tree's facts give it.
+        let mut tree = Tree {
+            agent: Agent::Codex,
+            target_dir: PathBuf::from("/home/me/repo"),
+            agent_version: None,
+            rules_verified_against: "0.0.0".to_string(),
+            tool_search: None,
+            signals: Vec::new(),
+            items: Vec::new(),
+            predicted_known: 0,
+            unknown_rows: 0,
+            observed_body: None,
+            warnings: Vec::new(),
+            home: Some(PathBuf::from("/home/me")),
+            observed_regions: Vec::new(),
+            tool_search_cause: None,
+            trust: None,
+            codex: None,
+        };
+        assert_eq!(Places::of(&tree).codex_home, None);
+        tree.codex = Some(codex_facts(model::CatalogState::Missing));
+        assert_eq!(
+            Places::of(&tree).codex_home,
+            Some(PathBuf::from("/srv/codex"))
+        );
+    }
+
+    /// Facts for a Codex home at `/srv/codex`, model gpt-x set in its config, in this state.
+    fn codex_facts(state: model::CatalogState) -> CodexFacts {
+        CodexFacts {
+            home: PathBuf::from("/srv/codex"),
+            model: model::CodexModel {
+                slug: Some("gpt-x".to_string()),
+                set_in: Some(PathBuf::from("/srv/codex/config.toml")),
+                context_window: None,
+            },
+            catalog: model::Catalog {
+                written_by: Some("0.160.1".to_string()),
+                lists_model: true,
+                state,
+            },
+        }
+    }
+
+    #[test]
+    fn the_model_note_and_the_base_size_say_why_the_catalog_does_not_count() {
+        use model::CatalogState::*;
+        let places = Places {
+            dir: PathBuf::from("/home/me/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: Some(PathBuf::from("/srv/codex")),
+        };
+        let sends = "; Codex sends these instructions outside its dump, so harn cannot measure \
+                     them.";
+        let cases = [
+            (
+                Missing,
+                "Codex's model catalog (/srv/codex/models_cache.json) does not exist yet; Codex \
+                 writes it on its first run",
+            ),
+            (
+                Elsewhere {
+                    set_in: Some(PathBuf::from("/home/me/.codex/config.toml")),
+                },
+                "your config names its own model catalog (model_catalog_json in \
+                 ~/.codex/config.toml), which harn does not read",
+            ),
+            (
+                NotUsed {
+                    why: CatalogWhy::NoIdentity,
+                },
+                "Codex's model catalog (/srv/codex/models_cache.json) is not used: it is an \
+                 older file with no login in it, so Codex fetches a new catalog when it starts",
+            ),
+            (
+                NotUsed {
+                    why: CatalogWhy::Rejected {
+                        detail: "fetched_at is missing".to_string(),
+                    },
+                },
+                "Codex's model catalog (/srv/codex/models_cache.json) is not used: Codex \
+                 cannot read it (fetched_at is missing), so Codex fetches a new catalog when it \
+                 starts",
+            ),
+        ];
+        for (state, why) in cases {
+            let facts = codex_facts(state);
+            assert_eq!(
+                base_size_unknown(&facts, &places),
+                format!("Its size is unknown: {why}{sends}")
+            );
+            assert_eq!(
+                model_note(&facts, &places),
+                format!(
+                    "The model is gpt-x (set in /srv/codex/config.toml), its context window \
+                     unknown. {why}; sizes that depend on the model are unknown."
+                )
+            );
+        }
+        // Used, but no entry for the model.
+        let mut facts = codex_facts(Used {
+            fetched_at: "2026-10-14T00:00:00Z".to_string(),
+        });
+        facts.catalog.lists_model = false;
+        assert_eq!(
+            base_size_unknown(&facts, &places),
+            format!("Its size is unknown: gpt-x is not in Codex's model catalog{sends}")
+        );
+        assert_eq!(
+            model_note(&facts, &places),
+            "The model is gpt-x (set in /srv/codex/config.toml), its context window unknown. \
+             Codex's model catalog (/srv/codex/models_cache.json, fetched at \
+             2026-10-14T00:00:00Z) has no entry for gpt-x; sizes that depend on the model are \
+             unknown."
+        );
+        // No model, or one that is not text.
+        facts.model.slug = None;
+        assert_eq!(
+            base_size_unknown(&facts, &places),
+            format!(
+                "Its size is unknown: the model setting in /srv/codex/config.toml is not text, \
+                 so Codex refuses to start{sends}"
+            )
+        );
+        facts.model.set_in = None;
+        assert_eq!(
+            model_note(&facts, &places),
+            "No model is set in the files; Codex picks its default when it starts. Until it is \
+             known, sizes that depend on the model are unknown."
+        );
     }
 
     #[test]
@@ -5489,6 +5807,7 @@ mod tests {
             dir: PathBuf::from("/srv/app"),
             home: Some(PathBuf::from("/home/me")),
             agent: Agent::ClaudeCode,
+            codex_home: None,
         };
         assert_eq!(p.path(Path::new("/srv/other/f.md")), "/srv/other/f.md");
         assert_eq!(
@@ -5761,6 +6080,7 @@ mod tests {
             observed_regions: Vec::new(),
             tool_search_cause: None,
             trust: None,
+            codex: None,
         }
     }
 

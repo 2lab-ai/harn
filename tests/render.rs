@@ -396,6 +396,7 @@ fn tree() -> Tree {
         observed_regions: Vec::new(),
         tool_search_cause: None,
         trust: None,
+        codex: None,
     }
 }
 

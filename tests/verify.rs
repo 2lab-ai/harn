@@ -401,6 +401,7 @@ fn static_tree(items: Vec<Item>) -> Tree {
         observed_regions: Vec::new(),
         tool_search_cause: None,
         trust: None,
+        codex: None,
     }
 }
 

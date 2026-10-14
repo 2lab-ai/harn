@@ -493,6 +493,7 @@ mod tests {
             observed_regions: Vec::new(),
             tool_search_cause: None,
             trust: None,
+            codex: None,
         };
         let target = Target {
             dir: dir.clone(),

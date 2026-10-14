@@ -35,8 +35,39 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// A Codex home with a model in `models_cache.json`, a global `AGENTS.md`, and a git checkout
-/// with its own `AGENTS.md`; the checkout is trusted when `trusted`.
+/// `fetched_at` of every fixture catalog: a fixed instant, so the notes are the same every run.
+const FETCHED_AT: &str = "2026-10-14T00:00:00Z";
+
+/// `models_cache.json` as codex 0.160.1 writes it — every field codex checks before it uses the
+/// file (`fetched_at`, `etag`, `client_version`, `identity`) — with these `models`. With
+/// [`Fx::target`]'s codex 0.160.1 on `PATH` it is an accepted snapshot: its catalog facts count.
+fn catalog(models: serde_json::Value) -> String {
+    serde_json::json!({
+        "fetched_at": FETCHED_AT,
+        "etag": "W/\"catalog-1\"",
+        "client_version": "0.160.1",
+        "identity": "test-login",
+        "models": models
+    })
+    .to_string()
+}
+
+/// A codex `version` in the Homebrew layout (`Caskroom/codex/<v>/bin/codex`) under `root`, the
+/// version harn reads from its path; the dir to put on `PATH`.
+fn codex_bin(root: &Path, version: &str) -> PathBuf {
+    let exe = root.join("Caskroom/codex").join(version).join("bin/codex");
+    write(&exe, "binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    exe.parent().unwrap().to_path_buf()
+}
+
+/// A Codex home with a model in an accepted `models_cache.json` (codex 0.160.1 on the target's
+/// `PATH`), a global `AGENTS.md`, and a git checkout with its own `AGENTS.md`; the checkout is
+/// trusted when `trusted`.
 fn fx(trusted: bool) -> Fx {
     static N: AtomicUsize = AtomicUsize::new(0);
     let root = std::env::temp_dir().join(format!(
@@ -62,15 +93,17 @@ fn fx(trusted: bool) -> Fx {
         &codex.join("AGENTS.md"),
         &format!("# Mine\n\n{}\n", "Answer briefly. ".repeat(40)),
     );
-    let cache = serde_json::json!({
-        "client_version": "0.160.1",
-        "models": [{
+    codex_bin(&root, "0.160.1");
+    write(
+        &codex.join("models_cache.json"),
+        &catalog(serde_json::json!([{
             "slug": "gpt-test",
             "context_window": 200000,
+            "multi_agent_version": "v2",
+            "include_plugin_usage_instructions": true,
             "model_messages": {"instructions_template": "You are a coding agent. ".repeat(500)}
-        }]
-    });
-    write(&codex.join("models_cache.json"), &cache.to_string());
+        }])),
+    );
     let mut config = "model = \"gpt-test\"\n".to_string();
     if trusted {
         config.push_str(&format!(
@@ -88,11 +121,13 @@ fn fx(trusted: bool) -> Fx {
 }
 
 impl Fx {
+    /// The checkout, with the fixture's codex 0.160.1 on `PATH`.
     fn target(&self) -> Target {
+        let path = self.root.join("Caskroom/codex/0.160.1/bin");
         Target {
             dir: self.repo.clone(),
             home: self.home.clone(),
-            env: BTreeMap::new(),
+            env: BTreeMap::from([("PATH".to_string(), path.display().to_string())]),
             model: None,
             context_window: None,
             bytes_per_token: None,
@@ -294,9 +329,10 @@ fn both_agents_get_a_tab_and_tab_switches_between_them() {
         "{}",
         frame[0]
     );
+    // With room, the installed codex's version (the fixture's 0.160.1 on PATH) too.
     let wide = screen(&one, 120, 40);
     assert!(
-        wide[0].starts_with(" repo · Codex · trusted · read-only · "),
+        wide[0].starts_with(" repo · Codex 0.160.1 · trusted · read-only · "),
         "{}",
         wide[0]
     );
@@ -336,11 +372,15 @@ fn the_codex_header_names_the_agent_and_the_trust_state_and_the_notes_say_what_i
         }
         let notes = &app.screen().notes;
         assert_eq!(notes[0].text, says);
-        // The model note reads as words: the key and its file, never `file#/pointer`.
-        assert!(
-            notes.iter().any(|n| n
-                .text
-                .starts_with("Model: gpt-test (model in ~/.codex/config.toml)")),
+        // The model note is written from the resolver's facts: the model and its file, the
+        // window, and the catalog snapshot with what harn did not check.
+        assert_eq!(
+            notes[1].text,
+            "The model is gpt-test (set in ~/.codex/config.toml), with a context window of \
+             200000 tokens. Sizes that depend on the model come from Codex's model catalog as \
+             fetched at 2026-10-14T00:00:00Z (~/.codex/models_cache.json); Codex re-checks a \
+             catalog older than 5 minutes when it starts, and harn does not check it was fetched \
+             for your login, so `harn verify --run --agent codex` confirms them.",
             "{notes:?}"
         );
         press(&mut app, KeyCode::Char('i'));
@@ -741,16 +781,17 @@ fn fx_full() -> Fx {
         &f.codex.join("rules/default.rules"),
         "prefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n",
     );
-    let cache = serde_json::json!({
-        "client_version": "0.160.1",
-        "models": [{
+    write(
+        &f.codex.join("models_cache.json"),
+        &catalog(serde_json::json!([{
             "slug": "gpt-test",
             "context_window": 200000,
             "supports_search_tool": true,
+            "multi_agent_version": "v2",
+            "include_plugin_usage_instructions": true,
             "model_messages": {"instructions_template": "You are a coding agent. ".repeat(500)}
-        }]
-    });
-    write(&f.codex.join("models_cache.json"), &cache.to_string());
+        }])),
+    );
     let base = format!(
         "model = \"gpt-test\"\n\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n\n\
          [plugins.\"docs@mkt\"]\nenabled = true\n\n\
@@ -1069,6 +1110,7 @@ fn synthetic(f: &Fx) -> Tree {
             folder: trusted.clone(),
             agents_md: trusted,
         }),
+        codex: None,
     }
 }
 
@@ -1520,8 +1562,10 @@ fn dump_full() {
 fn fx_unknown_model() -> Fx {
     let f = fx_full();
     std::fs::remove_file(f.codex.join("AGENTS.md")).unwrap();
-    let cache = serde_json::json!({"client_version": "0.160.1", "models": [{"slug": "other"}]});
-    write(&f.codex.join("models_cache.json"), &cache.to_string());
+    write(
+        &f.codex.join("models_cache.json"),
+        &catalog(serde_json::json!([{"slug": "other", "base_instructions": "Base."}])),
+    );
     f
 }
 
@@ -1563,6 +1607,101 @@ fn a_group_with_unmeasured_rows_shows_its_known_part_as_a_floor() {
     }
 }
 
+/// A catalog snapshot harn does not use, kept refused on purpose: no codex on `PATH`, another
+/// codex than the one that wrote the file, a codex whose version no file names. The notes and
+/// the base instructions' detail say why in words, from the resolver's facts — never a code
+/// reference or a `#/` pointer.
+#[test]
+fn a_catalog_snapshot_harn_does_not_use_is_explained_in_words() {
+    let base = "codex/system-prompt/builtin/instructions";
+    let path_to = |dir: &Path| BTreeMap::from([("PATH".to_string(), dir.display().to_string())]);
+    for (case, why) in [
+        (
+            "no codex on PATH",
+            "codex is not on PATH, so harn cannot tell whether Codex accepts it",
+        ),
+        (
+            "another codex",
+            "codex 0.160.1 wrote it and codex 0.159.0 is installed, so Codex fetches a new \
+             catalog when it starts",
+        ),
+        (
+            "unversioned codex",
+            "the installed codex's version cannot be read, so harn cannot tell whether Codex \
+             accepts it",
+        ),
+    ] {
+        let f = fx_full();
+        let env = match case {
+            "no codex on PATH" => BTreeMap::new(),
+            "another codex" => path_to(&codex_bin(&f.root.join("other"), "0.159.0")),
+            _ => {
+                let exe = f.root.join("plain/bin/codex");
+                write(&exe, "binary");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                path_to(exe.parent().unwrap())
+            }
+        };
+        let target = Target { env, ..f.target() };
+        let mut tree = Codex.resolve(&target, None).expect("resolve");
+        plan::annotate_freed(&Codex, &target, &mut tree).expect("annotate");
+        let unused =
+            format!("Codex's model catalog (~/.codex/models_cache.json) is not used: {why}");
+        let notes: Vec<String> = vm::build(&tree, &[], &HashMap::new(), vm::Sort::Size)
+            .notes
+            .into_iter()
+            .map(|n| n.text)
+            .collect();
+        assert!(
+            notes.contains(&format!(
+                "Tool search cannot be decided because {unused}; MCP servers are shown as \
+                 loading up front."
+            )),
+            "{case}: {notes:#?}"
+        );
+        assert!(
+            notes.contains(&format!(
+                "The model is gpt-test (set in ~/.codex/config.toml), its context window \
+                 unknown. {unused}; sizes that depend on the model are unknown."
+            )),
+            "{case}: {notes:#?}"
+        );
+        for n in &notes {
+            assert!(
+                !n.contains("#/") && !n.contains(".rs:") && !n.contains("models-manager"),
+                "{case}: {n}"
+            );
+        }
+        let mut app = App::new(
+            target,
+            vec![(Box::new(Codex) as Box<dyn Resolver>, tree)],
+            f.journal(),
+            Opts {
+                unicode: true,
+                color: false,
+                readonly: false,
+            },
+        );
+        codex_on(&mut app, base);
+        let detail = panel_text(&screen(&app, 120, 40));
+        assert!(
+            detail.contains(&format!(
+                "Its size is unknown: {unused}; Codex sends these instructions outside its \
+                 dump, so harn cannot measure them."
+            )),
+            "{case}: {detail}"
+        );
+        assert!(
+            !detail.contains("not in the model catalog"),
+            "{case}: {detail}"
+        );
+    }
+}
+
 #[test]
 fn base_instructions_say_where_their_size_comes_from_and_that_verify_cannot_check_them() {
     let base = "codex/system-prompt/builtin/instructions";
@@ -1583,7 +1722,7 @@ fn base_instructions_say_where_their_size_comes_from_and_that_verify_cannot_chec
     let detail = panel_text(&screen(&app, 120, 40));
     assert!(
         detail.contains(
-            "Its size is unknown: the model is not in the model catalog, and Codex sends these \
+            "Its size is unknown: gpt-test is not in Codex's model catalog; Codex sends these \
              instructions outside its dump, so harn cannot measure them."
         ),
         "{detail}"
@@ -1976,6 +2115,7 @@ fn a_claude_card_keeps_its_plan_warning_as_written() {
         observed_regions: Vec::new(),
         tool_search_cause: None,
         trust: None,
+        codex: None,
     };
     let file = home.join(".claude/settings.json");
     let warning = format!(

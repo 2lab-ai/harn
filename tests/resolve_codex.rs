@@ -1418,6 +1418,60 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
     }
 }
 
+/// The facts the screens word themselves: the Codex home the tree was resolved with (also
+/// `CODEX_HOME`), the model and its file, and the catalog snapshot's state with why it is not
+/// used — the same facts the `model:` signal spells for the CLI.
+#[test]
+fn codex_facts_name_the_home_the_model_and_the_catalog_state() {
+    use model::{CatalogState, CatalogWhy};
+    let f = fx();
+    catalog(&f);
+    user_config(&f, None, "model = \"rich-model\"\n");
+    let facts = |t: &Target| {
+        resolve(t, None)
+            .codex
+            .expect("a Codex tree carries its facts")
+    };
+
+    let used = facts(&ctarget(&f));
+    assert_eq!(used.home, f.codex);
+    assert_eq!(used.model.slug.as_deref(), Some("rich-model"));
+    assert_eq!(used.model.set_in, Some(f.codex.join("config.toml")));
+    assert_eq!(used.catalog.written_by.as_deref(), Some("0.160.1"));
+    assert!(used.catalog.lists_model);
+    assert_eq!(
+        used.catalog.state,
+        CatalogState::Used {
+            fetched_at: FETCHED_AT.to_string()
+        }
+    );
+
+    let refused = |t: &Target| match facts(t).catalog.state {
+        CatalogState::NotUsed { why } => why,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(refused(&target(&f)), CatalogWhy::CodexNotFound);
+    assert_eq!(
+        refused(&with_codex(&f, target(&f), "0.159.0")),
+        CatalogWhy::OtherVersion {
+            written_by: "0.160.1".to_string(),
+            installed: "0.159.0".to_string()
+        }
+    );
+    assert!(!CatalogWhy::CodexNotFound.refetched());
+
+    // `CODEX_HOME` elsewhere is the home the facts name.
+    let elsewhere = f.root.join("elsewhere");
+    write(&elsewhere.join("config.toml"), "model = \"plain-model\"\n");
+    let mut t = ctarget(&f);
+    t.env
+        .insert("CODEX_HOME".to_string(), elsewhere.display().to_string());
+    let moved = facts(&t);
+    assert_eq!(moved.home, elsewhere);
+    assert_eq!(moved.model.set_in, Some(elsewhere.join("config.toml")));
+    assert_eq!(moved.catalog.state, CatalogState::Missing);
+}
+
 #[test]
 fn without_codex_on_path_the_cache_is_not_trusted() {
     const NOT_FOUND: &str =

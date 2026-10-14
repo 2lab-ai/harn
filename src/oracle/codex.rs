@@ -1244,6 +1244,8 @@ pub fn build(
         home: None,
         observed_regions: regions.iter().map(|r| (r.name.clone(), r.bytes)).collect(),
         tool_search_cause: None,
+        trust: None,
+        codex: None,
     };
     CodexCapture {
         context,

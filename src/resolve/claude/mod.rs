@@ -290,6 +290,7 @@ pub fn resolve(target: &Target, overlay: Option<&Overlay>) -> anyhow::Result<Tre
         observed_regions: Vec::new(),
         tool_search_cause: Some(tool_search_cause),
         trust: None,
+        codex: None,
     };
     let (known, unknown) = totals(&tree);
     tree.predicted_known = known;

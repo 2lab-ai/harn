@@ -263,6 +263,102 @@ pub struct Tree {
     /// signal says the same for the CLI and the report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<Trust>,
+    /// What a Codex tree's screens word themselves — its home, its model and the model catalog
+    /// harn read; None for another agent. The `model:` signal says the same for the CLI and the
+    /// report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<CodexFacts>,
+}
+
+/// A Codex tree's facts beyond its rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexFacts {
+    /// The Codex home the tree was resolved with: `CODEX_HOME`, else `~/.codex`.
+    pub home: PathBuf,
+    pub model: CodexModel,
+    /// `<home>/models_cache.json`: the snapshot of the catalog codex last fetched.
+    pub catalog: Catalog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexModel {
+    /// None when nothing sets a model (codex picks its default at startup), or the setting is
+    /// not a string.
+    pub slug: Option<String>,
+    /// The config file whose `model` sets it — or, with no slug, holds a value that is not a
+    /// string (codex refuses to start then); None when the target names it or nothing does.
+    pub set_in: Option<PathBuf>,
+    /// Tokens, when known.
+    pub context_window: Option<u64>,
+}
+
+/// The model catalog snapshot as harn read it. Every fact that depends on the model's catalog
+/// entry (base instructions, context window, tool search, the blocks the entry asks for) counts
+/// only while it is [`CatalogState::Used`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Catalog {
+    /// Its `client_version`: the codex that last wrote it.
+    pub written_by: Option<String>,
+    /// It has an entry for the model (read whether or not it is used).
+    pub lists_model: bool,
+    pub state: CatalogState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum CatalogState {
+    /// Accepted as the snapshot; `fetched_at` as the file writes it.
+    Used {
+        fetched_at: String,
+    },
+    /// No file yet: codex writes it on its first run.
+    Missing,
+    /// Config names its own catalog (`model_catalog_json`, set in `set_in`), which harn does not
+    /// read; `models_cache.json` is not consulted then.
+    Elsewhere {
+        set_in: Option<PathBuf>,
+    },
+    NotUsed {
+        why: CatalogWhy,
+    },
+}
+
+/// Why harn does not use `models_cache.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CatalogWhy {
+    /// Not JSON: codex fetches the catalog instead.
+    NotJson,
+    /// codex cannot parse it (`detail`: what is wrong): it fetches the catalog instead.
+    Rejected { detail: String },
+    /// A shape harn does not read (`detail`); whether codex loads it is unknown.
+    UnreadShape { detail: String },
+    /// No codex on `PATH`: whether it accepts the file is unknown.
+    CodexNotFound,
+    /// A codex on `PATH` whose version no file names: whether it accepts the file is unknown.
+    CodexVersionUnknown,
+    /// No `client_version`: codex fetches the catalog instead.
+    NoClientVersion,
+    /// Written by another codex than the installed one: codex fetches the catalog instead.
+    OtherVersion {
+        written_by: String,
+        installed: String,
+    },
+    /// No `identity` (a legacy file): codex fetches the catalog instead.
+    NoIdentity,
+}
+
+impl CatalogWhy {
+    /// Codex itself would not load the file (it fetches the catalog instead); otherwise whether
+    /// it loads it is unknown.
+    pub fn refetched(&self) -> bool {
+        !matches!(
+            self,
+            CatalogWhy::UnreadShape { .. }
+                | CatalogWhy::CodexNotFound
+                | CatalogWhy::CodexVersionUnknown
+        )
+    }
 }
 
 /// Codex's two trust decisions for the target dir. They are kept apart because they decide
@@ -525,6 +621,7 @@ mod tests {
             observed_regions: Vec::new(),
             tool_search_cause: None,
             trust: None,
+            codex: None,
         }
     }
 
@@ -706,6 +803,46 @@ mod tests {
 
         let claude = serde_json::to_value(tree(Vec::new())).unwrap();
         assert!(claude.get("trust").is_none(), "{claude}");
+        assert!(claude.get("codex").is_none(), "{claude}");
+
+        // The Codex facts: optional the same way, their enums tagged.
+        codex.codex = Some(CodexFacts {
+            home: PathBuf::from("/home/.codex"),
+            model: CodexModel {
+                slug: Some("gpt-x".to_string()),
+                set_in: Some(PathBuf::from("/home/.codex/config.toml")),
+                context_window: Some(200000),
+            },
+            catalog: Catalog {
+                written_by: Some("0.160.1".to_string()),
+                lists_model: true,
+                state: CatalogState::NotUsed {
+                    why: CatalogWhy::OtherVersion {
+                        written_by: "0.160.1".to_string(),
+                        installed: "0.159.0".to_string(),
+                    },
+                },
+            },
+        });
+        let json = serde_json::to_value(&codex).unwrap();
+        assert_eq!(
+            json["codex"]["catalog"]["state"],
+            serde_json::json!({
+                "state": "not-used",
+                "why": {"kind": "other-version", "written_by": "0.160.1", "installed": "0.159.0"}
+            })
+        );
+        assert_eq!(serde_json::from_value::<Tree>(json.clone()).unwrap(), codex);
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("codex");
+        assert_eq!(serde_json::from_value::<Tree>(older).unwrap().codex, None);
+        assert_eq!(
+            serde_json::to_value(CatalogState::Used {
+                fetched_at: "t".to_string()
+            })
+            .unwrap(),
+            serde_json::json!({"state": "used", "fetched_at": "t"})
+        );
     }
 
     #[test]
