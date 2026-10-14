@@ -1715,6 +1715,28 @@ fn a_catalog_snapshot_harn_does_not_use_is_explained_in_words() {
     }
 }
 
+/// A missing Codex home is the bigger fact: its note comes first, the model note after it.
+#[test]
+fn a_missing_codex_home_is_the_first_note_and_the_model_note_follows() {
+    let f = fx(true);
+    std::fs::remove_dir_all(&f.codex).unwrap();
+    let tree = Codex.resolve(&f.target(), None).expect("resolve");
+    let notes: Vec<String> = vm::build(&tree, &[], &HashMap::new(), vm::Sort::Size)
+        .notes
+        .into_iter()
+        .map(|n| n.text)
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            "No codex home at ~/.codex: codex has not run with this home (a first run creates \
+             it); nothing to list.",
+            "No model is set in the files; Codex picks its default when it starts. Until it is \
+             known, sizes that depend on the model are unknown.",
+        ]
+    );
+}
+
 #[test]
 fn base_instructions_say_where_their_size_comes_from_and_that_verify_cannot_check_them() {
     let base = "codex/system-prompt/builtin/instructions";

@@ -1628,15 +1628,20 @@ impl Builder<'_> {
         notes
     }
 
-    /// The notes of a Codex tree: whether Codex trusts this folder first (it decides what of
-    /// the project loads), then drift, tool search (when there is an MCP server), the other
-    /// signals and the warnings, each in words.
+    /// The notes of a Codex tree: a missing Codex home first (nothing else is listed then),
+    /// then whether Codex trusts this folder (it decides what of the project loads), drift, the
+    /// model, tool search (when there is an MCP server), the other signals and the warnings, each
+    /// in words.
     fn codex_notes(&self) -> Vec<Note> {
         let tree = self.tree;
         let places = &self.places;
         let note = |text: String| Note { text };
         let mut notes = Vec::new();
         let mut signals: Vec<&String> = Vec::new();
+        let no_home = |w: &str| w.starts_with("no codex home at ");
+        for warning in tree.warnings.iter().filter(|w| no_home(w)) {
+            notes.push(note(sentence(&codex_words(warning, places))));
+        }
         // The trust note is written from the resolver's facts; its `trust:` signal (the same
         // facts for the CLI) is not repeated.
         if let Some(trust) = &tree.trust {
@@ -1701,7 +1706,7 @@ impl Builder<'_> {
                 notes.push(note(sentence(&text)));
             }
         }
-        for warning in &tree.warnings {
+        for warning in tree.warnings.iter().filter(|w| !no_home(w)) {
             let text = if warning.starts_with("codex skill listing budget unknown") {
                 "The skill listing's budget is 2% of the context window, which is unknown \
                  here; whether it shortens descriptions is unknown until `harn verify --run \
