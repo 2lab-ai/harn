@@ -588,6 +588,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

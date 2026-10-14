@@ -3,7 +3,9 @@
 //! (commit d27764b8; paths below are relative to `codex-rs/`): `CODEX_HOME`, the config layers
 //! and the three trust gates ([`config`]), the AGENTS.md message and `developer_instructions`
 //! ([`instructions`]), and the built-in blocks with their `include_*` / `agents.enabled` switches
-//! ([`builtins`]). Skills, plugins, hooks, rules and MCP servers are later work units.
+//! ([`builtins`]), hooks ([`hooks`]), exec-policy rules files ([`rules`]) and MCP servers with
+//! the tool-search state ([`mcp`]). Skills and plugins (with their hooks and MCP servers) are a
+//! later work unit.
 //!
 //! Reads files only, all of them through [`Fs`] so an [`Overlay`] is honoured everywhere
 //! (`SetJson` patches a TOML file viewed as JSON); never spawns a process and never touches the
@@ -26,7 +28,10 @@
 
 mod builtins;
 mod config;
+mod hooks;
 mod instructions;
+mod mcp;
+mod rules;
 
 use crate::model::{
     item_id, Agent, Cost, Item, Kind, Knob, Layer, Mode, Origin, Overlay, Scope, Target, Tree,
@@ -42,6 +47,8 @@ pub(crate) struct Ctx<'a> {
     pub target: &'a Target,
     pub fs: Fs,
     pub codex_home: PathBuf,
+    /// `/etc/codex` (injectable in tests): `requirements.toml`, `hooks.json`, `rules/`.
+    pub system_dir: PathBuf,
     pub config: Config,
     /// The effective model and context window (C2 needs the window for the skills cap).
     pub model: ModelFacts,
@@ -247,6 +254,7 @@ pub(crate) fn resolve_with(
         target,
         fs,
         codex_home,
+        system_dir: system_dir.to_path_buf(),
         config,
         model,
         warnings,
@@ -258,7 +266,13 @@ pub(crate) fn resolve_with(
     items.extend(builtins::developer_blocks(&ctx));
     items.extend(instructions::agents_md(&mut ctx));
     items.extend(builtins::environment_context(&ctx));
+    items.extend(hooks::collect(&mut ctx));
+    items.extend(rules::collect(&ctx));
+    let (tool_search, tool_search_cause) = mcp::tool_search(&ctx);
+    items.extend(mcp::collect(&mut ctx, tool_search));
     tree.items = items;
+    tree.tool_search = tool_search;
+    tree.tool_search_cause = Some(tool_search_cause);
 
     tree.signals.push(trust_signal(&ctx));
     tree.signals.push(model_signal(&ctx));
