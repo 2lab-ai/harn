@@ -652,10 +652,9 @@ fn untrusted_drops_project_agents_but_keeps_the_global_file() {
 #[test]
 fn base_instructions_and_context_window_come_from_models_cache() {
     let f = fx();
-    let cache = json!({
-        "fetched_at": FETCHED_AT,
-        "client_version": "0.160.1",
-        "models": [
+    cache(
+        &f,
+        json!([
             {
                 "slug": "test-model",
                 "context_window": 1000,
@@ -664,35 +663,19 @@ fn base_instructions_and_context_window_come_from_models_cache() {
                 "model_messages": {"instructions_template": "t".repeat(100)}
             },
             {"slug": "legacy-model", "base_instructions": "x".repeat(42)}
-        ]
-    });
-    write(
-        &f.codex.join("models_cache.json"),
-        &serde_json::to_string(&cache).unwrap(),
+        ]),
     );
     user_config(&f, None, "model = \"test-model\"\n");
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     let base = row(&t, "/builtin/instructions");
     assert_eq!(base.cost.predicted, Some(100));
     assert!(base.cost.predicted_is_estimate);
-    assert_eq!(t.agent_version, None, "no codex on the target's PATH");
-    // No codex found: the file stays the best snapshot, and says it may not be what codex uses.
-    assert!(
-        base.origin.why.iter().any(|w| w
-            == "from models_cache.json, which codex may refetch: codex not found on PATH: cannot tell whether it accepts models_cache.json"),
-        "{:?}",
-        base.origin.why
-    );
+    assert_eq!(t.agent_version.as_deref(), Some("0.160.1"));
     let model = signal(&t, "model:");
     assert!(
-        model.contains("context window 1000 tokens (models_cache.json, which codex may refetch)"),
+        model.contains("context window 1000 tokens (models_cache.json)") && model.ends_with(USED),
         "{model}"
     );
-    assert!(
-        model.ends_with(" · models_cache.json not used as is, which codex may refetch: codex not found on PATH: cannot tell whether it accepts models_cache.json"),
-        "{model}"
-    );
-    assert!(!model.contains("identity not compared"), "{model}");
     assert_eq!(t.predicted_known, 100);
 
     // `model_context_window` is clamped to the catalog's maximum.
@@ -701,12 +684,12 @@ fn base_instructions_and_context_window_come_from_models_cache() {
         None,
         "model = \"test-model\"\nmodel_context_window = 5000\n",
     );
-    let s = resolve(&target(&f), None).signals.join("\n");
+    let s = resolve(&ctarget(&f), None).signals.join("\n");
     assert!(s.contains("context window 2000 tokens"), "{s}");
 
     // A catalog entry with only the legacy field.
     user_config(&f, None, "model = \"legacy-model\"\n");
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     assert_eq!(row(&t, "/builtin/instructions").cost.predicted, Some(42));
 
     // The `instructions` key replaces the catalog text, byte-exact.
@@ -715,13 +698,109 @@ fn base_instructions_and_context_window_come_from_models_cache() {
         None,
         "model = \"test-model\"\ninstructions = \"custom\"\n",
     );
-    let t = resolve(&target(&f), None);
+    let t = resolve(&ctarget(&f), None);
     let base = row(&t, "/builtin/instructions");
     assert_eq!(base.cost.predicted, Some(6));
     assert!(!base.cost.predicted_is_estimate);
 
     // The cache's writer is reported as a fact about the file, not as the installed codex.
     assert!(signal(&t, "model:").contains(" · models_cache.json written by codex 0.160.1 · "));
+}
+
+#[test]
+fn a_snapshot_outside_the_contract_supplies_no_window_and_no_base_size() {
+    let f = fx();
+    let entry = json!({
+        "slug": "m",
+        "context_window": 1000,
+        "max_context_window": 1000,
+        "base_instructions": "b".repeat(30)
+    });
+    // (cache top level, why it is not accepted, the installed codex); `None` = accepted.
+    let accepted = json!({
+        "fetched_at": FETCHED_AT, "client_version": "0.160.1", "identity": "test-login",
+        "models": [entry.clone()]
+    });
+    let other_version = json!({
+        "fetched_at": FETCHED_AT, "client_version": "0.159.0", "identity": "test-login",
+        "models": [entry.clone()]
+    });
+    let no_fetched_at = json!({
+        "client_version": "0.160.1", "identity": "test-login", "models": [entry.clone()]
+    });
+    for (file, why) in [
+        (
+            &other_version,
+            Some("models_cache.json was written by codex 0.159.0, not 0.160.1"),
+        ),
+        (
+            &no_fetched_at,
+            Some("models_cache.json: fetched_at is missing, so codex cannot parse the file"),
+        ),
+        (&accepted, None),
+    ] {
+        raw_cache(&f, file.clone());
+
+        // No config window: the entry's 1000 counts only from an accepted snapshot.
+        user_config(&f, None, "model = \"m\"\n");
+        let t = resolve(&ctarget(&f), None);
+        let model = signal(&t, "model:");
+        let base = row(&t, "/builtin/instructions");
+        match why {
+            Some(why) => {
+                assert!(
+                    model.contains(" · context window unknown · ") && model.contains(why),
+                    "{model}"
+                );
+                assert_eq!(base.cost.predicted, None, "{why}");
+                assert!(
+                    base.origin.why.contains(
+                        &"the file's snapshot says 30 bytes; not used as this row's size"
+                            .to_string()
+                    ),
+                    "{:?}",
+                    base.origin.why
+                );
+            }
+            None => {
+                assert!(
+                    model.contains(" · context window 1000 tokens (models_cache.json) · "),
+                    "{model}"
+                );
+                assert_eq!(base.cost.predicted, Some(30));
+            }
+        }
+
+        // A config window of 2000: clamped to the catalog's 1000 only from an accepted snapshot;
+        // otherwise named, and unknown.
+        user_config(&f, None, "model = \"m\"\nmodel_context_window = 2000\n");
+        let t = resolve(&ctarget(&f), None);
+        let model = signal(&t, "model:");
+        let at = format!(
+            "{}#/model_context_window",
+            f.codex.join("config.toml").display()
+        );
+        match why {
+            Some(why) => assert!(
+                model.contains(&format!(
+                    " · context window unknown (configured 2000 ({at}); the catalog's max_context_window may lower it, and models_cache.json is not used: {why}"
+                )) && !model.contains("1000 tokens"),
+                "{model}"
+            ),
+            None => assert!(
+                model.contains(&format!(
+                    " · context window 1000 tokens ({at} clamped to models_cache.json max_context_window 1000) · "
+                )),
+                "{model}"
+            ),
+        }
+    }
+
+    // A target window still wins whatever the snapshot.
+    raw_cache(&f, other_version);
+    let mut t = ctarget(&f);
+    t.context_window = Some(4000);
+    assert!(signal(&resolve(&t, None), "model:").contains("context window 4000 tokens (target)"));
 }
 
 /// A codex `version` on the target's `PATH` (Homebrew layout, `Caskroom/codex/<v>/bin/codex`): the
@@ -1219,19 +1298,22 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
                 "{name}: {s}"
             );
         }
-        // The snapshot facts keep the file, saying codex would not use it.
+        // No catalog fact from a file outside the contract: the base instructions' size is
+        // unknown; the file's figure is only quoted.
         let base = row(&t, "/builtin/instructions");
-        assert_eq!(base.cost.predicted, Some(2), "{why}");
+        assert_eq!(base.cost.predicted, None, "{why}");
         assert!(
             base.origin.why.iter().any(|w| w
-                .starts_with("from models_cache.json, which codex would refetch: ")
-                && w.contains(why)),
+                .starts_with("size unknown until a capture: models_cache.json: ")
+                && w.contains(why))
+                && base.origin.why.iter().any(|w| w
+                    == "the file's snapshot says 2 bytes; not used as this row's size"),
             "{why}: {:?}",
             base.origin.why
         );
         let model = signal(&t, "model:");
         assert!(
-            model.contains(" · models_cache.json not used as is, which codex would refetch: ")
+            model.contains(" · models_cache.json not used: models_cache.json: ")
                 && !model.contains("identity not compared"),
             "{model}"
         );
@@ -1290,9 +1372,10 @@ fn one_bad_field_anywhere_voids_the_cache_for_every_model() {
         }
         let base = row(&t, "/builtin/instructions");
         assert!(
-            base.origin.why.iter().any(|w| w
-                .starts_with("from models_cache.json, which codex may refetch: ")
-                && w.contains(why)),
+            base.cost.predicted.is_none()
+                && base.origin.why.iter().any(|w| w
+                    .starts_with("size unknown until a capture: models_cache.json: ")
+                    && w.contains(why)),
             "{why}: {:?}",
             base.origin.why
         );
@@ -1314,9 +1397,7 @@ fn without_codex_on_path_the_cache_is_not_trusted() {
         }
         let model = signal(t, "model:");
         assert!(
-            model.ends_with(&format!(
-                " · models_cache.json not used as is, which codex may refetch: {reason}"
-            )),
+            model.ends_with(&format!(" · models_cache.json not used: {reason}")),
             "{model}"
         );
     };

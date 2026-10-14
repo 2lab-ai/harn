@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 
 /// Pushed to `Tree.warnings` when the budget cannot be computed (the window is unknown to harn).
 pub const CAP_STATE_UNKNOWN: &str =
-    "codex skill listing budget unknown (the model's context window is not in the config or models_cache.json); fit state unknown until a capture";
+    "codex skill listing budget unknown (the model's context window is unknown: see the model: signal); fit state unknown until a capture";
 
 /// The listing container's id name and the framing row's id name.
 pub(crate) const LISTING: &str = "skills";

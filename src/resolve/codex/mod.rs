@@ -86,8 +86,12 @@ pub(crate) struct ModelFacts {
     /// `"<file>#/model"` when the effective `model` is set but not a string (unknown model).
     pub slug_unreadable: Option<String>,
     pub context_window: Option<u64>,
+    /// Where `context_window` came from; with no window, why it is unknown although config sets
+    /// one.
     pub window_from: Option<String>,
-    /// The catalog entry of the slug in `$CODEX_HOME/models_cache.json`.
+    /// The entry of the slug in `$CODEX_HOME/models_cache.json` as read, accepted or not: catalog
+    /// facts come only through [`Ctx::catalog_entry`], which returns it only for an accepted
+    /// snapshot ([`CacheUse::Used`]). Read directly only to quote the file in an explanation.
     pub catalog: Option<Value>,
     /// `client_version` of `models_cache.json`: the codex that last refreshed the catalog.
     pub catalog_version: Option<String>,
@@ -95,9 +99,10 @@ pub(crate) struct ModelFacts {
     /// so every catalog fact (base instructions, window) stays unknown rather than mixing in
     /// `models_cache.json`.
     pub catalog_unread: Option<String>,
-    /// Whether harn uses `models_cache.json` ([`CacheUse`], [`cache_use`]). The catalog-gated
-    /// rows, the skills usage section and the tool-search state depend on it; base instructions
-    /// and the window keep reading the file as the best snapshot and say so.
+    /// Whether harn accepts `models_cache.json` as its snapshot ([`CacheUse`], [`cache_use`]).
+    /// Every catalog fact depends on it, without exception: the catalog-gated rows, the skills
+    /// usage section, the tool-search state, the base instructions' size, the context window and
+    /// the `max_context_window` clamp.
     pub cache_use: CacheUse,
 }
 
@@ -137,15 +142,16 @@ pub(crate) enum CacheUse {
     /// No file yet: codex writes it on its first run.
     #[default]
     Missing,
-    /// Codex would not use the file: it cannot parse it, or the file belongs to another version or
-    /// login. Why.
+    /// Not accepted, and codex would not load it either: it cannot parse it, or the file belongs
+    /// to another version or login. Why.
     Refetched(String),
-    /// harn cannot tell (no codex version, a shape harn does not read). Why.
+    /// Not accepted: harn cannot tell whether codex loads it (no codex version, a shape harn does
+    /// not read). Why.
     Unknown(String),
 }
 
 impl CacheUse {
-    /// Why the catalog-gated rows cannot follow the file; None when codex uses it.
+    /// Why harn does not accept the file as its snapshot; None when it does.
     pub fn reason(&self) -> Option<String> {
         match self {
             CacheUse::Used { .. } => None,
@@ -153,25 +159,6 @@ impl CacheUse {
                 Some("no models_cache.json yet (codex writes it on its first run)".to_string())
             }
             CacheUse::Refetched(why) | CacheUse::Unknown(why) => Some(why.clone()),
-        }
-    }
-
-    /// `"which codex would refetch: <why>"` (or `may`) for facts still read from a file that
-    /// codex does not, or may not, use as it is.
-    pub fn qualifier(&self) -> Option<String> {
-        match self {
-            CacheUse::Used { .. } | CacheUse::Missing => None,
-            CacheUse::Refetched(why) => Some(format!("which codex would refetch: {why}")),
-            CacheUse::Unknown(why) => Some(format!("which codex may refetch: {why}")),
-        }
-    }
-
-    /// [`CacheUse::qualifier`] without the reason, where the `model:` signal already gives it.
-    pub fn short_qualifier(&self) -> Option<&'static str> {
-        match self {
-            CacheUse::Used { .. } | CacheUse::Missing => None,
-            CacheUse::Refetched(_) => Some("which codex would refetch"),
-            CacheUse::Unknown(_) => Some("which codex may refetch"),
         }
     }
 }
@@ -198,10 +185,10 @@ impl Ctx<'_> {
         path.display().to_string()
     }
 
-    /// The model's slug and the catalog entry codex will read for it, or why harn does not know
-    /// that entry: config names its own catalog, there is no (readable) model, codex would not
-    /// (or may not) use `models_cache.json` ([`ModelFacts::cache_use`]), or the model is not in
-    /// it. An entry returned here has passed [`validate_cache`].
+    /// The model's slug and its entry in harn's accepted snapshot of the catalog, or why harn has
+    /// none: config names its own catalog, there is no (readable) model, `models_cache.json` is
+    /// not accepted ([`ModelFacts::cache_use`]), or the model is not in it. The one gate for
+    /// catalog facts; an entry returned here has passed [`validate_cache`].
     pub fn catalog_entry(&self) -> Result<(&str, &Value), String> {
         let m = &self.model;
         if let Some(at) = &m.catalog_unread {
@@ -743,6 +730,7 @@ fn model_signal(ctx: &Ctx) -> String {
         (_, _, Some(at)) => {
             format!("{model} · context window unknown ({at}: that catalog is not read)")
         }
+        (None, Some(why), None) => format!("{model} · context window unknown ({why})"),
         _ => format!("{model} · context window unknown"),
     };
     // The cache is rewritten by whichever codex refreshed it last (two installs on one machine
@@ -758,8 +746,10 @@ fn model_signal(ctx: &Ctx) -> String {
             "{model} · catalog facts from codex's catalog fetched at {fetched_at} (models_cache.json): codex re-checks a catalog older than 5 minutes with the server when it starts, identity is not compared with your login, and `harn verify --run --agent codex` confirms"
         );
     }
-    match (&m.catalog_unread, m.cache_use.qualifier()) {
-        (None, Some(q)) => format!("{model} · models_cache.json not used as is, {q}"),
+    match (&m.catalog_unread, &m.cache_use) {
+        (None, CacheUse::Refetched(why) | CacheUse::Unknown(why)) => {
+            format!("{model} · models_cache.json not used: {why}")
+        }
         _ => model,
     }
 }
@@ -767,7 +757,10 @@ fn model_signal(ctx: &Ctx) -> String {
 /// The model (`target.model`, else the effective `model` key), its `models_cache.json` entry,
 /// and the context window: `target.context_window`, else `model_context_window` clamped to the
 /// catalog's `max_context_window` (`models-manager/src/model_info.rs:20-27`), else the catalog's
-/// `context_window`. `installed` is the codex that will read `models_cache.json`.
+/// `context_window`. The catalog's two values count only from an accepted snapshot
+/// ([`CacheUse::Used`]); without one a configured window is named but unknown, since the
+/// catalog's maximum may lower it. `installed` is the codex whose version the snapshot must
+/// match.
 fn model_facts(
     fs: &Fs,
     target: &Target,
@@ -829,14 +822,15 @@ fn model_facts(
                 .cloned();
         }
     }
-    let catalog_window = m
+    // Catalog facts only from an accepted snapshot (the contract on `CacheUse`).
+    let accepted = m
         .catalog
         .as_ref()
+        .filter(|_| matches!(m.cache_use, CacheUse::Used { .. }));
+    let catalog_window = accepted
         .and_then(|e| e.get("context_window"))
         .and_then(Value::as_u64);
-    let catalog_max = m
-        .catalog
-        .as_ref()
+    let catalog_max = accepted
         .and_then(|e| e.get("max_context_window"))
         .and_then(Value::as_u64);
     if let Some(w) = target.context_window {
@@ -845,21 +839,27 @@ fn model_facts(
     } else if let Some((value, layer)) = config.get("/model_context_window") {
         // Set but not a non-negative integer: unknown, never the catalog's value instead.
         if let Some(w) = value.as_u64() {
-            m.context_window = Some(catalog_max.map_or(w, |max| w.min(max)));
-            m.window_from = Some(match catalog_max {
-                Some(max) if max < w => format!(
-                    "{} clamped to models_cache.json max_context_window {max}",
-                    layer.at("/model_context_window")
-                ),
-                _ => layer.at("/model_context_window"),
-            });
+            let at = layer.at("/model_context_window");
+            match m.cache_use.reason() {
+                Some(why) => {
+                    m.window_from = Some(format!(
+                        "configured {w} ({at}); the catalog's max_context_window may lower it, and models_cache.json is not used: {why}"
+                    ));
+                }
+                None => {
+                    m.context_window = Some(catalog_max.map_or(w, |max| w.min(max)));
+                    m.window_from = Some(match catalog_max {
+                        Some(max) if max < w => {
+                            format!("{at} clamped to models_cache.json max_context_window {max}")
+                        }
+                        _ => at,
+                    });
+                }
+            }
         }
     } else if let Some(w) = catalog_window {
         m.context_window = Some(w);
-        m.window_from = Some(match m.cache_use.short_qualifier() {
-            Some(q) => format!("models_cache.json, {q}"),
-            None => "models_cache.json".to_string(),
-        });
+        m.window_from = Some("models_cache.json".to_string());
     }
     m
 }

@@ -97,16 +97,30 @@ pub(crate) fn base_instructions(ctx: &mut Ctx) -> Item {
         )];
         return item;
     }
-    let slug = ctx.model.slug.clone();
-    let template = ctx.model.catalog.as_ref().and_then(|entry| {
+    // The template wins over the legacy field (`protocol/src/openai_models.rs:918-927`).
+    let template_of = |entry: &Value| {
         entry
             .pointer("/model_messages/instructions_template")
             .and_then(Value::as_str)
             .or_else(|| entry.get("base_instructions").and_then(Value::as_str))
             .map(str::to_string)
-    });
-    match (slug, template) {
-        (Some(slug), Some(template)) => {
+    };
+    // Catalog facts only from harn's accepted snapshot; a rejected file is quoted, never sized.
+    let (slug, entry) = match ctx.catalog_entry() {
+        Ok((slug, entry)) => (slug.to_string(), entry),
+        Err(why) => {
+            item.origin.why = vec![format!("size unknown until a capture: {why}")];
+            if let Some(text) = ctx.model.catalog.as_ref().and_then(template_of) {
+                item.origin.why.push(format!(
+                    "the file's snapshot says {} bytes; not used as this row's size",
+                    text.len()
+                ));
+            }
+            return item;
+        }
+    };
+    match template_of(entry) {
+        Some(template) => {
             let personality_none = ctx
                 .config
                 .get_str("/personality")
@@ -123,9 +137,6 @@ pub(crate) fn base_instructions(ctx: &mut Ctx) -> Item {
                 "{}: {slug} instructions_template (the catalog may refresh at startup)",
                 ctx.display(&ctx.codex_home.join("models_cache.json"))
             )];
-            if let Some(q) = ctx.model.cache_use.qualifier() {
-                item.origin.why.push(format!("from models_cache.json, {q}"));
-            }
             if personality_none {
                 item.origin.why.push(
                     "personality = \"none\": the # Personality section is cut (models-manager/src/model_info.rs:50-57)"
@@ -139,19 +150,12 @@ pub(crate) fn base_instructions(ctx: &mut Ctx) -> Item {
                 ..Cost::default()
             };
         }
-        (Some(slug), None) => {
+        // `validate_cache` requires one of the two; kept for a reader that changes that.
+        None => {
             let cache = ctx.display(&ctx.codex_home.join("models_cache.json"));
-            item.origin.why = vec![if ctx.model.catalog.is_some() {
-                format!("{cache}: the {slug} entry has no instructions template; size unknown until a capture")
-            } else {
-                format!("{slug} is not in {cache}: size unknown until a capture")
-            }];
-        }
-        (None, _) => {
-            item.origin.why = vec![
-                "no model in config: codex picks its default from the catalog at startup; size unknown until a capture"
-                    .to_string(),
-            ];
+            item.origin.why = vec![format!(
+                "{cache}: the {slug} entry has no instructions template; size unknown until a capture"
+            )];
         }
     }
     item
