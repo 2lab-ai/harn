@@ -809,6 +809,159 @@ fn small_table_golden() {
     assert_eq!(out, expected);
 }
 
+// ---------- footnotes ----------
+
+/// Rows whose signals all differ, at the top level, under a container and in the runtime block.
+fn unique_signal_tree() -> Tree {
+    let mut atlassian = atlassian();
+    atlassian.signal = Some("off: managed settings turn the plugin off".to_string());
+    let mut project = project_md();
+    // rules/PRINCIPLES.md, the container's second row once sorted.
+    project.children[0].signal = Some("off: imported from outside the project".to_string());
+    let mut runtime = hooks_runtime();
+    runtime.signal = Some("off: disableAllHooks = true".to_string());
+    let mut t = tree();
+    t.items = vec![runtime, user_md(), listing(), project, atlassian];
+    t.signals.clear();
+    t
+}
+
+/// The table and the html notes as harn printed them before rows could share a footnote: with
+/// every signal different, each row keeps its own number and its own `label: signal` line.
+#[test]
+fn unique_signals_keep_one_footnote_per_row() {
+    let t = unique_signal_tree();
+    let expected = [
+        format!("harn {DIR}   claude-code 2.1.300 (rules verified 2.1.296)"),
+        "drift: installed claude-code 2.1.300, rules verified against 2.1.296 — rows may be wrong until `harn verify` passes".to_string(),
+        "first request: predicted 229.7 KB + ? (4 rows unknown)   sort: freed ▼".to_string(),
+        "tool search: OFF (ANTHROPIC_BASE_URL is non-first-party) → MCP tool schemas load eagerly".to_string(),
+        "    knob: env ENABLE_TOOL_SEARCH=true  [docs — effect not measured; verify after]  freed: ?".to_string(),
+        String::new(),
+        "  freed(pred) predicted  share            item                         origin           mode       default action".to_string(),
+        "      67.3 KB   64.7 KB  28.2% ██▉        mcp plugin:atlassian [1]     plugin atlassian always     enabledPlugins → false (local)".to_string(),
+        "      20.5 KB    6.8 KB   3.0% ▎          CLAUDE.md project · 2        project          always     claudeMdExcludes (local)".to_string(),
+        "       9.4 KB    9.4 KB   4.1% ▍            rules/DEV.md               project          always     claudeMdExcludes (local)".to_string(),
+        "       4.3 KB    4.3 KB   1.9% ▎            rules/PRINCIPLES.md [2]    project          always     claudeMdExcludes (local)".to_string(),
+        "       0.7 KB    0.7 KB   0.3%            ~/.claude/CLAUDE.md          user             always     claudeMdExcludes (local)".to_string(),
+        "           Δ?  ~31.2 KB  13.6% █▍         skill listing · 14 [3]       builtin          advertised skillOverrides (local)".to_string(),
+        "                                            … 14 more (harn why claude-code/skill-listing/builtin/skills)".to_string(),
+        "  runtime / no first-request cost:".to_string(),
+        "                      —                   hooks PreToolUse runtime [4] user             runtime    disableAllHooks → true (local)".to_string(),
+        "  [1] mcp plugin:atlassian: off: managed settings turn the plugin off".to_string(),
+        "  [2] rules/PRINCIPLES.md: off: imported from outside the project".to_string(),
+        "  [3] skill listing: over cap: 146 of 216 descriptions dropped".to_string(),
+        "  [4] hooks PreToolUse runtime: off: disableAllHooks = true".to_string(),
+    ]
+    .join("\n");
+    assert_eq!(render::table(&t, &unicode()), expected);
+
+    let html = render::html(&doc(vec![t]));
+    let notes = [
+        "<ol class=\"notes\">",
+        "<li>mcp plugin:atlassian: off: managed settings turn the plugin off</li>",
+        "<li>rules/PRINCIPLES.md: off: imported from outside the project</li>",
+        "<li>skill listing: over cap: 146 of 216 descriptions dropped</li>",
+        "<li>hooks PreToolUse runtime: off: disableAllHooks = true</li>",
+        "</ol>",
+    ]
+    .join("\n");
+    assert!(html.contains(&notes), "{html}");
+}
+
+const SHARED_SIGNAL: &str = "bundled-skill: the folder holds the built-in skills last written there by the agent; the one that runs may replace them, so this skill and its listing line can change";
+
+/// A skill row with `freed` bytes (its sort key) and `signal`.
+fn signal_skill(name: &str, freed_bytes: u64, signal: &str) -> Item {
+    let mut it = node(Kind::Skill, Layer::Builtin, name, name);
+    it.mode = Mode::Advertised;
+    it.cost = pred(freed_bytes);
+    it.knobs = vec![setting(
+        &format!("/skillOverrides/{name}"),
+        serde_json::json!("off"),
+        Scope::Local,
+    )];
+    it.freed = freed(freed_bytes, false);
+    it.signal = Some(signal.to_string());
+    it
+}
+
+#[test]
+fn rows_with_the_same_signal_share_one_footnote() {
+    let mut t = tree();
+    t.signals.clear();
+    // Stored out of order: the rows sort by freed to plugin-creator, notes, openai-docs, imagegen.
+    t.items = vec![
+        signal_skill("imagegen", 1_000, SHARED_SIGNAL),
+        signal_skill("openai-docs", 2_000, SHARED_SIGNAL),
+        signal_skill("notes", 3_000, "over cap: 1 of 4 descriptions dropped"),
+        signal_skill("plugin-creator", 4_000, SHARED_SIGNAL),
+    ];
+    let out = render::table(&t, &unicode());
+
+    let mut shared = ["imagegen", "openai-docs", "plugin-creator"];
+    shared.sort_by_key(|label| index_of(&out, &format!("{label} [")));
+    assert_eq!(
+        shared,
+        ["plugin-creator", "openai-docs", "imagegen"],
+        "{out}"
+    );
+    for label in shared {
+        assert!(
+            line_with(&out, label).contains(&format!("{label} [1]")),
+            "{out}"
+        );
+    }
+    // Numbered by first appearance: notes comes after the first shared row.
+    assert!(line_with(&out, "notes").contains("notes [2]"), "{out}");
+    let footnotes: Vec<&str> = out
+        .lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .collect();
+    assert_eq!(
+        footnotes,
+        [
+            format!("  [1] plugin-creator, openai-docs, imagegen: {SHARED_SIGNAL}"),
+            "  [2] notes: over cap: 1 of 4 descriptions dropped".to_string(),
+        ],
+        "{out}"
+    );
+
+    // The html report numbers its notes the same way.
+    let html = render::html(&doc(vec![t]));
+    assert_eq!(
+        html.matches("<span class=\"signal\">[1]</span>").count(),
+        3,
+        "{html}"
+    );
+    assert_eq!(
+        html.matches("<span class=\"signal\">[2]</span>").count(),
+        1,
+        "{html}"
+    );
+    let notes = format!(
+        "<ol class=\"notes\">\n<li>plugin-creator, openai-docs, imagegen: {SHARED_SIGNAL}</li>\n<li>notes: over cap: 1 of 4 descriptions dropped</li>\n</ol>"
+    );
+    assert!(html.contains(&notes), "{html}");
+}
+
+#[test]
+fn a_label_shared_by_two_rows_is_named_once_in_their_footnote() {
+    let mut t = tree();
+    t.signals.clear();
+    t.items = vec![
+        signal_skill("notes", 2_000, SHARED_SIGNAL),
+        signal_skill("notes", 1_000, SHARED_SIGNAL),
+    ];
+    t.items[1].id = format!("{}-other", t.items[1].id);
+    let out = render::table(&t, &unicode());
+    assert_eq!(out.matches("notes [1]").count(), 2, "{out}");
+    assert!(
+        out.ends_with(&format!("\n  [1] notes: {SHARED_SIGNAL}")),
+        "{out}"
+    );
+}
+
 // ---------- why ----------
 
 fn plan_for(item: &Item, knob: Knob, known: u64, warnings: Vec<String>) -> ActionPlan {

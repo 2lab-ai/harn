@@ -2,7 +2,8 @@
 
 use super::common::{
     cost_column, default_action, denominator, facts, freed_cell, freed_computed, glyphs, kb,
-    label_with_count, partition, percent, request_bytes, share_tenths, sorted, truncate, Glyphs,
+    label_with_count, partition, percent, request_bytes, share_tenths, sorted, truncate, Footnotes,
+    Glyphs,
 };
 use super::RenderOpts;
 use crate::model::{Item, Origin, Tree};
@@ -82,7 +83,8 @@ fn header_lines(tree: &Tree, opts: &RenderOpts, sort: Option<&str>) -> Vec<Strin
 
 /// Header lines (title, drift, totals, tool search, signals, warnings), then rows sorted by
 /// freed.known desc (freed not computed → first-request bytes), children under their container,
-/// Runtime/None rows in a trailing block, then the signal footnotes.
+/// Runtime/None rows in a trailing block, then the signal footnotes (rows with the same signal
+/// share one).
 pub fn table(tree: &Tree, opts: &RenderOpts) -> String {
     let g = glyphs(opts.unicode);
     let width = opts.width.unwrap_or(DEFAULT_WIDTH);
@@ -100,7 +102,7 @@ pub fn table(tree: &Tree, opts: &RenderOpts) -> String {
         denominator: denominator(tree),
         observed_column: tree.observed_body.is_some(),
     };
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes = Footnotes::default();
     let (main, trailing) = partition(tree);
     let mut main_lines = Vec::new();
     for item in main {
@@ -138,13 +140,13 @@ pub fn table(tree: &Tree, opts: &RenderOpts) -> String {
                 .map(|line| widths.line(line, width, g)),
         );
     }
-    for (i, note) in notes.iter().enumerate() {
+    for (i, note) in notes.lines().iter().enumerate() {
         out.push(format!("  [{}] {note}", i + 1));
     }
     out.join("\n")
 }
 
-fn push_item(lines: &mut Vec<Line>, notes: &mut Vec<String>, item: &Item, depth: usize, ctx: &Ctx) {
+fn push_item(lines: &mut Vec<Line>, notes: &mut Footnotes, item: &Item, depth: usize, ctx: &Ctx) {
     lines.push(Line::Row(cells(item, depth, notes, ctx)));
     if item.children.is_empty() {
         return;
@@ -166,7 +168,7 @@ fn push_item(lines: &mut Vec<Line>, notes: &mut Vec<String>, item: &Item, depth:
     }
 }
 
-fn cells(item: &Item, depth: usize, notes: &mut Vec<String>, ctx: &Ctx) -> Cells {
+fn cells(item: &Item, depth: usize, notes: &mut Footnotes, ctx: &Ctx) -> Cells {
     let g = ctx.g;
     let mut label = format!(
         "{}{}",
@@ -174,8 +176,7 @@ fn cells(item: &Item, depth: usize, notes: &mut Vec<String>, ctx: &Ctx) -> Cells
         label_with_count(&item.label, item.children.len(), g)
     );
     if let Some(signal) = &item.signal {
-        notes.push(format!("{}: {signal}", item.label));
-        label.push_str(&format!(" [{}]", notes.len()));
+        label.push_str(&format!(" [{}]", notes.mark(&item.label, signal)));
     }
     let tenths = share_tenths(request_bytes(&item.cost), ctx.denominator);
     Cells {

@@ -213,6 +213,40 @@ pub(crate) fn partition(tree: &Tree) -> (Vec<&Item>, Vec<&Item>) {
         .partition(|item| !is_trailing(item))
 }
 
+/// The rows' signal footnotes, numbered by distinct signal text in the order rows are shown:
+/// rows with the same signal share one number, and its note names them all.
+#[derive(Default)]
+pub(crate) struct Footnotes {
+    /// One per number: the signal, then the labels of its rows in row order (each once).
+    notes: Vec<(String, Vec<String>)>,
+}
+
+impl Footnotes {
+    /// The 1-based number of `signal`, with `label` named in its note.
+    pub(crate) fn mark(&mut self, label: &str, signal: &str) -> usize {
+        let i = match self.notes.iter().position(|(s, _)| s == signal) {
+            Some(i) => i,
+            None => {
+                self.notes.push((signal.to_string(), Vec::new()));
+                self.notes.len() - 1
+            }
+        };
+        let labels = &mut self.notes[i].1;
+        if !labels.iter().any(|l| l == label) {
+            labels.push(label.to_string());
+        }
+        i + 1
+    }
+
+    /// `label: signal`, or `label, label: signal` for a shared one, in number order.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.notes
+            .iter()
+            .map(|(signal, labels)| format!("{}: {signal}", labels.join(", ")))
+            .collect()
+    }
+}
+
 /// First segment of a JSON pointer, unescaped (`/enabledPlugins/slack@x` → `enabledPlugins`).
 pub(crate) fn pointer_key(pointer: &str) -> String {
     let first = pointer.strip_prefix('/').unwrap_or(pointer);
