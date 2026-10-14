@@ -5,9 +5,14 @@
 //! paths, scopes in words) and the detail sentences built once. Pure: no terminal, no files.
 //! `view.rs` draws a [`Screen`]; `app.rs` acts on the item ids its rows carry.
 
-use crate::model::{self, Agent, Item, Kind, Knob, Layer, Mode, Scope, Tree};
-use crate::plan::{knob_scope, ActionPlan};
-use crate::render::common::{denominator, json_string_tail, link_value_text, request_bytes};
+use crate::model::{
+    self, Agent, CatalogState, CatalogWhy, CodexFacts, Item, Kind, Knob, Layer, Mode, Scope, Tree,
+    Trust, TrustGate, TrustLevel,
+};
+use crate::plan::{default_scope, knob_scope, ActionPlan};
+use crate::render::common::{
+    denominator, is_toml, json_string_tail, link_value_text, request_bytes, toml_key, toml_value,
+};
 use crate::resolve::claude::CAP_STATE_UNKNOWN;
 use crate::resolve::claude::OFF_ALL_HOOKS;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +33,9 @@ pub const ALL_HOOKS: &str = "/disableAllHooks";
 const OFF_WITH_HOOKS: &str = "off, with every other hook";
 /// What a hook row a managed policy keeps off says instead of a size.
 const OFF_BY_POLICY: &str = "off by policy";
+/// Beside a Codex group's known bytes when some of its rows load with a size nobody can tell
+/// yet: the known part is a floor, so it gets no bar and no share of its own.
+pub const PLUS_UNMEASURED: &str = "+ unmeasured";
 
 /// Row order inside a group; `s` toggles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,6 +69,11 @@ impl Sort {
 pub struct Places {
     pub dir: PathBuf,
     pub home: Option<PathBuf>,
+    /// Whose files these are: scopes and config files are worded per agent.
+    pub agent: Agent,
+    /// The Codex home the tree was resolved with (`CODEX_HOME`, else `~/.codex`): a root a
+    /// config file may start at, even outside home.
+    pub codex_home: Option<PathBuf>,
 }
 
 impl Places {
@@ -68,7 +81,13 @@ impl Places {
         Places {
             dir: tree.target_dir.clone(),
             home: tree.home.clone(),
+            agent: tree.agent,
+            codex_home: tree.codex.as_ref().map(|c| c.home.clone()),
         }
+    }
+
+    fn codex(&self) -> bool {
+        self.agent == Agent::Codex
     }
 
     /// `.claude/settings.local.json`, `~/.claude/CLAUDE.md`; an outside path as it is.
@@ -114,23 +133,34 @@ impl Places {
     }
 }
 
-/// `text` with every `path` that ends at a path boundary replaced by `with`. A root (`/`) or an
-/// empty path is never replaced.
+/// `text` with every `path` that starts a path and ends at a path boundary replaced by `with`:
+/// never one inside another path (`/srv/home/me/x`, `/srv/cache=/home/me/x` keep their
+/// `/home/me`). A path starts at the start of the text, or right after whitespace, `(`, or a
+/// quote or backtick; after any other character it is part of something else (the [`human_text`]
+/// contract, clause 3, with its accepted residual). A root (`/`) or an empty path is never
+/// replaced.
 fn replace_path(text: &str, path: &str, with: &str) -> String {
     if path.is_empty() || path == "/" {
         return text.to_string();
     }
+    let opens = |c: char| c.is_whitespace() || matches!(c, '(' | '"' | '\'' | '`');
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find(path) {
         let after = &rest[at + path.len()..];
-        let boundary = path.ends_with('/')
+        let starts = out
+            .chars()
+            .last()
+            .filter(|_| at == 0)
+            .or_else(|| rest[..at].chars().last())
+            .is_none_or(opens);
+        let ends = path.ends_with('/')
             || after
                 .chars()
                 .next()
                 .is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')));
         out.push_str(&rest[..at]);
-        out.push_str(if boundary { with } else { path });
+        out.push_str(if starts && ends { with } else { path });
         rest = after;
     }
     out.push_str(rest);
@@ -185,6 +215,9 @@ pub struct Title {
     pub measured: bool,
     /// Some rows' size is unknown: the total is a lower bound (`~`).
     pub estimate: bool,
+    /// Codex: whether it trusts this folder (`trusted`, `untrusted`, `not trusted`); None for
+    /// Claude Code.
+    pub trust: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +234,8 @@ pub enum GroupKind {
     ProjectFiles,
     Hooks,
     McpServers,
+    /// Codex's command rules files (`*.rules`).
+    Rules,
     Other,
     Builtin,
 }
@@ -216,8 +251,17 @@ impl GroupKind {
             GroupKind::ProjectFiles => "project-files",
             GroupKind::Hooks => "hooks",
             GroupKind::McpServers => "mcp-servers",
+            GroupKind::Rules => "rules",
             GroupKind::Other => "other",
             GroupKind::Builtin => "built-in",
+        }
+    }
+
+    /// The name in the header's `biggest:` line for `agent`'s screen.
+    pub fn short_for(self, agent: Agent) -> &'static str {
+        match (agent, self) {
+            (Agent::Codex, GroupKind::ProjectFiles) => "AGENTS.md",
+            _ => self.short(),
         }
     }
 
@@ -231,6 +275,7 @@ impl GroupKind {
             GroupKind::ProjectFiles => "project",
             GroupKind::Hooks => "hooks",
             GroupKind::McpServers => "MCP servers",
+            GroupKind::Rules => "rules",
             GroupKind::Other => "other",
             GroupKind::Builtin => "built-in",
         }
@@ -781,6 +826,25 @@ pub fn kind_word(kind: Kind) -> &'static str {
     }
 }
 
+/// [`kind_word`] on `agent`'s screen: Codex's generated blocks are `block`, a rules file is a
+/// `rules file`.
+pub fn kind_word_in(kind: Kind, agent: Agent) -> &'static str {
+    match (agent, kind) {
+        (Agent::Codex, Kind::SystemPrompt | Kind::EnvBlock) => "block",
+        (Agent::Codex, Kind::PermissionRule) => "rules file",
+        _ => kind_word(kind),
+    }
+}
+
+/// The kind word of an item that leaves with a plan: a Codex wrapper (the AGENTS.md message
+/// around the files) is a `block`, like the blocks it sits among.
+fn leaving_word(item: &crate::plan::Leaving, agent: Agent) -> &'static str {
+    if agent == Agent::Codex && item.id.split('/').nth(2) == Some("builtin") {
+        return "block";
+    }
+    kind_word_in(item.kind, agent)
+}
+
 /// `8 skills`, `1 MCP server`.
 pub fn count(n: usize, word: &str) -> String {
     if n == 1 {
@@ -846,7 +910,7 @@ struct PluginFreed {
     text: Option<String>,
 }
 
-fn plugin_freed(facets: &[&Item]) -> PluginFreed {
+fn plugin_freed(facets: &[&Item], agent: Agent) -> PluginFreed {
     let (listed, own): (Vec<&Item>, Vec<&Item>) = facets.iter().partition(|f| listing_entry(f));
     let listing = sum_known(listed.iter().filter_map(|i| subtree_bytes(i))).unwrap_or(0);
     let mine = sum_known(own.iter().filter_map(|i| subtree_bytes(i))).unwrap_or(0);
@@ -872,6 +936,17 @@ fn plugin_freed(facets: &[&Item]) -> PluginFreed {
         (true, false, false) => format!("{t}: its entries in the {which}"),
         (false, true, false) => m,
         (false, true, true) => format!("{m} and an unmeasured part"),
+        // Codex: what of a plugin's own unknown parts `harn verify` can measure.
+        (false, false, true) if agent == Agent::Codex => {
+            match Unmeasured::of(own.iter().copied()) {
+                Some(Unmeasured::Never(_)) => "an amount harn cannot measure".to_string(),
+                Some(Unmeasured::Mixed(words)) => format!(
+                    "an amount harn measures only in part ({} it cannot)",
+                    and_list(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+                ),
+                _ => format!("an amount only {} can measure", verify_command(agent)),
+            }
+        }
         (false, false, true) => "an amount only `harn verify --run` can measure".to_string(),
         (false, false, false) => String::new(),
     };
@@ -902,11 +977,33 @@ fn absent_word(mode: Mode) -> Option<&'static str> {
     }
 }
 
-/// The knob `d` uses (scope local, as `plan::build_plan` with no scope picks it).
-fn local_knob(item: &Item) -> Option<&Knob> {
-    item.knobs
-        .iter()
-        .find(|k| knob_scope(k) == Some(Scope::Local))
+/// The knob `d` uses: the one in the agent's default scope, as `plan::build_plan` with no scope
+/// picks it ([`default_scope`]: Claude Code local; Codex the narrowest file where it takes
+/// effect, `.codex/config.toml` of a trusted project, else `~/.codex/config.toml`).
+pub fn default_knob(item: &Item) -> Option<&Knob> {
+    let scope = default_scope(item);
+    item.knobs.iter().find(|k| knob_scope(k) == Some(scope))
+}
+
+/// The agent an item belongs to, from its id (`<agent>/<kind>/<layer>/<name>`).
+pub fn item_agent(item: &Item) -> Agent {
+    if item.id.starts_with("codex/") {
+        Agent::Codex
+    } else {
+        Agent::ClaudeCode
+    }
+}
+
+/// The plugin (`name@marketplace`) a switch turns off as a whole: `enabledPlugins.<p>` (Claude
+/// Code), `plugins."<p>".enabled` (Codex).
+fn plugin_switch(pointer: &str) -> Option<String> {
+    if let Some(rest) = pointer.strip_prefix("/enabledPlugins/") {
+        return Some(rest.replace("~1", "/").replace("~0", "~"));
+    }
+    let rest = pointer
+        .strip_prefix("/plugins/")?
+        .strip_suffix("/enabled")?;
+    (!rest.contains('/')).then(|| rest.replace("~1", "/").replace("~0", "~"))
 }
 
 /// The narrowest switch of any scope.
@@ -917,21 +1014,23 @@ fn any_knob(item: &Item) -> Option<(&Knob, Scope)> {
         .min_by_key(|(_, s)| *s)
 }
 
-/// `for this project only`, `for everyone in this repository`, `for every project`.
-pub fn scope_words(scope: Scope) -> &'static str {
-    match scope {
-        Scope::Local => "for this project only",
-        Scope::Project => "for everyone in this repository",
-        Scope::User => "for every project",
+/// `for this project only`, `for everyone in this repository`, `for every project`. Codex has
+/// no local-only file: its project scope is the target dir's `.codex/config.toml`, read only
+/// while this folder is trusted — for this project only.
+pub fn scope_words(scope: Scope, agent: Agent) -> &'static str {
+    match (agent, scope) {
+        (_, Scope::Local) | (Agent::Codex, Scope::Project) => "for this project only",
+        (_, Scope::Project) => "for everyone in this repository",
+        (_, Scope::User) => "for every project",
     }
 }
 
 /// `this project`, `this repository`, `every project` (card titles).
-pub fn scope_short(scope: Scope) -> &'static str {
-    match scope {
-        Scope::Local => "this project",
-        Scope::Project => "this repository",
-        Scope::User => "every project",
+pub fn scope_short(scope: Scope, agent: Agent) -> &'static str {
+    match (agent, scope) {
+        (_, Scope::Local) | (Agent::Codex, Scope::Project) => "this project",
+        (_, Scope::Project) => "this repository",
+        (_, Scope::User) => "every project",
     }
 }
 
@@ -985,9 +1084,20 @@ fn value_text(value: &serde_json::Value, places: &Places) -> String {
 }
 
 /// `.claude/settings.local.json → enabledPlugins.slack = false`; an append pointer (`…/-`) reads
-/// `permissions.deny += Bash`.
+/// `permissions.deny += Bash`. A TOML file (Codex) shows the key as TOML writes it:
+/// `~/.codex/config.toml → include_environment_context = false`,
+/// `.codex/config.toml → plugins."x@y".enabled = false`.
 pub fn writes_line(knob: &Knob, places: &Places, arrow: &str) -> String {
     match knob {
+        Knob::Setting {
+            file,
+            pointer,
+            value,
+            ..
+        } if is_toml(file) => {
+            let (key, op, value) = toml_words(pointer, value, places);
+            format!("{} {arrow} {key} {op} {value}", places.path(file))
+        }
         Knob::Setting {
             file,
             pointer,
@@ -1020,6 +1130,18 @@ pub fn writes_line(knob: &Knob, places: &Places, arrow: &str) -> String {
     }
 }
 
+/// A TOML knob's key, `=` or `+=`, and value as written, paths home- or project-relative:
+/// (`hooks.state."~/.codex/hooks.json:session_start:0:0".enabled`, `=`, `false`).
+fn toml_words(
+    pointer: &str,
+    value: &serde_json::Value,
+    places: &Places,
+) -> (String, &'static str, String) {
+    let (key, append) = toml_key(pointer, |seg| places.text(seg));
+    let value = toml_value(value, &|text| places.text(text));
+    (key, if append { "+=" } else { "=" }, value)
+}
+
 /// A `Knob::None` reason as a sentence end.
 fn reason_words(reason: &str) -> String {
     match reason {
@@ -1029,8 +1151,398 @@ fn reason_words(reason: &str) -> String {
         }
         "built-in command" => "it is a command built into Claude Code".to_string(),
         "not in the request" => "it never reaches the model".to_string(),
+        // Codex (resolve/codex): the reasons its rows carry, in words.
+        r if r.starts_with("no off switch; model_instructions_file") => {
+            "Codex has no switch for it; model_instructions_file can only replace it, and Codex \
+             strongly discourages that"
+                .to_string()
+        }
+        "framing: leaves with the last file in it" => {
+            "it goes when the last AGENTS.md file goes".to_string()
+        }
+        "no config key; empty or move the file" => {
+            "Codex has no setting for it; empty the file or move it".to_string()
+        }
+        // Codex's other reasons are cleaned where they are shown (`codex_words`).
         other => other.to_string(),
     }
+}
+
+/// A text the Codex resolver wrote (a `why` step, a signal, a warning, a reason) as a person
+/// reads it, or None when nothing in it is for a person.
+///
+/// CONTRACT: the TUI changes resolver text only where it is certain.
+/// 1. A citation is removed only when it matches the exact grammar harn's own resolver emits
+///    ([`citation_word`], [`citation_end`]). Everything else stays byte for byte, including
+///    ordinary text that follows a citation inside the same parenthesis.
+/// 2. A config file is bound, and shortened or reworded, only when it is one of the item's own
+///    files or starts at a recognized root (the target dir and its ancestors, home, the Codex
+///    home, `/etc/codex`) and runs to the `#/` reference ([`codex_words`]). If neither holds, the
+///    sentence is left as written: no binding, no shortening.
+/// 3. A home prefix is shortened only where a path starts. A bound file is written from its own
+///    path, so only its own start counts. In unbound text a path starts at the start of the
+///    text, or right after whitespace, an opening parenthesis `(`, or an opening quote or
+///    backtick (`"`, `'`, `` ` ``) — never after `=`, `:`, `,` or any other character, which
+///    commonly sit inside tokens and path names (`copy /srv/cache=/home/me/x` stays as written).
+///    Accepted residual: every byte but `/` and NUL is legal in a file name, so no character
+///    rule can be exact — a directory name with whitespace, `(` or a quote right before an
+///    embedded home path (`/srv/copy of /home/me/x`) reads as a path start there and is
+///    shortened. Bound files are never affected.
+///
+/// When unsure, verbatim. Here that means:
+///
+/// - a step that is a developer's note — a lead not verified yet, or tagged `[unverified]`,
+///   `[추정]` — is dropped whole ([`is_dev_note`]);
+/// - a citation (`core/src/x.rs:12-30` with its `, 40-43` line numbers, `research/02 §9`, `§9`)
+///   is cut out where it stands and the rest stays as written; an item of a parenthesis left
+///   with no words, or only a connective (`used at`), goes, and an emptied parenthesis goes with
+///   the space before it (`… skipped (core/src/agents_md.rs:63-66)` → `… skipped`,
+///   `(semver; installed.rs:47-68)` → `(semver)`). Anything else — an endpoint
+///   `api.example.com:443`, a user's file `src/main.rs`, a quantity after a citation
+///   (`research/02: 30s timeout`, `(research/02 §3, §4: 30s)` → `(30s)`) — is kept;
+/// - a content hash (`sha256:…`, a long hex run) is never for a person: its item or clause goes.
+pub fn human_text(text: &str) -> Option<String> {
+    if is_dev_note(text) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('(') {
+        let Some(len) = rest[open + 1..].find(')') else {
+            break;
+        };
+        let kept = human_items(&rest[open + 1..open + 1 + len]);
+        if kept.is_empty() {
+            out.push_str(rest[..open].strip_suffix(' ').unwrap_or(&rest[..open]));
+        } else {
+            out.push_str(&rest[..open]);
+            out.push('(');
+            out.push_str(&kept);
+            out.push(')');
+        }
+        rest = &rest[open + 1 + len + 1..];
+    }
+    out.push_str(rest);
+    let clauses: Vec<String> = out
+        .split("; ")
+        .filter(|c| !has_hash(c))
+        .map(|c| without_citations(c, Within::Clause))
+        .filter(|c| !c.is_empty())
+        .collect();
+    let text = clauses.join("; ");
+    let text = text.trim_end_matches([';', ',', ':', ' ']).trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// [`human_text`], or the empty string.
+pub fn without_source_refs(text: &str) -> String {
+    human_text(text).unwrap_or_default()
+}
+
+/// The items of a parenthesis that are for a person, their citations cut out, rejoined.
+fn human_items(inner: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for part in inner.split("; ") {
+        let mut kept: Vec<String> = Vec::new();
+        // The item before ended with a file citation: line numbers alone continue it
+        // (`x.rs:398-399, 440-443`).
+        let mut after_lines = false;
+        // The item before was a research reference and nothing else: a `§N` item continues its
+        // list (`research/01 §4, §6`).
+        let mut after_reference = false;
+        for item in part.split(", ") {
+            let t = item.trim();
+            let numbers = !t.is_empty()
+                && t.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '-' | ' '));
+            if has_hash(item) || (after_lines && numbers) {
+                continue;
+            }
+            let within = if after_reference {
+                Within::ReferenceList
+            } else {
+                Within::Parenthesis
+            };
+            let cited = item.split_whitespace().any(citation_word);
+            let words = without_citations(item, within);
+            after_lines = item.split(' ').next_back().is_some_and(file_citation);
+            after_reference =
+                words.is_empty() && item.split(' ').any(|w| research_ref(w) || section_ref(w));
+            if words.is_empty() || (cited && only_connectives(&words)) {
+                continue;
+            }
+            kept.push(words);
+        }
+        if !kept.is_empty() {
+            parts.push(kept.join(", "));
+        }
+    }
+    parts.join("; ")
+}
+
+/// Words that only lead into a citation (`used at`, `see`): nothing left to read without it.
+fn only_connectives(text: &str) -> bool {
+    text.split_whitespace().all(|w| {
+        matches!(
+            w.trim_end_matches([',', ':', '.']).to_lowercase().as_str(),
+            "used" | "at" | "see" | "in" | "cf" | "per" | "from" | "and" | "also"
+        )
+    })
+}
+
+/// `text` with every citation cut out ([`citation_end`] says how far one runs), the word right
+/// before a citation dropped when it only led into it (`see`, `at`), the punctuation that ended a
+/// citation left on the word before it. Every other byte stays as written: two spaces in a path
+/// stay two spaces.
+fn without_citations(text: &str, within: Within) -> String {
+    // The words and where each starts and ends; two spaces in a row leave an empty word.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (at, _) in text.match_indices(' ') {
+        spans.push((start, at));
+        start = at + 1;
+    }
+    spans.push((start, text.len()));
+    let words: Vec<&str> = spans.iter().map(|&(a, b)| &text[a..b]).collect();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut cut = false;
+    let mut i = 0;
+    while i < words.len() {
+        if !citation_word(words[i]) {
+            i += 1;
+            continue;
+        }
+        let end = citation_end(&words, i, within);
+        let mut from = spans[i].0;
+        // The word right before, when it only led into the citation.
+        if i > 0
+            && spans[i - 1].0 >= copied
+            && matches!(
+                words[i - 1].to_lowercase().as_str(),
+                "see" | "at" | "cf." | "per"
+            )
+        {
+            from = spans[i - 1].0;
+        }
+        out.push_str(&text[copied..from]);
+        // One space went with the citation: the one before it, or after it at the start.
+        if out.ends_with(' ') {
+            out.pop();
+        }
+        copied = spans[end - 1].1;
+        if out.is_empty() && text[copied..].starts_with(' ') {
+            copied += 1;
+        }
+        // The sentence's own punctuation after the citation stays: `fixed, see x.rs:12.` →
+        // `fixed.`, the citation's stop replacing a comma.
+        let last = words[end - 1];
+        if let Some(p) = last
+            .chars()
+            .last()
+            .filter(|c| matches!(c, '.' | ',' | ';' | ':'))
+        {
+            if !out.is_empty() {
+                while out.ends_with([',', ';', ':']) {
+                    out.pop();
+                }
+                if !out.ends_with(p) {
+                    out.push(p);
+                }
+            }
+        }
+        cut = true;
+        i = end;
+    }
+    if !cut {
+        return text.to_string();
+    }
+    out.push_str(&text[copied..]);
+    out.trim().to_string()
+}
+
+/// Where a text being cleaned of citations stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Within {
+    /// A clause outside any parenthesis.
+    Clause,
+    /// An item of a parenthesis.
+    Parenthesis,
+    /// An item of a parenthesis right after one that was a research reference and nothing else:
+    /// a `§N` here continues that reference (`research/01 §4, §6`).
+    ReferenceList,
+}
+
+/// The end (exclusive) of the citation that starts at `words[i]`, in the grammar harn's resolver
+/// writes:
+/// - a research reference `research/NN` (in backticks or not) with the `§N` / `§N.N` marks after
+///   it (`research/01` §4, §6`), then — in a parenthesis — its section words up to the closing
+///   parenthesis (`research/02 §6 open question 3`); a reference opened in backticks runs to the
+///   closing one. Punctuation after the reference or a mark ends it: `research/02: 30s timeout`
+///   keeps `30s timeout`. A `§N` item that continues a reference's list is read the same way
+///   (`§4: 30s` keeps `30s`);
+/// - any other `§N` mark with the marks after it;
+/// - a file citation (`…rs:4451,`) with the line numbers that continue it (`440-443`).
+fn citation_end(words: &[&str], i: usize, within: Within) -> usize {
+    let first = words[i];
+    let reference = research_ref(first) || (within == Within::ReferenceList && section_ref(first));
+    if reference {
+        if first.matches('`').count() % 2 == 1 {
+            if let Some(close) = (i + 1..words.len()).find(|&j| words[j].contains('`')) {
+                return close + 1;
+            }
+        }
+        let end = section_marks(words, i + 1);
+        if within != Within::Clause && !words[end - 1].ends_with([',', ';', ':', '.']) {
+            return words.len();
+        }
+        return end;
+    }
+    if section_ref(first) {
+        return section_marks(words, i + 1);
+    }
+    let mut end = i + 1;
+    while end < words.len() {
+        let next = core_word(words[end]);
+        let more = file_citation(words[end])
+            || (words[end - 1].ends_with(',')
+                && !next.is_empty()
+                && next.chars().all(|c| c.is_ascii_digit() || c == '-'));
+        if !more {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// From `end`: past every `§N` mark that continues the reference before it (`§4,` `§6`); a
+/// stop, colon or semicolon after a word ends the list.
+fn section_marks(words: &[&str], mut end: usize) -> usize {
+    while end < words.len() && !words[end - 1].ends_with([':', ';', '.']) && section_ref(words[end])
+    {
+        end += 1;
+    }
+    end
+}
+
+/// A word with the quoting and punctuation around it taken off.
+fn core_word(word: &str) -> &str {
+    word.trim_matches(|c: char| matches!(c, '`' | ',' | ';' | ':' | '(' | ')' | '.' | '"'))
+}
+
+/// A citation of codex's source or of harn's research: `<path>.rs:<line>[-<line>]`,
+/// `research/<NN>`, `§<N>[.<N>]`. Not a host and port (`api.example.com:443`), not a file named
+/// without a line (`src/main.rs`), not a research file by name (`research/notes.md`).
+fn citation_word(word: &str) -> bool {
+    research_ref(word) || section_ref(word) || file_citation(word)
+}
+
+/// `research/02`, quoted or not.
+fn research_ref(word: &str) -> bool {
+    core_word(word)
+        .strip_prefix("research/")
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `§3`, `§0.3`.
+fn section_ref(word: &str) -> bool {
+    let Some(n) = core_word(word).strip_prefix('§') else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    match n.split_once('.') {
+        Some((major, minor)) => digits(major) && digits(minor),
+        None => digits(n),
+    }
+}
+
+/// `core/src/x.rs:12-30`.
+fn file_citation(word: &str) -> bool {
+    match core_word(word).split_once(".rs:") {
+        Some((file, lines)) => {
+            !file.is_empty()
+                && lines.starts_with(|c: char| c.is_ascii_digit())
+                && lines.chars().all(|c| c.is_ascii_digit() || c == '-')
+        }
+        None => false,
+    }
+}
+
+/// `text` carries a content hash: `sha256:…`, or a run of 32 or more hex digits.
+fn has_hash(text: &str) -> bool {
+    if text.contains("sha256:") {
+        return true;
+    }
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c.is_ascii_hexdigit() { run + 1 } else { 0 };
+        if run >= 32 {
+            return true;
+        }
+    }
+    false
+}
+
+/// `text` names a hook's state key (`<source>:<event>:<group>:<handler>`, e.g.
+/// `docs@mkt:hooks/hooks.json:session_start:0:0`): codex's bookkeeping, shown by `harn why`.
+fn names_hook_key(text: &str) -> bool {
+    text.split(|c: char| c.is_whitespace() || c == '/' || c == '"')
+        .any(|word| {
+            let parts: Vec<&str> = word.rsplitn(4, ':').collect();
+            matches!(
+                parts.as_slice(),
+                [handler, group, event, source]
+                    if !source.is_empty()
+                        && !handler.is_empty()
+                        && !group.is_empty()
+                        && handler.chars().all(|c| c.is_ascii_digit())
+                        && group.chars().all(|c| c.is_ascii_digit())
+                        && !event.is_empty()
+                        && event.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            )
+        })
+}
+
+/// A developer's note rather than a fact: a lead not verified yet (`lead, not verified at the
+/// call site: …`), or a step tagged as unverified with one of the tags harn's research uses —
+/// `[unverified]`, `[assumed]`, `[추정]`, `[미확인]`. An ordinary word (`unverified email`) or a
+/// TOML table (`[hooks.state]`) is not a tag.
+fn is_dev_note(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if ["lead,", "lead:", "lead —", "lead -"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+    {
+        return true;
+    }
+    let mut rest = lower.as_str();
+    while let Some(open) = rest.find('[') {
+        let Some(len) = rest[open + 1..].find(']') else {
+            break;
+        };
+        let tag = rest[open + 1..open + 1 + len].trim();
+        if matches!(
+            tag,
+            "unverified"
+                | "not verified"
+                | "assumed"
+                | "assumption"
+                | "hypothesis"
+                | "guess"
+                | "lead"
+                | "todo"
+                | "tbd"
+                | "추정"
+                | "미확인"
+                | "가설"
+                | "미검증"
+        ) {
+            return true;
+        }
+        rest = &rest[open + 1 + len + 1..];
+    }
+    false
 }
 
 /// Is this item an entry of the skill or agent listing (its bytes are a listing line)?
@@ -1058,10 +1570,22 @@ impl Builder<'_> {
             total: self.total,
             measured: tree.observed_body.is_some(),
             estimate: tree.observed_body.is_none() && tree.unknown_rows > 0,
+            trust: tree
+                .trust
+                .as_ref()
+                .filter(|_| tree.agent == Agent::Codex)
+                .map(|t| match t.folder.level {
+                    Some(TrustLevel::Trusted) => "trusted",
+                    Some(TrustLevel::Untrusted) => "untrusted",
+                    None => "not trusted",
+                }),
         }
     }
 
     fn notes(&self) -> Vec<Note> {
+        if self.tree.agent == Agent::Codex {
+            return self.codex_notes();
+        }
         let tree = self.tree;
         let mut notes = Vec::new();
         let note = |text: String| Note { text };
@@ -1108,6 +1632,112 @@ impl Builder<'_> {
         notes
     }
 
+    /// The notes of a Codex tree: a missing Codex home first (nothing else is listed then),
+    /// then whether Codex trusts this folder (it decides what of the project loads), drift, the
+    /// model, tool search (when there is an MCP server), the other signals and the warnings, each
+    /// in words.
+    fn codex_notes(&self) -> Vec<Note> {
+        let tree = self.tree;
+        let places = &self.places;
+        let note = |text: String| Note { text };
+        let mut notes = Vec::new();
+        let mut signals: Vec<&String> = Vec::new();
+        let no_home = |w: &str| w.starts_with("no codex home at ");
+        for warning in tree.warnings.iter().filter(|w| no_home(w)) {
+            notes.push(note(sentence(&codex_words(warning, places))));
+        }
+        // The trust note is written from the resolver's facts; its `trust:` signal (the same
+        // facts for the CLI) is not repeated.
+        if let Some(trust) = &tree.trust {
+            notes.push(note(trust_sentence(trust, places)));
+        }
+        // The model note likewise, from the tree's Codex facts; its `model:` signal is the CLI's.
+        for signal in &tree.signals {
+            let said = (tree.trust.is_some() && signal.starts_with("trust: "))
+                || (tree.codex.is_some() && signal.starts_with("model: "));
+            if !said {
+                signals.push(signal);
+            }
+        }
+        if let Some(v) = &tree.agent_version {
+            if *v != tree.rules_verified_against {
+                notes.push(note(format!(
+                    "Codex {v} is installed; harn's rules were checked against {}, so sizes \
+                     and switches may be off. `harn verify --run --agent codex` checks them \
+                     against what Codex's dump shows; what the dump leaves out stays unchecked.",
+                    tree.rules_verified_against
+                )));
+            }
+        }
+        // The model note comes before the tool-search note, which rests on the same catalog
+        // entry and points to it rather than repeating why.
+        if let Some(codex) = &tree.codex {
+            notes.push(note(model_note(codex, places)));
+        }
+        // One note on tool search; the resolver's own warning about it says the same.
+        let tool_search_note = model::walk(tree).any(|i| i.kind == Kind::McpServer);
+        if tool_search_note {
+            notes.push(note(match tree.tool_search {
+                Some(true) => "Tool search is on: the model's catalog entry supports it, so MCP \
+                               tools are sent only when the model looks them up."
+                    .to_string(),
+                Some(false) => "Tool search is off: the model's catalog entry does not support \
+                                it, so every MCP tool schema loads in the first request; no \
+                                Codex setting changes that."
+                    .to_string(),
+                // Tool search comes only from the model's catalog entry, and the resolver leaves
+                // it undecided exactly when it cannot use that entry (pinned in
+                // `tests/resolve_codex.rs`): the model note says why. Should that ever not hold,
+                // the resolver's own cause is shown instead.
+                None => match &tree.codex {
+                    Some(codex) if !catalog_entry_usable(codex) => {
+                        "Tool search cannot be decided: it comes from the model's entry in \
+                         Codex's model catalog, which harn cannot use here (the model note says \
+                         why); MCP servers are shown as loading up front."
+                            .to_string()
+                    }
+                    _ => format!(
+                        "Tool search cannot be decided from the files{}: MCP servers are shown \
+                         as loading up front.",
+                        tree.tool_search_cause
+                            .as_deref()
+                            .map(|c| codex_words(c, places))
+                            .filter(|c| !c.is_empty())
+                            .map(|c| format!(" ({c})"))
+                            .unwrap_or_default()
+                    ),
+                },
+            }));
+        }
+        for signal in signals {
+            let text = codex_words(signal, places);
+            if !text.is_empty() {
+                notes.push(note(sentence(&text)));
+            }
+        }
+        for warning in tree.warnings.iter().filter(|w| !no_home(w)) {
+            let text = if warning.starts_with("codex skill listing budget unknown") {
+                "The skill listing's budget is 2% of the context window, which is unknown \
+                 here; whether it shortens descriptions is unknown until `harn verify --run \
+                 --agent codex` measures a session."
+                    .to_string()
+            } else if warning.starts_with("tool search state undecidable") {
+                if tool_search_note {
+                    continue;
+                }
+                "Tool search cannot be decided from the files: MCP servers are shown as loading \
+                 up front."
+                    .to_string()
+            } else {
+                sentence(&codex_words(warning, places))
+            };
+            if !text.is_empty() {
+                notes.push(note(text));
+            }
+        }
+        notes
+    }
+
     fn share(&self, bytes: Option<u64>) -> Option<u64> {
         percent(bytes, self.total)
     }
@@ -1137,7 +1767,12 @@ impl Builder<'_> {
         // What all plugins bring: listing lines (the listing groups count them) and their own.
         let (plugin_listing, plugin_own) = plugins
             .iter()
-            .map(|p| plugin_freed(facets.get(plugin_key(p)).map(Vec::as_slice).unwrap_or(&[])))
+            .map(|p| {
+                plugin_freed(
+                    facets.get(plugin_key(p)).map(Vec::as_slice).unwrap_or(&[]),
+                    tree.agent,
+                )
+            })
             .fold((0u64, 0u64), |(l, o), f| (l + f.listing, o + f.own));
         // What turning each plugin off frees, for its owner rows in the listings.
         let savings: HashMap<String, Option<String>> = plugins
@@ -1158,12 +1793,35 @@ impl Builder<'_> {
         let mut tools: Vec<Row> = Vec::new();
         let mut builtin_plugins: Vec<Row> = Vec::new();
         let mut other = Vec::new();
+        let mut rules: Vec<Row> = Vec::new();
+        let codex = tree.agent == Agent::Codex;
 
         for item in &tree.items {
             if claimed.contains(item.id.as_str()) {
                 continue;
             }
             match item.kind {
+                // Codex's AGENTS.md message: one row per file in the AGENTS.md group, its
+                // wrapper (heading and tags) a block of its own.
+                Kind::Instruction if codex && item.origin.layer == Layer::Builtin => {
+                    files.extend(item.children.iter().map(|c| self.file_row(c)));
+                    let mut own = item.clone();
+                    own.children.clear();
+                    builtin.push(self.leaf(&own, "block", ""));
+                }
+                // Named by the file; the source column says whose it is.
+                Kind::PermissionRule if codex => {
+                    let mut row = self.leaf(item, "rules file", &self.layer_source(item));
+                    row.name = item
+                        .origin
+                        .path
+                        .as_deref()
+                        .and_then(Path::file_name)
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| file_name(item, &self.places));
+                    row.detail = self.detail(item, &row.name, row.bytes, row.absent);
+                    rules.push(row);
+                }
                 Kind::Plugin if item.origin.layer == Layer::Builtin => {
                     let mut row = self.leaf(item, "plugin", "");
                     row.name = plugin_name(&item.label).to_string();
@@ -1187,7 +1845,7 @@ impl Builder<'_> {
                 }
                 Kind::BuiltinTool => tools.push(self.leaf(item, "tool", "")),
                 _ if item.origin.layer == Layer::Builtin => {
-                    builtin.push(self.leaf(item, kind_word(item.kind), ""))
+                    builtin.push(self.leaf(item, kind_word_in(item.kind, tree.agent), ""))
                 }
                 // Not in the request at all (status line, permission rules).
                 _ if item.cost.not_applicable && matches!(item.mode, Mode::None) => {}
@@ -1209,6 +1867,8 @@ impl Builder<'_> {
                 &mut servers,
                 &mut tools,
                 &mut other,
+                &mut builtin,
+                &mut rules,
             );
         }
 
@@ -1261,7 +1921,27 @@ impl Builder<'_> {
                 ),
             );
         }
-        if !files.is_empty() {
+        if !files.is_empty() && codex {
+            groups.push(
+                self.group(
+                    GroupKind::ProjectFiles,
+                    "AGENTS.md files",
+                    files,
+                    Detail {
+                        what: "AGENTS.md files · your ~/.codex/AGENTS.md and this project's, from \
+                           its root to this folder"
+                            .to_string(),
+                        brings:
+                            "Each one loads in every first request; this project's files share \
+                             one size cap (project_doc_max_bytes, 32 KiB unless set)."
+                                .to_string(),
+                        action: "Open the group (→) to see each file and what turning it off does."
+                            .to_string(),
+                        ..Detail::default()
+                    },
+                ),
+            );
+        } else if !files.is_empty() {
             groups.push(
                 self.group(
                     GroupKind::ProjectFiles,
@@ -1326,11 +2006,19 @@ impl Builder<'_> {
                     "Hooks",
                     hook_rows,
                     Detail {
-                        what: "Hooks · commands Claude Code runs on events, outside any plugin"
-                            .to_string(),
-                        brings: "What SessionStart and UserPromptSubmit hooks print enters the \
+                        what: format!(
+                            "Hooks · commands {} runs on events, outside any plugin",
+                            agent_name(tree.agent)
+                        ),
+                        brings: if codex {
+                            "What SessionStart and UserPromptSubmit hooks print enters the \
+                             request; Codex's dump does not include hook output, so harn cannot \
+                             measure it."
+                        } else {
+                            "What SessionStart and UserPromptSubmit hooks print enters the \
                              request; the others run later."
-                            .to_string(),
+                        }
+                        .to_string(),
                         action: "Open the group (→) to see each hook.".to_string(),
                         ..Detail::default()
                     },
@@ -1345,10 +2033,37 @@ impl Builder<'_> {
                     servers,
                     Detail {
                         what: "MCP servers · tool servers outside any plugin".to_string(),
-                        brings: "Their tool schemas load up front while tool search is off; the \
-                             size is known only after a run."
-                            .to_string(),
+                        brings: match (codex, tree.tool_search) {
+                            (true, Some(true)) => "Tool search is on: their tools are sent only \
+                                 when the model looks them up; their schemas are not in Codex's \
+                                 dump, so harn cannot measure them."
+                                .to_string(),
+                            (true, _) => "Their tool schemas load up front; they are not in \
+                                 Codex's dump, so harn cannot measure them."
+                                .to_string(),
+                            _ => "Their tool schemas load up front while tool search is off; \
+                                 the size is known only after a run."
+                                .to_string(),
+                        },
                         action: "Open the group (→) to see each server.".to_string(),
+                        ..Detail::default()
+                    },
+                ),
+            );
+        }
+        if !rules.is_empty() {
+            groups.push(
+                self.group(
+                    GroupKind::Rules,
+                    "Rules files",
+                    rules,
+                    Detail {
+                        what: "Rules files · command rules Codex reads (*.rules)".to_string(),
+                        brings: "Their approved commands go inside the permissions block; harn \
+                             does not measure them separately."
+                            .to_string(),
+                        action: "Codex has no setting for one rules file: e opens it to edit."
+                            .to_string(),
                         ..Detail::default()
                     },
                 ),
@@ -1374,13 +2089,24 @@ impl Builder<'_> {
 
     fn group(&self, kind: GroupKind, name: &str, rows: Vec<Row>, detail: Detail) -> Group {
         let bytes = sum_known(rows.iter().filter_map(|r| r.bytes));
+        // Codex: a known part beside rows that load with no size reads `0.1 KB + unmeasured`,
+        // never as if the group cost only that.
+        let partial = self.places.agent == Agent::Codex
+            && bytes.is_some()
+            && rows
+                .iter()
+                .any(|r| r.bytes.is_none() && r.absent.is_none() && r.state != State::Off);
         Group {
             kind,
             name: format!("{name} ({})", rows.len()),
             count_line: String::new(),
             bytes,
-            absent: common_absent(bytes, &rows),
-            share: self.share(bytes),
+            absent: if partial {
+                Some(PLUS_UNMEASURED)
+            } else {
+                common_absent(bytes, &rows)
+            },
+            share: if partial { None } else { self.share(bytes) },
             overlap: false,
             count_short: String::new(),
             all_off: false,
@@ -1402,9 +2128,13 @@ impl Builder<'_> {
                     n => format!(", {n} turned off here"),
                 }
             ),
-            brings: "Turn one off and its skills, commands, agents and hooks leave next \
-                     session."
-                .to_string(),
+            brings: if self.places.agent == Agent::Codex {
+                "Turn one off and its skills, MCP servers and hooks leave next session."
+            } else {
+                "Turn one off and its skills, commands, agents and hooks leave next \
+                 session."
+            }
+            .to_string(),
             action: "Open the group (→) to see each plugin with its size.".to_string(),
             ..Detail::default()
         };
@@ -1448,8 +2178,13 @@ impl Builder<'_> {
         let cut = listing
             .and_then(|l| l.signal.as_deref())
             .and_then(cut_count);
+        // Codex: a budget in tokens (2 % of the window, at most 10k), over it or not.
+        let over_budget = listing
+            .and_then(|l| l.signal.as_deref())
+            .is_some_and(|s| s.starts_with("over budget"));
         let count_line = match (cut, listing) {
             (Some((dropped, total)), _) => format!("{total} entries · {dropped} descriptions cut"),
+            (None, Some(_)) if over_budget => format!("{entries} entries · over its budget"),
             (None, Some(_)) => format!("{entries} entries"),
             (None, None) => format!("{off} turned off here"),
         };
@@ -1472,6 +2207,30 @@ impl Builder<'_> {
                     }
                 ),
                 format!("harn turned {} off here.", count(off, "entry")),
+            ),
+            GroupKind::SkillListing if self.places.agent == Agent::Codex => (
+                "Skill listing",
+                format!("Skill listing · {entries} entries, one line per skill"),
+                if over_budget {
+                    "Sent in every first request and over its budget (2% of the context window, \
+                     at most 10,000 tokens): Codex shortens descriptions; by how much needs \
+                     `harn verify --run --agent codex`."
+                        .to_string()
+                } else if self
+                    .tree
+                    .warnings
+                    .iter()
+                    .any(|w| w.starts_with("codex skill listing budget unknown"))
+                {
+                    "Sent in every first request; its budget is 2% of the context window, which \
+                     is unknown here, so whether it shortens descriptions needs `harn verify \
+                     --run --agent codex`."
+                        .to_string()
+                } else {
+                    "Sent in every first request; it fits its budget (2% of the context window, \
+                     at most 10,000 tokens)."
+                        .to_string()
+                },
             ),
             GroupKind::SkillListing => (
                 "Skill listing",
@@ -1528,16 +2287,39 @@ impl Builder<'_> {
 
     fn builtin_group(&self, rows: Vec<Row>) -> Group {
         let all_fixed = !any_on(&rows);
+        let codex = self.places.agent == Agent::Codex;
+        // Codex: most of its blocks have an `include_*` switch; say how many.
+        let switchable = rows
+            .iter()
+            .filter(|r| any_on(std::slice::from_ref(*r)))
+            .count();
+        let sized = rows.iter().filter(|r| r.bytes.is_some()).count();
         let mut group = self.group(
             GroupKind::Builtin,
-            "Built-in",
+            if codex { "Built-in blocks" } else { "Built-in" },
             rows,
             Detail {
-                what: "Built-in · parts of Claude Code itself: system prompt, environment, \
-                       tools"
-                    .to_string(),
-                brings: "Their sizes are unknown until `harn verify --run` measures a session."
-                    .to_string(),
+                what: if codex {
+                    "Built-in blocks · text Codex writes itself"
+                } else {
+                    "Built-in · parts of Claude Code itself: system prompt, environment, \
+                     tools"
+                }
+                .to_string(),
+                brings: if codex {
+                    // The base instructions are sent outside Codex's dump; every other block is
+                    // in it.
+                    if sized > 0 {
+                        "Those with a size are counted from the files; `harn verify --run --agent \
+                         codex` measures the rest, except the base instructions."
+                    } else {
+                        "`harn verify --run --agent codex` measures their sizes, except the base \
+                         instructions, which Codex sends outside its dump."
+                    }
+                } else {
+                    "Their sizes are unknown until `harn verify --run` measures a session."
+                }
+                .to_string(),
                 action: if all_fixed {
                     "They cannot be turned off.".to_string()
                 } else {
@@ -1547,6 +2329,13 @@ impl Builder<'_> {
                 ..Detail::default()
             },
         );
+        let n = group.rows.len();
+        if codex && !all_fixed && switchable * 2 > n {
+            group.detail.action =
+                "Most have a switch; each one says what d does when selected.".to_string();
+            group.count_line = format!("{switchable} of {n} can be turned off");
+            return group;
+        }
         group.count_line = if all_fixed {
             "cannot be turned off".to_string()
         } else {
@@ -1562,12 +2351,14 @@ impl Builder<'_> {
         self.journaled.contains_key(&item.id).then(|| Detail {
             what: format!("{name} · turned off · u undoes · takes effect next session"),
             brings: if loads {
-                "harn turned it off here, but it still shows in what loads; whether its bytes \
-                 leave needs `harn verify --run`."
+                format!(
+                    "harn turned it off here, but it still shows in what loads; whether its bytes \
+                     leave needs {}.",
+                    verify_command(self.places.agent)
+                )
             } else {
-                "harn turned it off here; it stays listed, and none of it loads."
-            }
-            .to_string(),
+                "harn turned it off here; it stays listed, and none of it loads.".to_string()
+            },
             action: "o turns it back on (the change is reversed byte for byte).".to_string(),
             ..Detail::default()
         })
@@ -1577,7 +2368,7 @@ impl Builder<'_> {
     fn layer_source(&self, item: &Item) -> String {
         match (item.origin.layer, item.origin.plugin.as_deref()) {
             (Layer::Plugin, Some(plugin)) => market_word(plugin),
-            (layer, _) => layer_words(layer).to_string(),
+            (layer, _) => layer_words(layer, self.places.agent).to_string(),
         }
     }
 
@@ -1586,9 +2377,12 @@ impl Builder<'_> {
         if let Some(p) = owner_plugin(item) {
             return format!("the {} plugin", plugin_name(p));
         }
+        let codex = self.places.agent == Agent::Codex;
         match item.origin.layer {
             Layer::Project => "this repository".to_string(),
             Layer::Local => "this project only".to_string(),
+            Layer::User if codex => "your ~/.codex".to_string(),
+            Layer::Builtin if codex => "Codex".to_string(),
             Layer::User => "your ~/.claude".to_string(),
             Layer::ClaudeAi => "claude.ai".to_string(),
             Layer::Builtin => "Claude Code".to_string(),
@@ -1612,6 +2406,8 @@ impl Builder<'_> {
             // Turned off here and still listed (a disabled MCP server): the word place_off
             // rows say.
             Some("off")
+        } else if let Some(reason) = codex_off(item) {
+            Some(codex_off_word(reason))
         } else if item.cost.not_applicable || matches!(item.mode, Mode::Runtime | Mode::None) {
             absent_word(item.mode).or(Some("not loaded"))
         } else {
@@ -1624,7 +2420,11 @@ impl Builder<'_> {
     /// the roster), it went off with every other hook or a managed policy keeps it off, else On
     /// with a switch, Fixed without one.
     fn state(&self, item: &Item) -> State {
-        if self.journaled.contains_key(&item.id) || switched_off(item) || off_by_policy(item) {
+        if self.journaled.contains_key(&item.id)
+            || switched_off(item)
+            || off_by_policy(item)
+            || codex_off(item).is_some()
+        {
             State::Off
         } else if any_knob(item).is_some() {
             State::On
@@ -1636,7 +2436,7 @@ impl Builder<'_> {
     /// A row for one item, its children folded into its size.
     fn leaf(&self, item: &Item, kind_word: &str, source: &str) -> Row {
         let (bytes, share, absent) = self.costs(item);
-        let name = self.places.text(&item.label);
+        let name = codex_block_name(item).unwrap_or_else(|| self.places.text(&item.label));
         let detail = self.detail(item, &name, bytes, absent);
         Row {
             key: item.id.clone(),
@@ -1695,7 +2495,7 @@ impl Builder<'_> {
     fn plugin_row(&self, plugin: &Item, facets: &[&Item]) -> Row {
         let key = plugin_key(plugin).to_string();
         let name = plugin_name(&key).to_string();
-        let freed = plugin_freed(facets);
+        let freed = plugin_freed(facets, self.places.agent);
         let saving = freed.text.clone();
         let mut children: Vec<Row> = facets
             .iter()
@@ -1777,9 +2577,9 @@ impl Builder<'_> {
         let word = kind_word(item.kind);
         let (bytes, share, absent) = self.costs(item);
         let mut detail = self.detail(item, &name, bytes, absent);
-        let whole_plugin = local_knob(item).is_some_and(|k| {
-            matches!(k, Knob::Setting { pointer, .. } if pointer.starts_with("/enabledPlugins/"))
-        });
+        let whole_plugin = default_knob(item).is_some_and(
+            |k| matches!(k, Knob::Setting { pointer, .. } if plugin_switch(pointer).is_some()),
+        );
         let saving = saving.filter(|_| whole_plugin).map(str::to_string);
         if let (Some(text), true) = (&saving, !detail.saves.is_empty()) {
             detail.saves = format!("That frees {text}.");
@@ -1844,7 +2644,7 @@ impl Builder<'_> {
             owner_plugin(first).and_then(|p| plugins.iter().find(|i| plugin_key(i) == p).copied());
         let (name, source) = match owner_plugin(first) {
             Some(p) => (plugin_name(p).to_string(), market_word(p)),
-            None => owner_words(first),
+            None => owner_words(first, self.places.agent),
         };
         let saving = owner_plugin(first)
             .and_then(|p| savings.get(p).cloned())
@@ -1863,7 +2663,10 @@ impl Builder<'_> {
             },
             brings: match bytes {
                 Some(b) => format!("{lines}: {} of your first request.", size(b)),
-                None => format!("{lines}; their size is unknown until `harn verify --run`."),
+                None => format!(
+                    "{lines}; their size is unknown until {}.",
+                    verify_command(self.places.agent)
+                ),
             },
             ..Detail::default()
         };
@@ -1949,6 +2752,30 @@ impl Builder<'_> {
                 "Its listing line: {} of your first request; the full text loads when used.",
                 size(b)
             ),
+            (Some(b), _)
+                if item_agent(item) == Agent::Codex
+                    && item.kind == Kind::SystemPrompt
+                    && !codex_measurable(item) =>
+            {
+                format!(
+                    "{} of your first request, counted from the model catalog; Codex sends it \
+                     outside its dump, so harn cannot check it against a session.",
+                    size(b)
+                )
+            }
+            (Some(b), _)
+                if item_agent(item) == Agent::Codex
+                    && item
+                        .signal
+                        .as_deref()
+                        .is_some_and(|s| s.starts_with("truncated:")) =>
+            {
+                format!(
+                    "{} of your first request, cut to fit project_doc_max_bytes (the cap the \
+                     project's AGENTS.md files share).",
+                    size(b)
+                )
+            }
             (Some(b), _) => {
                 let imports = descendants(item);
                 if imports > 0 && item.kind == Kind::Instruction {
@@ -1961,10 +2788,27 @@ impl Builder<'_> {
                     format!("{} of your first request.", size(b))
                 }
             }
-            (None, Some(word)) => format!("It costs nothing in the first request ({word})."),
-            (None, None) => {
-                "Its size is unknown until `harn verify --run` measures a session.".to_string()
+            (None, None) if is_base_instructions(item) && self.tree.codex.is_some() => {
+                base_size_unknown(self.tree.codex.as_ref().expect("checked"), &self.places)
             }
+            (None, None) if codex_unmeasurable(item).is_some() => {
+                codex_unmeasurable(item).unwrap_or_default().to_string()
+            }
+            (None, Some(_)) if item_agent(item) == Agent::Codex && item.signal.is_some() => {
+                match item_codex_words(
+                    item.signal.as_deref().unwrap_or_default(),
+                    item,
+                    &self.places,
+                ) {
+                    why if why.is_empty() => "It does not load here.".to_string(),
+                    why => format!("It does not load ({why})."),
+                }
+            }
+            (None, Some(word)) => format!("It costs nothing in the first request ({word})."),
+            (None, None) => format!(
+                "Its size is unknown until {} measures a session.",
+                verify_command(self.places.agent)
+            ),
         };
         let mut detail = Detail {
             what,
@@ -1974,7 +2818,72 @@ impl Builder<'_> {
         self.action_sentences(item, &mut detail, listing_entry(item), "it");
         self.hooks_off(item, name)
             .or_else(|| self.still_listed(item, name))
+            .or_else(|| self.codex_off_detail(item, name))
             .unwrap_or(detail)
+    }
+
+    /// The detail of a Codex row that does not load or run (an `off:` signal): why, in words,
+    /// and whether anything here can change it.
+    fn codex_off_detail(&self, item: &Item, name: &str) -> Option<Detail> {
+        let reason = codex_off(item)?;
+        let verb = if item.kind == Kind::Hook {
+            "run"
+        } else {
+            "load"
+        };
+        let not_harns = "harn did not make that change, so o and u cannot reverse it.";
+        let (state, brings, action) = if reason.starts_with("untrusted") {
+            (
+                "not approved".to_string(),
+                "Codex runs a hook only after you approve it in codex /hooks; this one is not \
+                 approved, so it does not run."
+                    .to_string(),
+                "harn cannot approve it; codex /hooks does.".to_string(),
+            )
+        } else if reason.starts_with("modified since trusted") {
+            (
+                "not approved".to_string(),
+                "It changed since you approved it, so Codex does not run it until you review \
+                 it again in codex /hooks."
+                    .to_string(),
+                "harn cannot approve it; codex /hooks does.".to_string(),
+            )
+        } else if reason.starts_with("allow_managed_hooks_only") {
+            (
+                OFF_BY_POLICY.to_string(),
+                "Your organisation's requirements allow only its own hooks \
+                 (allow_managed_hooks_only), so this one does not run."
+                    .to_string(),
+                "No setting of yours overrides that policy, so d and o cannot change it."
+                    .to_string(),
+            )
+        } else if reason.starts_with("features.hooks") {
+            (
+                OFF_WITH_HOOKS.to_string(),
+                "Your settings turn every hook off (features.hooks = false); it does not run \
+                 here."
+                    .to_string(),
+                not_harns.to_string(),
+            )
+        } else {
+            let why = item_codex_words(&reason.replace("disabled in ", ""), item, &self.places);
+            let why = if why.is_empty() {
+                String::new()
+            } else {
+                format!(" ({why})")
+            };
+            (
+                "off here".to_string(),
+                format!("Your settings turn it off{why}; it does not {verb} here."),
+                not_harns.to_string(),
+            )
+        };
+        Some(Detail {
+            what: format!("{name} · {state}"),
+            brings,
+            action,
+            ..Detail::default()
+        })
     }
 
     /// The detail of a hook that went off with every other hook, or that a managed policy keeps
@@ -2022,6 +2931,23 @@ impl Builder<'_> {
     /// `skill of the slack plugin`, `instructions in this repository · loads every session`.
     fn what_phrase(&self, item: &Item) -> String {
         let from = self.origin_phrase(item);
+        if item_agent(item) == Agent::Codex {
+            if item.origin.layer == Layer::Builtin && item.kind != Kind::Skill {
+                return codex_block_phrase(item).to_string();
+            }
+            if item.kind == Kind::PermissionRule {
+                return format!("command rules file, from {from}");
+            }
+            if item.id.ends_with("#/developer_instructions") {
+                let file = item
+                    .origin
+                    .path
+                    .as_deref()
+                    .map(|p| self.places.path(p))
+                    .unwrap_or_else(|| "config".to_string());
+                return format!("instructions you set in {file}, sent before the AGENTS.md files");
+            }
+        }
         match item.kind {
             Kind::Skill | Kind::Command | Kind::SubAgent => {
                 format!("{} from {from}", kind_word(item.kind))
@@ -2074,7 +3000,38 @@ impl Builder<'_> {
     /// lines; `it` names the thing in the sentence.
     fn action_sentences(&self, item: &Item, detail: &mut Detail, listing: bool, it: &str) {
         let places = &self.places;
-        match (local_knob(item), any_knob(item)) {
+        let agent = item_agent(item);
+        match (default_knob(item), any_knob(item)) {
+            // Codex: the scope in words, then the key and the file it writes.
+            (
+                Some(
+                    knob @ Knob::Setting {
+                        file,
+                        pointer,
+                        value,
+                        scope,
+                        ..
+                    },
+                ),
+                _,
+            ) if is_toml(file) => {
+                let verb = self.verb(item, knob);
+                let (key, op, value) = toml_words(pointer, value, places);
+                let how = if op == "+=" {
+                    format!("adding an entry to {key} in {}", places.path(file))
+                } else {
+                    format!("writing {key} = {value} to {}", places.path(file))
+                };
+                detail.action =
+                    self.d_clause(&format!("{verb} {} by {how}", scope_words(*scope, agent)));
+                if it != "it" {
+                    detail.action = detail.action.replacen(" it ", &format!(" {it} "), 1);
+                }
+                detail.saves = self.saves(item, listing);
+                if !self.read_only {
+                    detail.undo = "Reversible with u.".to_string();
+                }
+            }
             (Some(knob), _) => {
                 let file = knob_file(knob, places).unwrap_or_default();
                 let verb = self.verb(item, knob);
@@ -2096,11 +3053,14 @@ impl Builder<'_> {
             (None, Some((_, scope))) => {
                 detail.action = format!(
                     "Its only switch is {}: `harn off --scope {scope}` changes it there.",
-                    scope_words(scope)
+                    scope_words(scope, agent)
                 );
             }
             (None, None) => {
-                detail.action = format!("It cannot be turned off: {}.", fixed_reason(item));
+                detail.action = format!(
+                    "It cannot be turned off: {}.",
+                    fixed_reason(item, &self.places)
+                );
             }
         }
     }
@@ -2147,10 +3107,21 @@ impl Builder<'_> {
                 _ => "turns it off".to_string(),
             };
         };
-        if pointer.starts_with("/enabledPlugins/") && item.kind != Kind::Plugin {
-            let words = pointer_words(pointer, &self.places);
-            let p = words.get(1).cloned().unwrap_or_default();
-            return format!("turns off the whole {p} plugin");
+        if let Some(p) = plugin_switch(pointer).filter(|_| item.kind != Kind::Plugin) {
+            return format!("turns off the whole {} plugin", plugin_name(&p));
+        }
+        // Codex's switches that take more than the row (resolve/codex).
+        match pointer.as_str() {
+            "/project_doc_max_bytes" => {
+                return "leaves out the project AGENTS.md files".to_string()
+            }
+            "/developer_instructions" => return "leaves it out".to_string(),
+            "/skills/include_instructions" => return "drops the whole skill listing".to_string(),
+            "/skills/bundled/enabled" => return "turns off every bundled skill".to_string(),
+            "/features/plugins" => return "turns off every plugin".to_string(),
+            "/features/hooks" => return "turns off every hook".to_string(),
+            "/skills/config/-" => return "hides it".to_string(),
+            _ => {}
         }
         match pointer.as_str() {
             "/disableAllHooks" => "turns off every hook".to_string(),
@@ -2172,22 +3143,120 @@ impl Builder<'_> {
         } else {
             "skill"
         };
+        let verify = verify_command(self.places.agent);
+        // Codex: what can be measured of the unknown part, from the rows that would leave.
+        let unknown = if self.places.agent == Agent::Codex && freed.delta_unknown {
+            Unmeasured::of(self.leaving_with(item))
+        } else {
+            None
+        };
+        let words = |w: &[&str]| and_list(&w.iter().map(|x| x.to_string()).collect::<Vec<_>>());
         match (freed.known, freed.delta_unknown) {
             (0, true) if listing => {
-                format!("The {which} listing shrinks; how much needs `harn verify --run`.")
+                format!("The {which} listing shrinks; how much needs {verify}.")
             }
             (known, true) if listing => format!(
                 "That frees {}; the {which} listing may shrink more (unmeasured).",
                 size(known)
             ),
-            (0, true) => "How much that frees needs `harn verify --run`.".to_string(),
-            (known, true) => format!(
-                "That frees {} and a part only `harn verify --run` can measure.",
-                size(known)
-            ),
+            (0, true) => match unknown {
+                Some(Unmeasured::Never(_)) => {
+                    "harn cannot measure how much that frees.".to_string()
+                }
+                Some(Unmeasured::Mixed(w)) => format!(
+                    "How much that frees needs {verify}, except {}, which harn cannot measure.",
+                    words(&w)
+                ),
+                _ => format!("How much that frees needs {verify}."),
+            },
+            (known, true) => match unknown {
+                Some(Unmeasured::Never(_)) => {
+                    format!("That frees {} and a part harn cannot measure.", size(known))
+                }
+                Some(Unmeasured::Mixed(w)) => format!(
+                    "That frees {}, a part only {verify} can measure, and {}, which harn cannot \
+                     measure.",
+                    size(known),
+                    words(&w)
+                ),
+                _ => format!(
+                    "That frees {} and a part only {verify} can measure.",
+                    size(known)
+                ),
+            },
             (0, false) => "That frees nothing in the first request.".to_string(),
-            (known, false) => format!("That frees {}.", size(known)),
+            (known, false) => match self.agents_md_leaving(item, known) {
+                Some(what) => format!("That frees {}: {what}.", size(known)),
+                None => format!("That frees {}.", size(known)),
+            },
         }
+    }
+
+    /// The rows `d` on `item` would take out, as far as the tree tells without the plan: the row
+    /// with what is under it, a plugin's parts with the plugin (or with a part whose switch is the
+    /// plugin's), every plugin's for `features.plugins`, every hook for `features.hooks`.
+    fn leaving_with<'t>(&'t self, item: &'t Item) -> Vec<&'t Item> {
+        let mut out = subtree(item);
+        let pointer = match default_knob(item) {
+            Some(Knob::Setting { pointer, .. }) => pointer.as_str(),
+            _ => "",
+        };
+        let plugin = if item.kind == Kind::Plugin {
+            Some(plugin_key(item).to_string())
+        } else {
+            plugin_switch(pointer)
+        };
+        let tree = self.tree;
+        if let Some(p) = plugin {
+            out.extend(
+                model::walk(tree).filter(|i| i.origin.plugin.as_deref() == Some(p.as_str())),
+            );
+        }
+        match pointer {
+            "/features/plugins" => out.extend(model::walk(tree).filter(|i| {
+                i.origin.plugin.is_some()
+                    || matches!(id_tail(i), "plugins_instructions" | "recommended_plugins")
+            })),
+            "/features/hooks" => out.extend(model::walk(tree).filter(|i| i.kind == Kind::Hook)),
+            _ => {}
+        }
+        out
+    }
+
+    /// What `project_doc_max_bytes = 0` on a project AGENTS.md file takes with it when that is
+    /// more than the file: the project files (`the file`, `the 2 project AGENTS.md files`) and
+    /// the wrapper around the AGENTS.md files — all of it when no other file lands, else the part
+    /// of it the project files bring (` for <dir>`, the separators). None for any other row.
+    fn agents_md_leaving(&self, item: &Item, known: u64) -> Option<String> {
+        let own = request_bytes(&item.cost)?;
+        let is_cap = matches!(
+            default_knob(item),
+            Some(Knob::Setting { pointer, .. }) if pointer == "/project_doc_max_bytes"
+        );
+        if known <= own || !is_cap || item_agent(item) != Agent::Codex {
+            return None;
+        }
+        let message = self
+            .tree
+            .items
+            .iter()
+            .find(|i| i.children.iter().any(|c| c.id == item.id))?;
+        let landed = |layer: Layer| {
+            message
+                .children
+                .iter()
+                .filter(|c| c.origin.layer == layer && in_request(c))
+                .count()
+        };
+        let files = match landed(Layer::Project) {
+            0 | 1 => "the file".to_string(),
+            n => format!("the {n} project AGENTS.md files"),
+        };
+        Some(if landed(Layer::User) == 0 && landed(Layer::Managed) == 0 {
+            format!("{files} and the wrapper around the AGENTS.md files")
+        } else {
+            format!("{files} and part of the wrapper around the AGENTS.md files")
+        })
     }
 
     // ---- off rows ----------------------------------------------------------------------------
@@ -2205,7 +3274,10 @@ impl Builder<'_> {
         servers: &mut Vec<Row>,
         tools: &mut Vec<Row>,
         other: &mut Vec<Row>,
+        builtin: &mut Vec<Row>,
+        rules: &mut Vec<Row>,
     ) {
+        let codex = self.places.agent == Agent::Codex;
         let mut parts = off.item_id.splitn(4, '/');
         let (kind, layer) = (parts.nth(1).unwrap_or_default(), parts.next());
         let kind = Kind::ALL.iter().copied().find(|k| k.as_str() == kind);
@@ -2239,7 +3311,10 @@ impl Builder<'_> {
             id: Some(off.item_id.clone()),
             name: display.clone(),
             source,
-            kind_word: kind.map(kind_word).unwrap_or("item").to_string(),
+            kind_word: kind
+                .map(|k| kind_word_in(k, self.places.agent))
+                .unwrap_or("item")
+                .to_string(),
             bytes: None,
             share: None,
             absent: Some(if all_hooks { OFF_WITH_HOOKS } else { "off" }),
@@ -2275,6 +3350,9 @@ impl Builder<'_> {
             }
         };
         match kind {
+            // Codex's blocks leave the tree when their `include_*` switch is off.
+            Some(Kind::SystemPrompt | Kind::EnvBlock) if codex => builtin.push(row),
+            Some(Kind::PermissionRule) if codex => rules.push(row),
             Some(Kind::Plugin) => plugins.push(row),
             Some(Kind::Skill | Kind::Command) => into_owner(skills, row),
             Some(Kind::SubAgent) => into_owner(agents, row),
@@ -2288,8 +3366,14 @@ impl Builder<'_> {
     }
 }
 
-/// The source column's words for a layer: `project`, `~/.claude`, `claude.ai`, `Claude Code`.
-fn layer_words(layer: Layer) -> &'static str {
+/// The source column's words for a layer: `project`, `~/.claude`, `claude.ai`, `Claude Code`;
+/// for Codex `~/.codex` and `Codex`.
+fn layer_words(layer: Layer, agent: Agent) -> &'static str {
+    match (agent, layer) {
+        (Agent::Codex, Layer::User) => return "~/.codex",
+        (Agent::Codex, Layer::Builtin) => return "Codex",
+        _ => {}
+    }
     match layer {
         Layer::Project => "project",
         Layer::Local => "this project",
@@ -2306,6 +3390,356 @@ fn layer_words(layer: Layer) -> &'static str {
 /// A hook (or the status line) that Claude Code's one hooks switch turned off.
 fn switched_off(item: &Item) -> bool {
     item.signal.as_deref() == Some(OFF_ALL_HOOKS)
+}
+
+/// The command that measures a session of `agent` (`harn verify --run` is Claude Code's when no
+/// agent is named).
+pub fn verify_command(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "`harn verify --run --agent codex`",
+        Agent::ClaudeCode => "`harn verify --run`",
+    }
+}
+
+/// Whether `harn verify --agent codex` can measure this Codex row: codex's dump has the blocks,
+/// the skill listing and the AGENTS.md message, but not hook output, MCP tool schemas, the rules
+/// (inside the permissions block, not apart) or the base instructions (sent as the request's
+/// `instructions` field, outside the dump).
+fn codex_measurable(item: &Item) -> bool {
+    match item.kind {
+        Kind::Hook
+        | Kind::PermissionRule
+        | Kind::McpServer
+        | Kind::McpTool
+        | Kind::McpInstructions => false,
+        Kind::SystemPrompt => id_tail(item) != "instructions",
+        _ => true,
+    }
+}
+
+/// Why a Codex row's size is unknown and stays so: what it is and what Codex's dump leaves out.
+fn codex_unmeasurable(item: &Item) -> Option<&'static str> {
+    if item_agent(item) != Agent::Codex || codex_measurable(item) {
+        return None;
+    }
+    Some(match item.kind {
+        Kind::Hook => {
+            "What it prints enters the first request; Codex's dump does not include hook \
+             output, so harn cannot measure it."
+        }
+        Kind::PermissionRule => {
+            "Its approved commands go inside the permissions block; harn does not measure them \
+             separately."
+        }
+        Kind::SystemPrompt => {
+            "Its size is unknown: the model is not in the model catalog, and Codex sends these \
+             instructions outside its dump, so harn cannot measure them."
+        }
+        _ if item.mode == Mode::Deferred => {
+            "Tool search is on: its tools are sent only when the model looks them up; their \
+             schemas are not in Codex's dump, so harn cannot measure them."
+        }
+        _ => {
+            "Its tool schemas load up front; they are not in Codex's dump, so harn cannot \
+             measure them."
+        }
+    })
+}
+
+/// Whether the unknown part of what leaves can be measured, from the Codex rows that leave with
+/// a size nobody knows yet: all by `harn verify --agent codex`, none of it, or some of it — with
+/// the words for what it cannot (`hook output`, `MCP tool schemas`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unmeasured {
+    Verify,
+    Never(Vec<&'static str>),
+    Mixed(Vec<&'static str>),
+}
+
+impl Unmeasured {
+    /// Of `leaving`, the rows in the request (or behind tool search) with no size. None when
+    /// there are none (the unknown is a re-rendered listing: `harn verify` measures it).
+    fn of<'a>(leaving: impl IntoIterator<Item = &'a Item>) -> Option<Unmeasured> {
+        let mut verify = false;
+        let mut never: Vec<&'static str> = Vec::new();
+        for item in leaving {
+            let unknown = matches!(item.mode, Mode::Always | Mode::Advertised | Mode::Deferred)
+                && !item.cost.not_applicable
+                && request_bytes(&item.cost).is_none();
+            if !unknown {
+                continue;
+            }
+            match codex_unmeasurable(item).map(|_| never_word(item)) {
+                Some(word) => {
+                    if !never.contains(&word) {
+                        never.push(word);
+                    }
+                }
+                None => verify = true,
+            }
+        }
+        match (verify, never.is_empty()) {
+            (false, true) => None,
+            (true, true) => Some(Unmeasured::Verify),
+            (false, false) => Some(Unmeasured::Never(never)),
+            (true, false) => Some(Unmeasured::Mixed(never)),
+        }
+    }
+}
+
+/// What harn cannot measure of a Codex row, in a few words.
+fn never_word(item: &Item) -> &'static str {
+    match item.kind {
+        Kind::Hook => "hook output",
+        Kind::PermissionRule => "rules",
+        Kind::SystemPrompt => "the base instructions",
+        _ => "MCP tool schemas",
+    }
+}
+
+/// The reason a Codex row does not load or run: its `off:` signal (mode none) without the
+/// `off: ` — `untrusted (…)`, `features.hooks = false`, `plugins.enabled = false`.
+fn codex_off(item: &Item) -> Option<&str> {
+    if item_agent(item) != Agent::Codex || item.mode != Mode::None {
+        return None;
+    }
+    item.signal.as_deref()?.strip_prefix("off: ")
+}
+
+/// What a Codex `off:` row shows instead of a size.
+fn codex_off_word(reason: &str) -> &'static str {
+    if reason.starts_with("untrusted") || reason.starts_with("modified since trusted") {
+        "not approved"
+    } else if reason.starts_with("allow_managed_hooks_only") {
+        OFF_BY_POLICY
+    } else if reason.starts_with("features.hooks") {
+        OFF_WITH_HOOKS
+    } else {
+        "off"
+    }
+}
+
+/// The last part of an item id (`environment_context` of `codex/env-block/builtin/…`).
+fn id_tail(item: &Item) -> &str {
+    item.id.splitn(4, '/').nth(3).unwrap_or(&item.id)
+}
+
+/// A Codex wrapper row named for a person: `AGENTS.md wrapper`, `skill listing wrapper`.
+fn codex_block_name(item: &Item) -> Option<String> {
+    if item_agent(item) != Agent::Codex || item.origin.layer != Layer::Builtin {
+        return None;
+    }
+    match id_tail(item) {
+        "agents-md-message" => Some("AGENTS.md wrapper".to_string()),
+        "skills_instructions" => Some("skill listing wrapper".to_string()),
+        _ => None,
+    }
+}
+
+/// What a Codex built-in block is, after its name.
+fn codex_block_phrase(item: &Item) -> &'static str {
+    match id_tail(item) {
+        "instructions" => "Codex's own instructions for the model, from its model catalog",
+        "permissions_instructions" => {
+            "tells the model its sandbox, approval policy and approved commands"
+        }
+        "collaboration_mode" => "tells the model how to work with you (the collaboration mode)",
+        "apps_instructions" => "about connected apps; sent only when an app is reachable",
+        "multi_agent" => "lets the model hand work to sub-agents, with their tools",
+        "environment_context" => "the working folder, shell, date and time zone",
+        "agents-md-message" => "the heading and tags Codex puts around the AGENTS.md files",
+        "skills_instructions" => "the heading and intro Codex puts around the skill listing",
+        "plugins_instructions" => "a fixed text that explains plugins to the model",
+        "recommended_plugins" => "plugins you could install, picked by Codex at startup",
+        _ => "text Codex writes itself",
+    }
+}
+
+/// Where the config file that ends `head` (the text before a `#/` reference) starts, when that
+/// is certain; None otherwise. Certain means one of two things:
+/// - `head` ends with one of `known`, the files the item's own facts name (its switches, its
+///   origin, a plan's files);
+/// - a folder harn recognizes as a root — the target dir and its ancestors, home, the Codex home
+///   (`CODEX_HOME`, even outside home), `/etc/codex` —
+///   starts a path there (after a space, a `(` or the start of the text) that runs to the
+///   reference with no other path starting inside it. The root nearest the reference is taken,
+///   so a sentence naming another file first (`compare ~/.codex/config.toml with
+///   /etc/codex/config.toml#/model`) keeps it out; an earlier root never reaches past another
+///   path (`compare ~/.codex/config.toml with /srv/codex/config.toml#/model` binds nothing).
+///
+/// The file must be a TOML file: the reference is reworded as a TOML key.
+fn bound_file_start(head: &str, places: &Places, known: &[String]) -> Option<usize> {
+    let path_start = |text: &str, at: usize| at == 0 || text[..at].ends_with([' ', '(']);
+    let start = known
+        .iter()
+        .filter(|file| !file.is_empty() && head.ends_with(file.as_str()))
+        .map(|file| head.len() - file.len())
+        .filter(|at| path_start(head, *at))
+        .min()
+        .or_else(|| {
+            let mut roots: Vec<String> = places
+                .dir
+                .ancestors()
+                .map(|p| p.display().to_string())
+                .filter(|p| p.len() > 1)
+                .collect();
+            roots.extend(places.home.iter().map(|h| h.display().to_string()));
+            roots.extend(places.codex_home.iter().map(|h| h.display().to_string()));
+            roots.push("/etc/codex".to_string());
+            let at = roots
+                .iter()
+                .filter_map(|root| {
+                    head.match_indices(root.as_str())
+                        .map(|(at, _)| at)
+                        .filter(|at| {
+                            path_start(head, *at) && head[*at + root.len()..].starts_with('/')
+                        })
+                        .last()
+                })
+                .max()?;
+            let file = &head[at..];
+            let another = file
+                .match_indices('/')
+                .any(|(i, _)| i > 0 && path_start(file, i));
+            (!another).then_some(at)
+        })?;
+    head[start..].ends_with(".toml").then_some(start)
+}
+
+/// Text the Codex resolver wrote (a signal, a warning, a reason) as a person reads it, under the
+/// [`human_text`] contract: citations left out ([`without_source_refs`]); a `<file.toml>#/a/b[ =
+/// v]` reference whose file is certain ([`bound_file_start`]) as `a.b[ = v] in <file>`, the file
+/// home- or project-relative from its own start; other paths shortened only where they start.
+/// A config reference whose file is not certain leaves the whole text as written.
+pub fn codex_words(text: &str, places: &Places) -> String {
+    codex_words_knowing(text, places, &[])
+}
+
+/// [`codex_words`] for a text about `item`: a file its own facts name is bound whole.
+fn item_codex_words(text: &str, item: &Item, places: &Places) -> String {
+    codex_words_knowing(text, places, &item_files(item))
+}
+
+/// The files `item`'s own facts name: its switches' files, its file, the file of its setting
+/// (`<file>#<pointer>`: every prefix before a `#/`; [`bound_file_start`] keeps the one the text
+/// ends with).
+fn item_files(item: &Item) -> Vec<String> {
+    let mut files: Vec<String> = item.knobs.iter().filter_map(knob_file_text).collect();
+    files.extend(item.origin.path.iter().map(|p| p.display().to_string()));
+    if let Some(setting) = &item.origin.setting {
+        files.extend(
+            setting
+                .match_indices("#/")
+                .map(|(at, _)| setting[..at].to_string()),
+        );
+    }
+    files
+}
+
+/// The file a knob writes, as text.
+fn knob_file_text(knob: &Knob) -> Option<String> {
+    match knob {
+        Knob::Setting { file, .. } => Some(file.display().to_string()),
+        _ => None,
+    }
+}
+
+fn codex_words_knowing(text: &str, places: &Places, known: &[String]) -> String {
+    let text = without_source_refs(text);
+    if text.is_empty() {
+        return text;
+    }
+    let stop = |c: char| matches!(c, ' ' | ')' | ',' | ';');
+    // The text between bound references is shortened on its own; a bound file is written from
+    // its own path, never re-read.
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("#/") {
+        let head = &rest[..at];
+        let Some(start) = bound_file_start(head, places, known) else {
+            if head.ends_with(".toml") {
+                // A config reference whose file is not certain.
+                return text;
+            }
+            // Not a config reference (`…/#/route`).
+            out.push_str(&places.text(&rest[..at + 2]));
+            rest = &rest[at + 2..];
+            continue;
+        };
+        let file = &head[start..];
+        let after = &rest[at + 1..];
+        let end = after.find(stop).unwrap_or(after.len());
+        let (key, _) = toml_key(&after[..end], |seg| places.text(seg));
+        let mut tail = &after[end..];
+        let mut value = String::new();
+        if let Some(v) = tail.strip_prefix(" = ") {
+            let vend = v.find(stop).unwrap_or(v.len());
+            value = format!(" = {}", &v[..vend]);
+            tail = &v[vend..];
+        }
+        out.push_str(&places.text(&head[..start]));
+        out.push_str(&format!("{key}{value} in {}", places.path(Path::new(file))));
+        rest = tail;
+    }
+    out.push_str(&places.text(rest));
+    out
+}
+
+/// `<file> under <root> (<who>)` with the root dropped when the file's path already starts with
+/// it (`…/skills/documents/SKILL.md under …/skills/ (plugin documents@m)` →
+/// `…/skills/documents/SKILL.md (plugin documents@m)`); any other text as it is.
+/// The two paths are compared as shown (home- or project-relative), so a root written in full
+/// still matches a file written from `~`; the step keeps its own spelling otherwise.
+fn without_repeated_root(step: &str, places: &Places) -> String {
+    let Some((file, rest)) = step.split_once(" under ") else {
+        return step.to_string();
+    };
+    let (root, who) = match rest.rfind(" (") {
+        Some(at) if rest.ends_with(')') => (&rest[..at], &rest[at..]),
+        _ => (rest, ""),
+    };
+    let (shown_file, shown_root) = (places.text(file), places.text(root));
+    let shown_root = shown_root.trim_end_matches('/');
+    if shown_root.is_empty()
+        || !shown_file.starts_with(shown_root)
+        || !shown_file[shown_root.len()..].starts_with('/')
+    {
+        return step.to_string();
+    }
+    format!("{file}{who}")
+}
+
+/// The AGENTS chain step of a project AGENTS file (`<name> in <dir> (chain <root> → target)`,
+/// `… (no project root marker: target dir only)`) in words: `AGENTS.md in this folder
+/// (~/2lab.ai/zbrain)`, or for an ancestor `AGENTS.md in ~/repo, one of the files from the
+/// project root down to this folder`. The rest of the step (`; shadows …`) is kept.
+fn agents_step(link: &str, places: &Places) -> Option<String> {
+    let (name, rest) = link.split_once(" in ")?;
+    if name.contains(' ') {
+        return None;
+    }
+    let (dir, tail) = rest.split_once(" (")?;
+    let (chain, after) = tail.split_once(')')?;
+    if !(chain.starts_with("chain ") && chain.ends_with("→ target"))
+        && chain != "no project root marker: target dir only"
+    {
+        return None;
+    }
+    let here = places.dir_words();
+    let mut out = if dir == "the target dir" {
+        if here == "this directory" {
+            format!("{name} in this folder")
+        } else {
+            format!("{name} in this folder ({here})")
+        }
+    } else {
+        format!(
+            "{name} in {}, one of the files from the project root down to this folder",
+            places.text(dir)
+        )
+    };
+    out.push_str(after);
+    Some(out)
 }
 
 /// A hook a managed policy keeps off (`allowManagedHooksOnly`): no switch turns it back on.
@@ -2325,16 +3759,87 @@ pub fn id_name(id: &str, places: &Places) -> (String, String) {
         Layer::ALL
             .iter()
             .find(|l| l.as_str() == layer)
-            .map_or(layer, |l| layer_words(*l))
+            .map_or(layer, |l| layer_words(*l, places.agent))
             .to_string(),
         name.unwrap_or(id),
     );
-    match Kind::ALL.iter().copied().find(|k| k.as_str() == kind) {
+    let kind = Kind::ALL.iter().copied().find(|k| k.as_str() == kind);
+    if places.codex() {
+        if let Some(named) = codex_id_name(kind, name, places) {
+            return (named, layer);
+        }
+    }
+    match kind {
         Some(Kind::Plugin) => (plugin_name(name).to_string(), market_word(name)),
         Some(Kind::Instruction | Kind::Memory) => (places.path(Path::new(name)), layer),
         Some(Kind::Hook) => (hook_event_from_pointer(name), layer),
         _ => (name.rsplit(':').next().unwrap_or(name).to_string(), layer),
     }
+}
+
+/// The name a Codex row has, from its id alone (a row the tree no longer has): a built-in block
+/// as its row is labelled, `developer_instructions`, a hook by its event, a file home-relative.
+fn codex_id_name(kind: Option<Kind>, name: &str, places: &Places) -> Option<String> {
+    let block = match name {
+        "instructions" => Some("base instructions"),
+        "permissions_instructions" => Some("permissions instructions"),
+        "collaboration_mode" => Some("collaboration mode"),
+        "apps_instructions" => Some("apps instructions"),
+        "multi_agent" => Some("multi-agent role + mode"),
+        "environment_context" => Some("environment context (cwd, shell, date)"),
+        "agents-md-message" => Some("AGENTS.md wrapper"),
+        "skills_instructions" => Some("skill listing wrapper"),
+        "plugins_instructions" => Some("plugins instructions"),
+        "recommended_plugins" => Some("recommended plugins"),
+        _ => None,
+    };
+    match kind {
+        Some(Kind::SystemPrompt | Kind::EnvBlock | Kind::Instruction) if block.is_some() => {
+            block.map(str::to_string)
+        }
+        Some(Kind::Instruction) if name.ends_with("#/developer_instructions") => {
+            Some("developer_instructions".to_string())
+        }
+        Some(Kind::PermissionRule) => Some(places.path(Path::new(name))),
+        // `<source>:<event_snake>:<group>:<handler>`.
+        Some(Kind::Hook) => {
+            let mut parts = name.rsplitn(4, ':');
+            let (_, _, event) = (parts.next(), parts.next(), parts.next()?);
+            let camel: String = event
+                .split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                        .unwrap_or_default()
+                })
+                .collect();
+            Some(format!("{camel} hook"))
+        }
+        _ => None,
+    }
+}
+
+/// What `d` on a Codex row that does not load or run says after its name, when harn did not
+/// turn it off: ` is not approved: …`, ` is already off: your settings turn it off (…)`.
+pub fn codex_off_says(item: &Item, places: &Places) -> Option<String> {
+    let reason = codex_off(item)?;
+    Some(if reason.starts_with("untrusted") {
+        " is not approved: Codex runs it only after you approve it in codex /hooks".to_string()
+    } else if reason.starts_with("modified since trusted") {
+        " is not approved: it changed since you approved it; review it in codex /hooks".to_string()
+    } else if reason.starts_with("allow_managed_hooks_only") {
+        " is off by policy: your organisation allows only its own hooks \
+         (allow_managed_hooks_only)"
+            .to_string()
+    } else if reason.starts_with("features.hooks") {
+        " is already off: your settings turn every hook off (features.hooks = false)".to_string()
+    } else {
+        match item_codex_words(&reason.replace("disabled in ", ""), item, places) {
+            why if why.is_empty() => " is already off: your settings turn it off".to_string(),
+            why => format!(" is already off: your settings turn it off ({why})"),
+        }
+    })
 }
 
 /// The word a group (or a row gathering others) shows without a size: the one all its rows
@@ -2358,11 +3863,16 @@ fn common_absent(bytes: Option<u64>, rows: &[Row]) -> Option<&'static str> {
     }
 }
 
-/// Why `item` has no switch at all, in words (`it is part of Claude Code`).
-fn fixed_reason(item: &Item) -> String {
+/// Why `item` has no switch at all, in words (`it is part of Claude Code`); a Codex reason with
+/// its keys and files in words.
+fn fixed_reason(item: &Item, places: &Places) -> String {
     item.knobs
         .iter()
         .find_map(|k| match k {
+            Knob::None { reason } if places.codex() => {
+                Some(item_codex_words(&reason_words(reason), item, places))
+                    .filter(|r| !r.is_empty())
+            }
             Knob::None { reason } => Some(reason_words(reason)),
             _ => None,
         })
@@ -2371,14 +3881,14 @@ fn fixed_reason(item: &Item) -> String {
 
 /// Why `d` cannot turn `item` off for this project, to follow its name: `cannot be turned off:
 /// it is part of Claude Code`, or where its only switch is.
-pub fn refusal(item: &Item) -> String {
+pub fn refusal(item: &Item, places: &Places) -> String {
     match any_knob(item) {
         Some((_, scope)) => format!(
             "has no switch for this project only; its only switch is {}: `harn off --scope \
              {scope}` changes it there",
-            scope_words(scope)
+            scope_words(scope, item_agent(item))
         ),
-        None => format!("cannot be turned off: {}", fixed_reason(item)),
+        None => format!("cannot be turned off: {}", fixed_reason(item, places)),
     }
 }
 
@@ -2471,7 +3981,12 @@ fn owner_key(entry: &Item) -> String {
 }
 
 /// Name and source of a non-plugin owner row.
-fn owner_words(entry: &Item) -> (String, String) {
+fn owner_words(entry: &Item, agent: Agent) -> (String, String) {
+    match (agent, entry.origin.layer) {
+        (Agent::Codex, Layer::User) => return ("you".to_string(), "~/.codex".to_string()),
+        (Agent::Codex, Layer::Builtin) => return ("Codex".to_string(), "bundled".to_string()),
+        _ => {}
+    }
     match entry.origin.layer {
         Layer::Project => ("this repository".to_string(), "project".to_string()),
         Layer::Local => ("this project".to_string(), "project".to_string()),
@@ -2649,10 +4164,11 @@ pub fn setting_scope(file: &Path, pointer: &str, places: &Places) -> Reach {
 }
 
 /// `for every project` (`~/.claude/settings.json`), `by this repository`
-/// (`.claude/settings.json`), `for this project only` (`.claude/settings.local.json`).
+/// (`.claude/settings.json`), `for this project only` (`.claude/settings.local.json`); for
+/// Codex, its project `.codex/config.toml` is this project's only.
 pub fn file_scope(file: &Path, places: &Places) -> &'static str {
     if file.starts_with(&places.dir) {
-        if file.file_name().is_some_and(|n| n == "settings.local.json") {
+        if places.codex() || file.file_name().is_some_and(|n| n == "settings.local.json") {
             "for this project only"
         } else {
             "by this repository"
@@ -2678,6 +4194,204 @@ fn number_duplicates(rows: &mut [Row]) {
             row.name = format!("{} {n}", row.name);
         }
     }
+}
+
+/// Codex's base instructions row (`codex/system-prompt/builtin/instructions`).
+fn is_base_instructions(item: &Item) -> bool {
+    item_agent(item) == Agent::Codex
+        && item.kind == Kind::SystemPrompt
+        && id_tail(item) == "instructions"
+}
+
+/// harn uses the model's catalog entry: the snapshot is accepted, a model is set, and the
+/// snapshot lists it.
+fn catalog_entry_usable(codex: &CodexFacts) -> bool {
+    matches!(codex.catalog.state, CatalogState::Used { .. })
+        && codex.catalog.lists_model
+        && codex.model.slug.is_some()
+}
+
+/// Codex's model catalog file (`<home>/models_cache.json`) in words when its facts do not count
+/// here — what it is and why — or None when they do.
+fn catalog_unused(codex: &CodexFacts, places: &Places) -> Option<String> {
+    let file = places.path(&codex.home.join("models_cache.json"));
+    let why = match &codex.catalog.state {
+        CatalogState::Used { .. } => return None,
+        CatalogState::Missing => {
+            return Some(format!(
+                "Codex's model catalog ({file}) does not exist yet; Codex writes it on its first \
+                 run"
+            ))
+        }
+        CatalogState::Elsewhere { set_in } => {
+            let at = set_in
+                .as_deref()
+                .map(|f| format!(" in {}", places.path(f)))
+                .unwrap_or_default();
+            return Some(format!(
+                "your config names its own model catalog (model_catalog_json{at}), which harn \
+                 does not read"
+            ));
+        }
+        CatalogState::NotUsed { why } => why,
+    };
+    let refetch = "so Codex fetches a new catalog when it starts";
+    let unknown = "so harn cannot tell whether Codex accepts it";
+    let words = match why {
+        CatalogWhy::NotJson => format!("it is not valid JSON, {refetch}"),
+        CatalogWhy::Rejected { detail } => format!("Codex cannot read it ({detail}), {refetch}"),
+        CatalogWhy::UnreadShape { detail } => {
+            format!("it has a shape harn does not read ({detail}), {unknown}")
+        }
+        CatalogWhy::CodexNotFound => format!("codex is not on PATH, {unknown}"),
+        CatalogWhy::CodexVersionUnknown => {
+            format!("the installed codex's version cannot be read, {unknown}")
+        }
+        CatalogWhy::NoClientVersion => format!("it does not say which codex wrote it, {refetch}"),
+        CatalogWhy::OtherVersion {
+            written_by,
+            installed,
+        } => format!("codex {written_by} wrote it and codex {installed} is installed, {refetch}"),
+        CatalogWhy::NoIdentity => format!("it is an older file with no login in it, {refetch}"),
+    };
+    Some(format!(
+        "Codex's model catalog ({file}) is not used: {words}"
+    ))
+}
+
+/// The model note: the model and where it is set, its context window, and where the facts that
+/// depend on it come from — the catalog snapshot with what was not checked (when it was fetched
+/// as the file says, that Codex re-checks an older one when it starts, that the login is not
+/// compared, that `harn verify --run --agent codex` confirms only what Codex's dump shows, which
+/// leaves the base instructions at the catalog's figure), or why they are unknown. The one place
+/// a Codex screen says why the catalog does not count; the tool-search note points here.
+fn model_note(codex: &CodexFacts, places: &Places) -> String {
+    let m = &codex.model;
+    let window = match m.context_window {
+        Some(w) => format!(", with a context window of {w} tokens"),
+        None => ", its context window unknown".to_string(),
+    };
+    let model = match (&m.slug, &m.set_in) {
+        (Some(slug), Some(file)) => {
+            format!("The model is {slug} (set in {}){window}", places.path(file))
+        }
+        (Some(slug), None) => format!("The model is {slug}{window}"),
+        (None, Some(file)) => format!(
+            "The model setting in {} is not text, so Codex refuses to start",
+            places.path(file)
+        ),
+        (None, None) => {
+            "No model is set in the files; Codex picks its default when it starts".to_string()
+        }
+    };
+    let unknown = "sizes that depend on the model are unknown";
+    let facts = match (&m.slug, catalog_unused(codex, places), &codex.catalog.state) {
+        (None, _, _) => format!("Until it is known, {unknown}."),
+        (_, Some(unused), _) => format!("{unused}; {unknown}."),
+        (Some(slug), None, CatalogState::Used { fetched_at }) if !codex.catalog.lists_model => {
+            format!(
+                "Codex's model catalog ({}, fetched at {fetched_at}) has no entry for {slug}; \
+                 {unknown}.",
+                places.path(&codex.home.join("models_cache.json"))
+            )
+        }
+        (Some(_), None, CatalogState::Used { fetched_at }) => format!(
+            "Sizes that depend on the model come from Codex's model catalog as fetched at \
+             {fetched_at} ({}); Codex re-checks a catalog older than 5 minutes when it starts, \
+             and harn does not check it was fetched for your login. `harn verify --run --agent \
+             codex` confirms what Codex's dump shows; the base instructions are not in it, so \
+             their size stays the catalog's figure.",
+            places.path(&codex.home.join("models_cache.json"))
+        ),
+        (Some(_), None, _) => format!("{}.", capitalized(unknown)),
+    };
+    format!("{model}. {facts}")
+}
+
+/// The base instructions' detail when their size is unknown: why, from the facts.
+fn base_size_unknown(codex: &CodexFacts, places: &Places) -> String {
+    let m = &codex.model;
+    let why = match (&m.slug, &m.set_in, catalog_unused(codex, places)) {
+        (None, Some(file), _) => format!(
+            "the model setting in {} is not text, so Codex refuses to start",
+            places.path(file)
+        ),
+        (None, None, _) => {
+            "no model is set in the files, so Codex picks one when it starts".to_string()
+        }
+        (Some(_), _, Some(unused)) => unused,
+        (Some(slug), _, None) => format!("{slug} is not in Codex's model catalog"),
+    };
+    format!(
+        "Its size is unknown: {why}; Codex sends these instructions outside its dump, so harn \
+         cannot measure them."
+    )
+}
+
+/// `text` with its first letter up.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// Codex trusts the target dir (its own `.codex/config.toml` loads).
+fn folder_trusted(tree: &Tree) -> bool {
+    tree.trust
+        .as_ref()
+        .is_some_and(|t| t.folder.level == Some(TrustLevel::Trusted))
+}
+
+/// The trust note: what Codex loads from this folder, each claim from the gate that decides it —
+/// the project `.codex/config.toml`, hooks and rules from the folder's trust, the AGENTS.md files
+/// from the AGENTS.md gate (named with its own entry when it is a decision of its own) — and the
+/// file each was set in, from the resolver's facts ([`Trust`]), never from its signal text.
+fn trust_sentence(trust: &Trust, places: &Places) -> String {
+    let set_in = |gate: &TrustGate| {
+        gate.set_in
+            .as_deref()
+            .map(|file| format!(" (set in {})", places.path(file)))
+            .unwrap_or_default()
+    };
+    let folder = &trust.folder;
+    let (opening, config) = match folder.level {
+        Some(TrustLevel::Trusted) => (
+            format!("This folder is trusted by Codex{}", set_in(folder)),
+            "load",
+        ),
+        Some(TrustLevel::Untrusted) => (
+            format!(
+                "This folder is marked untrusted for Codex{}",
+                set_in(folder)
+            ),
+            "are skipped",
+        ),
+        None => (
+            "Codex has no trust decision for this folder".to_string(),
+            "are ignored",
+        ),
+    };
+    let agents = if trust.agents_md.level == Some(TrustLevel::Untrusted) {
+        "are skipped"
+    } else {
+        "load"
+    };
+    let files = if trust.agents_md_apart() {
+        let by = match set_in(&trust.agents_md) {
+            where_ if where_.is_empty() => String::new(),
+            where_ => format!(", by a separate entry{where_}"),
+        };
+        format!(
+            "its .codex/config.toml, hooks and rules {config}; its AGENTS.md files {agents}{by}"
+        )
+    } else if agents == config {
+        format!("its .codex/config.toml, hooks, rules and AGENTS.md files {config}")
+    } else {
+        format!("its .codex/config.toml, hooks and rules {config}; its AGENTS.md files {agents}")
+    };
+    format!("{opening}: {files}; skills load either way.")
 }
 
 /// First letter up, a full stop at the end.
@@ -2784,14 +4498,15 @@ pub fn off_card(
             .filter(|i| i.id == item.id)
             .map(|i| shown(i))
             .collect();
-        let mut counts: Vec<(Kind, usize)> = Vec::new();
+        let mut counts: Vec<(&str, usize)> = Vec::new();
         for i in items.iter().filter(|i| i.id != item.id) {
-            match counts.iter_mut().find(|(k, _)| *k == i.kind) {
+            let word = leaving_word(i, places.agent);
+            match counts.iter_mut().find(|(w, _)| *w == word) {
                 Some((_, n)) => *n += 1,
-                None => counts.push((i.kind, 1)),
+                None => counts.push((word, 1)),
             }
         }
-        parts.extend(counts.iter().map(|(k, n)| count(*n, kind_word(*k))));
+        parts.extend(counts.iter().map(|(w, n)| count(*n, w)));
         parts.join(", ")
     };
     let mut groups = Vec::new();
@@ -2811,7 +4526,7 @@ pub fn off_card(
     }
     // `UserPromptSubmit (hook)`: the kind word once. The status line has no row to point at.
     let line = |i: &crate::plan::Leaving| {
-        let word = kind_word(i.kind);
+        let word = leaving_word(i, places.agent);
         let n = shown(i);
         let n = n
             .strip_suffix(&format!(" {word}"))
@@ -2850,7 +4565,30 @@ pub fn off_card(
     let freed = &plan.freed;
     let saves = match (freed.known, freed.delta_unknown) {
         _ if saving.is_some() => saving.unwrap_or_default().to_string(),
-        (0, true) => "an amount only `harn verify --run` can measure".to_string(),
+        (0, true) => {
+            // Codex: what can be measured of it, from the rows the plan takes out.
+            let leaving = plan
+                .leaving
+                .iter()
+                .filter_map(|l| model::walk(tree).find(|i| i.id == l.id));
+            let unknown = if places.codex() {
+                Unmeasured::of(leaving)
+            } else {
+                None
+            };
+            match unknown {
+                Some(Unmeasured::Never(_)) => "an amount harn cannot measure".to_string(),
+                Some(Unmeasured::Mixed(w)) => format!(
+                    "an amount {} measures only in part ({} it cannot)",
+                    verify_command(places.agent),
+                    and_list(&w.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+                ),
+                _ => format!(
+                    "an amount only {} can measure",
+                    verify_command(places.agent)
+                ),
+            }
+        }
         (known, true) if listing => format!(
             "{} now; the {} listing shrinks too (unmeasured)",
             size(known),
@@ -2866,9 +4604,12 @@ pub fn off_card(
     };
     OffCard {
         title: if all_hooks {
-            format!("Turn off all hooks for {}", scope_short(scope))
+            format!(
+                "Turn off all hooks for {}",
+                scope_short(scope, places.agent)
+            )
         } else {
-            format!("Turn off {name} for {}", scope_short(scope))
+            format!("Turn off {name} for {}", scope_short(scope, places.agent))
         },
         lead: all_hooks.then(|| {
             format!("{name} has no switch of its own; Claude Code turns hooks off all at once.")
@@ -2881,9 +4622,63 @@ pub fn off_card(
         notes: plan
             .warnings
             .iter()
-            .map(|w| sentence(&places.text(w)))
+            .map(|w| card_note(w, plan, &places, folder_trusted(tree)))
+            .filter(|w| !w.is_empty())
+            .map(|w| sentence(&w))
             .collect(),
     }
+}
+
+/// A plan warning as the card's note: without the item id it starts with (the card's title
+/// names the item), a Codex scope warning in words, paths home- or project-relative.
+fn card_note(warning: &str, plan: &ActionPlan, places: &Places, trusted: bool) -> String {
+    // Claude Code's cards show its warnings as they always have.
+    if !places.codex() {
+        return places.text(warning);
+    }
+    let rest = plan
+        .ops
+        .iter()
+        .find_map(|op| warning.strip_prefix(&format!("{}: ", op.item_id)))
+        .unwrap_or(warning);
+    const NO_LOCAL: &str = ", codex has no local-only config file — ";
+    if let Some(file) = rest
+        .strip_prefix("scope project")
+        .and_then(|r| r.strip_prefix(NO_LOCAL))
+        .and_then(|r| r.strip_suffix(" is shared with everyone using this repo"))
+    {
+        return format!(
+            "{} is shared with everyone using this repository; Codex has no file for you alone",
+            places.text(file)
+        );
+    }
+    if let Some(file) = rest
+        .strip_prefix("scope user")
+        .and_then(|r| r.strip_prefix(NO_LOCAL))
+        .and_then(|r| r.strip_suffix(" applies to every project"))
+    {
+        // In a trusted folder a user-only switch is one Codex reads from that file alone
+        // (a hook's state, `[[skills.config]]`); otherwise the folder's own file is not read.
+        return if trusted {
+            format!(
+                "{} applies to every project: Codex reads this setting from that file only",
+                places.text(file)
+            )
+        } else {
+            format!(
+                "{} applies to every project: Codex reads this folder's .codex/config.toml \
+                     only while it trusts the folder",
+                places.text(file)
+            )
+        };
+    }
+    // The files the plan writes are the ones its warnings name.
+    let known: Vec<String> = plan
+        .ops
+        .iter()
+        .filter_map(|op| knob_file_text(&op.knob))
+        .collect();
+    codex_words_knowing(rest, places, &known)
 }
 
 /// `6 fewer items load at start (83 → 77)`, `still 1 item loads at start`: how the header's
@@ -2937,7 +4732,7 @@ fn leaving<'p>(plan: &'p ActionPlan, tree: &Tree) -> (Vec<&'p crate::plan::Leavi
         .filter(|(_, _, leaves)| !leaves)
         .map(|(label, kind, _)| {
             let shown = human_label(tree, &label, kind, &places);
-            format!("{shown} ({})", kind_word(kind))
+            format!("{shown} ({})", kind_word_in(kind, places.agent))
         })
         .collect();
     let mut picked: HashSet<&str> = HashSet::new();
@@ -2977,6 +4772,9 @@ fn parse_effect(effect: &str) -> Option<(String, Kind, bool)> {
 /// The name a row would show for the item with `label` and `kind` in `tree`.
 fn human_label(tree: &Tree, label: &str, kind: Kind, places: &Places) -> String {
     let item = model::walk(tree).find(|i| i.label == label && i.kind == kind);
+    if let Some(name) = item.and_then(codex_block_name) {
+        return name;
+    }
     match (kind, item) {
         (Kind::Plugin, _) => plugin_name(label).to_string(),
         (Kind::Hook, _) => hook_event(label),
@@ -2996,7 +4794,52 @@ pub fn where_card(item: &Item, name: &str, places: &Places) -> (String, Vec<Stri
         if link.contains("freed via") || link.starts_with("cost carried by") {
             continue;
         }
-        lines.push(where_link(link, places));
+        if places.codex() {
+            // A developer's note or a bare citation: nothing for a person.
+            let Some(link) = human_text(link) else {
+                continue;
+            };
+            // The listing line as rendered is `harn verify`'s to compare, not a person's to read.
+            if link.starts_with("rendered: ") {
+                continue;
+            }
+            if let Some(words) = agents_step(&link, places) {
+                lines.push(words);
+                continue;
+            }
+            let link = without_repeated_root(&link, places);
+            // A hook's trust bookkeeping: the recorded hash matching is what a person needs.
+            if link.contains("matches the current hash") {
+                lines.push("approved in codex /hooks".to_string());
+                continue;
+            }
+            if names_hook_key(&link) {
+                continue;
+            }
+            // What Codex's dump leaves out stays unknown after a capture too.
+            let link = if codex_unmeasurable(item).is_some()
+                || (item.kind == Kind::SystemPrompt && !codex_measurable(item))
+            {
+                link.replace(" until a capture", "")
+            } else {
+                link
+            };
+            // `codex defaults#/k = v`: the value Codex has when no file sets it.
+            if let Some(rest) = link.strip_prefix("codex defaults#") {
+                let (pointer, tail) = split_link(rest);
+                let (key, _) = toml_key(pointer, |seg| places.text(seg));
+                let tail = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {tail}")
+                };
+                lines.push(format!("{key}{tail} (Codex's default: no file sets it)"));
+                continue;
+            }
+            lines.push(where_link(&link, places));
+        } else {
+            lines.push(where_link(link, places));
+        }
     }
     if lines.is_empty() {
         if let Some(path) = &item.origin.path {
@@ -3011,11 +4854,17 @@ pub fn where_card(item: &Item, name: &str, places: &Places) -> (String, Vec<Stri
     let mut switches: Vec<String> = Vec::new();
     for knob in &item.knobs {
         let text = match knob {
+            Knob::None { reason } if places.codex() => {
+                match item_codex_words(&reason_words(reason), item, places) {
+                    why if why.is_empty() => "none".to_string(),
+                    why => format!("none — {why}"),
+                }
+            }
             Knob::None { reason } => format!("none — {}", places.text(&reason_words(reason))),
             other => {
                 let scope = knob_scope(other).unwrap_or(Scope::Local);
                 let file = knob_file(other, places).unwrap_or_default();
-                format!("{} ({file})", scope_short(scope))
+                format!("{} ({file})", scope_short(scope, places.agent))
             }
         };
         if !switches.contains(&text) {
@@ -3040,6 +4889,11 @@ fn where_link(link: &str, places: &Places) -> String {
         return format!("installed from {market}, version {version}");
     }
     if let Some(rest) = link.strip_prefix("contributes: ") {
+        // A note about what is not counted is harn's (`(apps not modelled)`), not the plugin's.
+        let rest = match rest.rsplit_once(" (") {
+            Some((counts, note)) if note.ends_with(')') && places.codex() => counts,
+            _ => rest,
+        };
         let parts: Vec<String> = rest
             .split(" · ")
             .filter_map(|p| match p.split_once(' ') {
@@ -3116,6 +4970,8 @@ mod tests {
         Places {
             dir: PathBuf::from("/home/me/2lab.ai/zbrain"),
             home: Some(PathBuf::from("/home/me")),
+            agent: Agent::ClaudeCode,
+            codex_home: None,
         }
     }
 
@@ -3188,6 +5044,637 @@ mod tests {
         Places {
             dir: PathBuf::from(dir),
             home: Some(PathBuf::from("/home/me")),
+            agent: Agent::ClaudeCode,
+            codex_home: None,
+        }
+    }
+
+    #[test]
+    fn a_root_the_path_already_shows_is_not_said_twice() {
+        let p = Places {
+            dir: PathBuf::from("/home/me/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: None,
+        };
+        assert_eq!(
+            without_repeated_root(
+                "~/.codex/plugins/cache/m/documents/1.0/skills/documents/SKILL.md under \
+                 /home/me/.codex/plugins/cache/m/documents/1.0/skills/ (plugin documents@m)",
+                &p
+            ),
+            "~/.codex/plugins/cache/m/documents/1.0/skills/documents/SKILL.md (plugin documents@m)"
+        );
+        assert_eq!(
+            without_repeated_root(
+                "~/.codex/skills/review/SKILL.md under ~/.codex/skills (user; deprecated \
+                 location, still read)",
+                &p
+            ),
+            "~/.codex/skills/review/SKILL.md (user; deprecated location, still read)"
+        );
+        // A root that is not the path's prefix stays; so does a near-prefix (`skills2`).
+        for keep in [
+            "skills/x/SKILL.md under ~/elsewhere (repo)",
+            "~/.codex/skills2/x/SKILL.md under ~/.codex/skills (user)",
+            "nothing to drop here",
+        ] {
+            assert_eq!(without_repeated_root(keep, &p), keep, "{keep}");
+        }
+    }
+
+    #[test]
+    fn a_config_path_with_spaces_or_parentheses_stays_whole() {
+        for home in ["/home/me/my dir", "/home/me/old (x)", "/home/me/a b (c) d"] {
+            let places = Places {
+                dir: PathBuf::from(format!("{home}/work/repo")),
+                home: Some(PathBuf::from(home)),
+                agent: Agent::Codex,
+                codex_home: None,
+            };
+            assert_eq!(
+                codex_words(
+                    &format!("model: gpt-x ({home}/.codex/config.toml#/model) · window unknown"),
+                    &places
+                ),
+                "model: gpt-x (model in ~/.codex/config.toml) · window unknown",
+                "{home}"
+            );
+            assert_eq!(
+                codex_words(
+                    &format!("{home}/work/repo/.codex/config.toml#/mcp_servers/x/enabled = false"),
+                    &places
+                ),
+                "mcp_servers.x.enabled = false in .codex/config.toml",
+                "{home}"
+            );
+            // A config file in an ancestor of the target, its path with the same space.
+            assert_eq!(
+                codex_words(
+                    &format!("set by {home}/work/.codex/config.toml#/include_apps_instructions"),
+                    &places
+                ),
+                "set by include_apps_instructions in ~/work/.codex/config.toml",
+                "{home}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_with_two_spaces_keeps_both_with_or_without_a_citation() {
+        let places = Places {
+            dir: PathBuf::from("/home/me/a  b/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: None,
+        };
+        // No citation: the text as written.
+        for keep in [
+            "set in /home/me/a  b/.codex/config.toml",
+            "two  spaces (and  two more)",
+        ] {
+            assert_eq!(human_text(keep).as_deref(), Some(keep), "{keep}");
+        }
+        assert_eq!(
+            codex_words(
+                "set by /home/me/a  b/.codex/config.toml#/include_apps_instructions",
+                &places
+            ),
+            "set by include_apps_instructions in ~/a  b/.codex/config.toml"
+        );
+        // A citation in the same text goes; the spaces in the path stay.
+        assert_eq!(
+            codex_words(
+                "set by /home/me/a  b/.codex/config.toml#/model (core/src/config/mod.rs:12)",
+                &places
+            ),
+            "set by model in ~/a  b/.codex/config.toml"
+        );
+        assert_eq!(
+            human_text("read /home/me/a  b/x.toml core/src/x.rs:1-2 at startup").as_deref(),
+            Some("read /home/me/a  b/x.toml at startup")
+        );
+    }
+
+    #[test]
+    fn a_config_reference_binds_the_file_right_before_it() {
+        let places = Places {
+            dir: PathBuf::from("/home/me/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: None,
+        };
+        // Two paths from different roots in one sentence, either way round.
+        assert_eq!(
+            codex_words(
+                "compare /home/me/.codex/config.toml with /etc/codex/config.toml#/model",
+                &places
+            ),
+            "compare ~/.codex/config.toml with model in /etc/codex/config.toml"
+        );
+        assert_eq!(
+            codex_words(
+                "compare /etc/codex/config.toml with /home/me/.codex/config.toml#/model",
+                &places
+            ),
+            "compare /etc/codex/config.toml with model in ~/.codex/config.toml"
+        );
+        assert_eq!(
+            codex_words(
+                "/home/me/repo/AGENTS.md is shadowed by /home/me/.codex/config.toml#/project_doc_max_bytes = 0",
+                &places
+            ),
+            "AGENTS.md is shadowed by project_doc_max_bytes = 0 in ~/.codex/config.toml"
+        );
+        // The file before the reference starts at no recognized root and is not the item's: an
+        // earlier root does not reach past it, nothing is bound and nothing is shortened.
+        for verbatim in [
+            "compare /home/me/.codex/config.toml with /srv/codex/config.toml#/model",
+            "model: gpt-x (/srv/codex/config.toml#/model) · window unknown",
+            "set by /home/me/my dir /srv/codex/config.toml#/model",
+        ] {
+            assert_eq!(codex_words(verbatim, &places), verbatim);
+        }
+        // A `#/` that follows no config file is no reference: the rest is read as usual.
+        assert_eq!(
+            codex_words("see https://example.com/#/a in /home/me/x", &places),
+            "see https://example.com/#/a in ~/x"
+        );
+        // A file the item's own facts name is bound whole, even when a folder of the target
+        // shows up inside its path.
+        let mut item = Item {
+            id: "codex/mcp-server/user/x".to_string(),
+            label: "x".to_string(),
+            kind: Kind::McpServer,
+            origin: model::Origin {
+                layer: Layer::User,
+                path: None,
+                setting: None,
+                plugin: None,
+                why: Vec::new(),
+            },
+            mode: Mode::None,
+            cost: model::Cost::default(),
+            knobs: Vec::new(),
+            freed: None,
+            signal: None,
+            last_used: None,
+            children: Vec::new(),
+        };
+        let file = "/srv/copy of /home/me/.codex/config.toml";
+        let text = format!("off: disabled in {file}#/mcp_servers/x/enabled = false");
+        assert_eq!(
+            codex_words(&text, &places),
+            "off: disabled in /srv/copy of mcp_servers.x.enabled = false in ~/.codex/config.toml",
+            "without the item's facts the nearest folder wins"
+        );
+        item.origin.setting = Some(format!("{file}#/mcp_servers/x/enabled"));
+        // Bound whole and written from its own start: the home folder inside it is not
+        // shortened.
+        assert_eq!(
+            item_codex_words(&text, &item, &places),
+            "off: disabled in mcp_servers.x.enabled = false in /srv/copy of /home/me/.codex/config.toml"
+        );
+        item.origin.setting = None;
+        item.knobs = vec![Knob::Setting {
+            file: PathBuf::from(file),
+            pointer: "/mcp_servers/x/enabled".to_string(),
+            value: serde_json::json!(false),
+            scope: Scope::User,
+            note: None,
+        }];
+        assert_eq!(
+            item_codex_words(&text, &item, &places),
+            "off: disabled in mcp_servers.x.enabled = false in /srv/copy of /home/me/.codex/config.toml"
+        );
+        // Other text is shortened only where a path starts, never inside another path.
+        assert_eq!(
+            places.text("copy /srv/home/me/x to /home/me/y (/home/me/z)"),
+            "copy /srv/home/me/x to ~/y (~/z)"
+        );
+    }
+
+    #[test]
+    fn the_trust_note_names_each_file_from_the_facts_whatever_the_path_holds() {
+        let places = Places {
+            dir: PathBuf::from("/home/me/repo/child"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: None,
+        };
+        let gate = |level: Option<TrustLevel>, key: &str, file: Option<&str>| TrustGate {
+            level,
+            key: key.to_string(),
+            set_in: file.map(PathBuf::from),
+        };
+        for (folder_file, agents_file) in [
+            (
+                "/srv/old (x)/codex/config.toml",
+                "/srv/a  b/repo/.codex/config.toml",
+            ),
+            (
+                "/srv/a  b/codex/config.toml",
+                "/srv/old (x)/repo/.codex/config.toml",
+            ),
+        ] {
+            // The folder's gate and the AGENTS.md gate each set in such a file.
+            let trust = Trust {
+                folder: gate(
+                    Some(TrustLevel::Untrusted),
+                    "/home/me/repo/child",
+                    Some(folder_file),
+                ),
+                agents_md: gate(
+                    Some(TrustLevel::Trusted),
+                    "/home/me/repo/child",
+                    Some(agents_file),
+                ),
+            };
+            assert_eq!(
+                trust_sentence(&trust, &places),
+                format!(
+                    "This folder is marked untrusted for Codex (set in {folder_file}): its \
+                     .codex/config.toml, hooks and rules are skipped; its AGENTS.md files load, \
+                     by a separate entry (set in {agents_file}); skills load either way."
+                )
+            );
+            // One gate, set in such a file.
+            let trust = Trust {
+                folder: gate(
+                    Some(TrustLevel::Trusted),
+                    "/home/me/repo",
+                    Some(folder_file),
+                ),
+                agents_md: gate(
+                    Some(TrustLevel::Trusted),
+                    "/home/me/repo",
+                    Some(folder_file),
+                ),
+            };
+            assert_eq!(
+                trust_sentence(&trust, &places),
+                format!(
+                    "This folder is trusted by Codex (set in {folder_file}): its \
+                     .codex/config.toml, hooks, rules and AGENTS.md files load; skills load \
+                     either way."
+                )
+            );
+        }
+        // The folder unset, its AGENTS.md files trusted by an entry of their own.
+        let trust = Trust {
+            folder: gate(None, "/home/me/repo", None),
+            agents_md: gate(
+                Some(TrustLevel::Trusted),
+                "/home/me/repo/child",
+                Some("/home/me/repo/.codex/config.toml"),
+            ),
+        };
+        assert_eq!(
+            trust_sentence(&trust, &places),
+            "Codex has no trust decision for this folder: its .codex/config.toml, hooks and \
+             rules are ignored; its AGENTS.md files load, by a separate entry (set in \
+             ~/repo/.codex/config.toml); skills load either way."
+        );
+    }
+
+    #[test]
+    fn a_research_reference_takes_only_its_own_marks_and_section_words() {
+        let h = |t: &str| human_text(t);
+        // A quantity or a name with a digit after a citation is the sentence's, not the
+        // citation's.
+        assert_eq!(
+            h("research/02: 30s timeout").as_deref(),
+            Some("30s timeout")
+        );
+        assert_eq!(
+            h("per research/02 §9, gpt-5 keeps 2 tools").as_deref(),
+            Some("gpt-5 keeps 2 tools")
+        );
+        assert_eq!(
+            h("waits `research/02` §3 then retries 3 times").as_deref(),
+            Some("waits then retries 3 times")
+        );
+        assert_eq!(
+            h("times out (research/02 §3, 30s) at start").as_deref(),
+            Some("times out (30s) at start")
+        );
+        assert_eq!(
+            h("times out (research/02 §3: 30s) at start").as_deref(),
+            Some("times out (30s) at start")
+        );
+        // A mark that continues the reference's list takes only itself: the text after it stays.
+        assert_eq!(
+            h("times out (research/02 §3, §4: 30s) at start").as_deref(),
+            Some("times out (30s) at start")
+        );
+        // A number after a research reference is not a line number of it.
+        assert_eq!(
+            h("retries (research/02 §3, 40) times").as_deref(),
+            Some("retries (40) times")
+        );
+        // The real shapes in src/resolve: marks and section words up to the parenthesis or the
+        // closing backtick go with the reference.
+        for (text, kept) in [
+            (
+                "defer these tools behind tool_search (research/02 §7)",
+                "defer these tools behind tool_search",
+            ),
+            (
+                "no finer switch is known (research/02 §6 open question 3)",
+                "no finer switch is known",
+            ),
+            (
+                "the agent tools (`research/02` §0 request anatomy, §2 key table, §9)",
+                "the agent tools",
+            ),
+            (
+                "loads (`research/01` §4, §6): one listing",
+                "loads: one listing",
+            ),
+            (
+                "as `research/02 §0.3 config` says, 2 files",
+                "as says, 2 files",
+            ),
+        ] {
+            assert_eq!(h(text).as_deref(), Some(kept), "{text}");
+        }
+        // A research file by name is not a reference.
+        let keep = "see research/notes-2.md for 3 cases";
+        assert_eq!(h(keep).as_deref(), Some(keep));
+    }
+
+    #[test]
+    fn the_codex_home_is_a_root_a_config_reference_binds_at() {
+        let at = |codex_home: Option<&str>| Places {
+            dir: PathBuf::from("/home/me/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: codex_home.map(PathBuf::from),
+        };
+        let signal = "model: gpt-x (/srv/codex/config.toml#/model) · window unknown";
+        assert_eq!(
+            codex_words(signal, &at(Some("/srv/codex"))),
+            "model: gpt-x (model in /srv/codex/config.toml) · window unknown"
+        );
+        assert_eq!(
+            codex_words(
+                "compare /home/me/.codex/config.toml with /srv/codex/config.toml#/model",
+                &at(Some("/srv/codex"))
+            ),
+            "compare ~/.codex/config.toml with model in /srv/codex/config.toml"
+        );
+        // Without it, the same text is not certain: as written.
+        assert_eq!(codex_words(signal, &at(None)), signal);
+        // A tree's facts give it.
+        let mut tree = Tree {
+            agent: Agent::Codex,
+            target_dir: PathBuf::from("/home/me/repo"),
+            agent_version: None,
+            rules_verified_against: "0.0.0".to_string(),
+            tool_search: None,
+            signals: Vec::new(),
+            items: Vec::new(),
+            predicted_known: 0,
+            unknown_rows: 0,
+            observed_body: None,
+            warnings: Vec::new(),
+            home: Some(PathBuf::from("/home/me")),
+            observed_regions: Vec::new(),
+            tool_search_cause: None,
+            trust: None,
+            codex: None,
+        };
+        assert_eq!(Places::of(&tree).codex_home, None);
+        tree.codex = Some(codex_facts(model::CatalogState::Missing));
+        assert_eq!(
+            Places::of(&tree).codex_home,
+            Some(PathBuf::from("/srv/codex"))
+        );
+    }
+
+    /// Facts for a Codex home at `/srv/codex`, model gpt-x set in its config, in this state.
+    fn codex_facts(state: model::CatalogState) -> CodexFacts {
+        CodexFacts {
+            home: PathBuf::from("/srv/codex"),
+            model: model::CodexModel {
+                slug: Some("gpt-x".to_string()),
+                set_in: Some(PathBuf::from("/srv/codex/config.toml")),
+                context_window: None,
+            },
+            catalog: model::Catalog {
+                written_by: Some("0.160.1".to_string()),
+                lists_model: true,
+                state,
+            },
+        }
+    }
+
+    #[test]
+    fn the_model_note_and_the_base_size_say_why_the_catalog_does_not_count() {
+        use model::CatalogState::*;
+        let places = Places {
+            dir: PathBuf::from("/home/me/repo"),
+            home: Some(PathBuf::from("/home/me")),
+            agent: Agent::Codex,
+            codex_home: Some(PathBuf::from("/srv/codex")),
+        };
+        let sends = "; Codex sends these instructions outside its dump, so harn cannot measure \
+                     them.";
+        let cases = [
+            (
+                Missing,
+                "Codex's model catalog (/srv/codex/models_cache.json) does not exist yet; Codex \
+                 writes it on its first run",
+            ),
+            (
+                Elsewhere {
+                    set_in: Some(PathBuf::from("/home/me/.codex/config.toml")),
+                },
+                "your config names its own model catalog (model_catalog_json in \
+                 ~/.codex/config.toml), which harn does not read",
+            ),
+            (
+                NotUsed {
+                    why: CatalogWhy::NoIdentity,
+                },
+                "Codex's model catalog (/srv/codex/models_cache.json) is not used: it is an \
+                 older file with no login in it, so Codex fetches a new catalog when it starts",
+            ),
+            (
+                NotUsed {
+                    why: CatalogWhy::Rejected {
+                        detail: "fetched_at is missing".to_string(),
+                    },
+                },
+                "Codex's model catalog (/srv/codex/models_cache.json) is not used: Codex \
+                 cannot read it (fetched_at is missing), so Codex fetches a new catalog when it \
+                 starts",
+            ),
+        ];
+        for (state, why) in cases {
+            let facts = codex_facts(state);
+            assert_eq!(
+                base_size_unknown(&facts, &places),
+                format!("Its size is unknown: {why}{sends}")
+            );
+            assert_eq!(
+                model_note(&facts, &places),
+                format!(
+                    "The model is gpt-x (set in /srv/codex/config.toml), its context window \
+                     unknown. {why}; sizes that depend on the model are unknown."
+                )
+            );
+        }
+        // Used, but no entry for the model.
+        let mut facts = codex_facts(Used {
+            fetched_at: "2026-10-14T00:00:00Z".to_string(),
+        });
+        facts.catalog.lists_model = false;
+        assert_eq!(
+            base_size_unknown(&facts, &places),
+            format!("Its size is unknown: gpt-x is not in Codex's model catalog{sends}")
+        );
+        assert_eq!(
+            model_note(&facts, &places),
+            "The model is gpt-x (set in /srv/codex/config.toml), its context window unknown. \
+             Codex's model catalog (/srv/codex/models_cache.json, fetched at \
+             2026-10-14T00:00:00Z) has no entry for gpt-x; sizes that depend on the model are \
+             unknown."
+        );
+        // No model, or one that is not text.
+        facts.model.slug = None;
+        assert_eq!(
+            base_size_unknown(&facts, &places),
+            format!(
+                "Its size is unknown: the model setting in /srv/codex/config.toml is not text, \
+                 so Codex refuses to start{sends}"
+            )
+        );
+        facts.model.set_in = None;
+        assert_eq!(
+            model_note(&facts, &places),
+            "No model is set in the files; Codex picks its default when it starts. Until it is \
+             known, sizes that depend on the model are unknown."
+        );
+    }
+
+    #[test]
+    fn a_home_inside_another_path_is_never_shortened() {
+        // A legal file-name character before the home: part of another path. `=`, `:` and `,`
+        // too: they commonly sit inside tokens and path names.
+        for c in [
+            '%', '+', '@', '~', '#', 'x', '.', '-', '_', '/', '=', ':', ',',
+        ] {
+            let text = format!("copy /srv/cache{c}/home/me/x");
+            assert_eq!(replace_path(&text, "/home/me", "~"), text, "{c}");
+        }
+        for keep in ["path=/home/me/x", "in:/home/me/x", "a,/home/me/x"] {
+            assert_eq!(replace_path(keep, "/home/me", "~"), keep, "{keep}");
+        }
+        // The start of the text, whitespace, `(`, a quote or a backtick: a path starts there.
+        for (text, shown) in [
+            ("/home/me/x", "~/x"),
+            ("copy /home/me/x", "copy ~/x"),
+            ("copy\t/home/me/x", "copy\t~/x"),
+            ("(/home/me/x)", "(~/x)"),
+            ("\"/home/me/x\"", "\"~/x\""),
+            ("'/home/me/x'", "'~/x'"),
+            ("`/home/me/x`", "`~/x`"),
+        ] {
+            assert_eq!(replace_path(text, "/home/me", "~"), shown, "{text}");
+        }
+    }
+
+    #[test]
+    fn resolver_text_keeps_the_human_part_and_drops_citations_and_dev_notes() {
+        let h = |t: &str| human_text(t);
+        // A parenthesis of citations goes with its space; a mixed one keeps its words.
+        assert_eq!(
+            h("skipped when untrusted (core/src/agents_md.rs:63-66)").as_deref(),
+            Some("skipped when untrusted")
+        );
+        assert_eq!(
+            h("~/.codex/plugins/cache/m/p/1.0 (semver; core-plugin-common/src/installed.rs:47-68)")
+                .as_deref(),
+            Some("~/.codex/plugins/cache/m/p/1.0 (semver)")
+        );
+        assert_eq!(
+            h("on (default true, `core/src/config/mod.rs:3874-3878`)").as_deref(),
+            Some("on (default true)")
+        );
+        // Line numbers after a citation go with it; `used at <file>:<lines>` too.
+        assert_eq!(
+            h("rendered (core/src/session/mod.rs:4451, core/src/x/mod.rs:398-399, 440-443) later")
+                .as_deref(),
+            Some("rendered later")
+        );
+        assert_eq!(
+            h("keyed by handler (`hooks/src/declarations.rs:35-37`, used at `hooks/src/engine/discovery.rs:279-282`)")
+                .as_deref(),
+            Some("keyed by handler")
+        );
+        assert_eq!(
+            h("refuses to start (invalid transport, config/src/mcp_types.rs:553)").as_deref(),
+            Some("refuses to start (invalid transport)")
+        );
+        // Research references.
+        assert_eq!(
+            h("agents.enabled = false did (research/02 L1 t11/t12)").as_deref(),
+            Some("agents.enabled = false did")
+        );
+        // Outside parentheses only the citation goes, the clause around it stays.
+        assert_eq!(
+            h("codex reads it at startup core/src/x.rs:12-30 and keeps it").as_deref(),
+            Some("codex reads it at startup and keeps it")
+        );
+        assert_eq!(
+            h("first part; the format is fixed, see render.rs:258-267.").as_deref(),
+            Some("first part; the format is fixed.")
+        );
+        // Endpoints and a user's own files named `.rs` are not citations: kept word for word, a
+        // real `file.rs:NN` citation beside them cut out.
+        for keep in [
+            "connect to 127.0.0.1:8080 refused; retry after 30s",
+            "GET https://api.example.com:443/v1 failed (api.example.com:443, timeout)",
+            "localhost:8080 answered 503",
+            "edit src/main.rs and crates/x/build.rs: permission denied",
+            "cannot read ~/proj/lib.rs (mode 0600)",
+        ] {
+            assert_eq!(h(keep).as_deref(), Some(keep), "{keep}");
+        }
+        assert_eq!(
+            h("connect to api.example.com:443 refused (codex-mcp/src/rmcp_client.rs:839-856)")
+                .as_deref(),
+            Some("connect to api.example.com:443 refused")
+        );
+        assert_eq!(
+            h("cannot read src/main.rs: denied (src/config.rs:12, host db.local:5432)").as_deref(),
+            Some("cannot read src/main.rs: denied (host db.local:5432)")
+        );
+        // An ordinary word is no tag.
+        for keep in ["unverified email address", "the login is not verified yet"] {
+            assert_eq!(h(keep).as_deref(), Some(keep), "{keep}");
+        }
+        // Developer notes go whole.
+        for note in [
+            "lead, not verified at the call site: features/src/lib.rs:531-535 gates it",
+            "the cap applies [unverified]",
+            "the cap applies [추정]",
+            "[미확인] maybe both",
+        ] {
+            assert_eq!(h(note), None, "{note}");
+        }
+        assert_eq!(h("(core/src/a.rs:1)"), None, "nothing human left");
+        // Not citations: a TOML table, a hook key, a time-like pair without a letter, a URL-less
+        // sentence with a colon.
+        for keep in [
+            "off: disabled in [hooks.state]",
+            "~/.codex/hooks.json:session_start:0:0",
+            "SessionStart hook · ~/.codex/hooks.json 0:0",
+            "model: gpt-test (model in ~/.codex/config.toml)",
+            "(tool_suggest || recommended_plugins) decides",
+        ] {
+            assert_eq!(h(keep).as_deref(), Some(keep), "{keep}");
         }
     }
 
@@ -3377,6 +5864,8 @@ mod tests {
         let p = Places {
             dir: PathBuf::from("/srv/app"),
             home: Some(PathBuf::from("/home/me")),
+            agent: Agent::ClaudeCode,
+            codex_home: None,
         };
         assert_eq!(p.path(Path::new("/srv/other/f.md")), "/srv/other/f.md");
         assert_eq!(
@@ -3648,6 +6137,8 @@ mod tests {
             home: Some(PathBuf::from("/home/me")),
             observed_regions: Vec::new(),
             tool_search_cause: None,
+            trust: None,
+            codex: None,
         }
     }
 

@@ -3,7 +3,7 @@
 //! `mod.rs` owns the terminal. Tests drive it with key events and a `TestBackend`.
 
 use super::model::{self, Line, OffCard, OffItem, Places, Row, Screen, Sort, State};
-use super::Opts;
+use super::{Busy, Opts};
 use crate::journal::{self, Journal, JournalEntry, KIND_APPLY};
 use crate::model::{self as data, Item, Layer, Refused, Target, Tree};
 use crate::plan::{self, ActionPlan};
@@ -13,6 +13,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 /// One agent's tree with its screen, fold state and cursor.
 pub(crate) struct Tab {
@@ -134,6 +136,9 @@ pub(crate) enum Mode {
 }
 
 pub const TRIM_HINT: &str = "AI trim: run `harn trim` in the shell (or /harn-trim in Claude Code)";
+/// `t` on the Codex tab: `harn trim` is Claude Code's for now (P1 adds Codex).
+pub const TRIM_HINT_CODEX: &str =
+    "AI trim for Codex is not implemented yet; `harn trim` trims Claude Code";
 
 pub struct App {
     pub(crate) target: Target,
@@ -157,6 +162,9 @@ pub struct App {
     pub(crate) last_live: Option<JournalEntry>,
     pending: Option<Pending>,
     quit: bool,
+    /// The watchdog's state ([`super::run`]): a [`Busy`] is held around every write (apply,
+    /// undo, edit), and none is admitted once the watchdog has claimed the exit.
+    busy: Arc<AtomicUsize>,
 }
 
 impl App {
@@ -203,6 +211,7 @@ impl App {
             last_live: None,
             pending: None,
             quit: false,
+            busy: Arc::new(AtomicUsize::new(0)),
         };
         let err = app.read_journal();
         app.rebuild_screens();
@@ -214,6 +223,11 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// Not 0 while a write is under way or once the watchdog has claimed the exit.
+    pub(crate) fn busy(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.busy)
     }
 
     /// Work for the terminal owner (`e`), taken once.
@@ -366,7 +380,10 @@ impl App {
                 Some(err) => self.report_error(err),
                 None => self.info("refreshed: every setting and file read again".to_string()),
             },
-            KeyCode::Char('t') => self.info(TRIM_HINT.to_string()),
+            KeyCode::Char('t') => self.info(match self.tab().tree.agent {
+                data::Agent::Codex => TRIM_HINT_CODEX,
+                data::Agent::ClaudeCode => TRIM_HINT,
+            }),
             KeyCode::Char('?') => self.open(Card::Keys),
             KeyCode::Char('i') => {
                 if self.tab().screen.notes.is_empty() {
@@ -919,12 +936,16 @@ impl App {
                 .as_ref()
                 .is_some_and(|id| self.tab().journaled.contains_key(id));
             let by_policy = self.cursor_item().is_some_and(model::off_by_policy);
-            parts.push(t(if by_harn {
-                " is already off here; o turns it back on"
-            } else if by_policy {
-                OFF_BY_POLICY_SAYS
-            } else {
-                " is already off: your settings turn every hook off (disableAllHooks)"
+            let places = Places::of(&self.tab().tree);
+            let codex = self
+                .cursor_item()
+                .and_then(|i| model::codex_off_says(i, &places));
+            parts.push(t(match (by_harn, by_policy, codex) {
+                (true, _, _) => " is already off here; o turns it back on".to_string(),
+                (_, true, _) => OFF_BY_POLICY_SAYS.to_string(),
+                (_, _, Some(says)) => says,
+                _ => " is already off: your settings turn every hook off (disableAllHooks)"
+                    .to_string(),
             }));
             self.say(Tone::Info, parts);
             return;
@@ -936,15 +957,14 @@ impl App {
             ));
             return;
         };
-        if !item
-            .knobs
-            .iter()
-            .any(|k| plan::knob_scope(k) == Some(data::Scope::Local))
-        {
+        // The knob `harn off` picks without --scope (Claude Code: local; Codex: the narrowest
+        // file where it takes effect).
+        if model::default_knob(&item).is_none() {
+            let places = Places::of(&self.tab().tree);
             let parts = vec![
                 t("refused: "),
                 self.item(&item.id),
-                t(format!(" {}", model::refusal(&item))),
+                t(format!(" {}", model::refusal(&item, &places))),
             ];
             self.say(Tone::Error, parts);
             return;
@@ -1004,7 +1024,11 @@ impl App {
             }
         };
         let before = self.tabs[staged.tab].screen.title.items;
-        match writers::apply(&staged.plan, &mut self.journal) {
+        let applied = {
+            let _busy = Busy::hold(&self.busy);
+            writers::apply(&staged.plan, &mut self.journal)
+        };
+        match applied {
             Ok(_) => {
                 let refresh = self.refresh();
                 self.select(&staged.item_id);
@@ -1123,7 +1147,11 @@ impl App {
             return;
         }
         let before = self.tab().screen.title.items;
-        match journal::undo_entry(&mut self.journal, entry_id) {
+        let undone = {
+            let _busy = Busy::hold(&self.busy);
+            journal::undo_entry(&mut self.journal, entry_id)
+        };
+        match undone {
             Ok(entry) => {
                 let all_hooks = entry.ops.iter().any(|op| is_all_hooks(&op.knob));
                 let name = if all_hooks { t("all hooks") } else { item };
@@ -1301,7 +1329,11 @@ impl App {
             names.push(self.item(&op.item_id));
         }
         let before = self.tab().screen.title.items;
-        match journal::undo_entry(&mut self.journal, &expected.id) {
+        let undone = {
+            let _busy = Busy::hold(&self.busy);
+            journal::undo_entry(&mut self.journal, &expected.id)
+        };
+        match undone {
             Ok(entry) => {
                 // The files are back; "back" only once the refreshed tree shows it runs.
                 let mut parts = vec![t("undone: ")];
@@ -1370,7 +1402,10 @@ impl App {
             let parts = vec![
                 t("refused: "),
                 self.item(&id),
-                t(" belongs to Claude Code or your organisation; e opens only files you own"),
+                t(format!(
+                    " belongs to {} or your organisation; e opens only files you own",
+                    model::agent_name(self.tab().tree.agent)
+                )),
             ];
             self.say(Tone::Error, parts);
             return;
@@ -1396,7 +1431,10 @@ impl App {
         };
         let version = tab.tree.agent_version.clone();
         let named = self.item(item_id);
-        let result = journal::edit(&item, &self.target, &mut self.journal, editor, version);
+        let result = {
+            let _busy = Busy::hold(&self.busy);
+            journal::edit(&item, &self.target, &mut self.journal, editor, version)
+        };
         let refresh = self.refresh();
         self.select(item_id);
         match result {

@@ -223,11 +223,139 @@ pub(crate) fn pointer_key(pointer: &str) -> String {
     first.replace("~1", "/").replace("~0", "~")
 }
 
+/// A config file harn edits as TOML (Codex's `config.toml`), not JSON.
+pub(crate) fn is_toml(file: &Path) -> bool {
+    file.extension().is_some_and(|e| e == "toml")
+}
+
+/// The segments of a JSON pointer, unescaped (`~1` → `/`, `~0` → `~`).
+pub(crate) fn pointer_segments(pointer: &str) -> Vec<String> {
+    pointer
+        .split('/')
+        .skip(1)
+        .map(|seg| seg.replace("~1", "/").replace("~0", "~"))
+        .collect()
+}
+
+/// A JSON pointer as the TOML dotted key it sets, and whether it appends (`…/-`, an array of
+/// tables): `/hooks/state/<k>/enabled` → `hooks.state."<k>".enabled`. A segment that is not a
+/// bare key (letters, digits, `_`, `-`) is quoted; `shown` maps each segment's text first (the
+/// view shows paths in it home-relative).
+pub(crate) fn toml_key(pointer: &str, shown: impl Fn(&str) -> String) -> (String, bool) {
+    let mut segments = pointer_segments(pointer);
+    let append = segments.last().is_some_and(|s| s == "-");
+    if append {
+        segments.pop();
+    }
+    let key = segments
+        .iter()
+        .map(|seg| toml_key_segment(seg, &shown))
+        .collect::<Vec<_>>()
+        .join(".");
+    (key, append)
+}
+
+/// One TOML key as written: bare when it is letters, digits, `_` and `-` only, else a quoted
+/// string of what `shown` makes of it (`docs@mkt` → `"docs@mkt"`, `-` → `-`).
+pub(crate) fn toml_key_segment(seg: &str, shown: impl Fn(&str) -> String) -> String {
+    let bare = !seg.is_empty()
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        seg.to_string()
+    } else {
+        toml_string(&shown(seg))
+    }
+}
+
+/// A TOML basic string: `"…"`, with `\`, `"` and control characters escaped.
+pub(crate) fn toml_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A JSON value as TOML writes it: `false`, `0`, `""`, `{ path = "…", enabled = false }`;
+/// strings through `shown` (paths home-relative in the view).
+pub(crate) fn toml_value(value: &serde_json::Value, shown: &dyn Fn(&str) -> String) -> String {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => toml_string(&shown(s)),
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|v| toml_value(v, shown))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    // A field name is one key, never a pointer (`-` is a name here).
+                    let key = toml_key_segment(k, |s: &str| s.to_string());
+                    format!("{key} = {}", toml_value(v, shown))
+                })
+                .collect();
+            format!("{{ {} }}", fields.join(", "))
+        }
+        Value::Null => "\"\"".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A quoted key segment for the table and the brief: a path in it keeps only its last component
+/// (`"…/hooks.json:session_start:0:0"`), and what is left is cut to its last 32 characters.
+fn short_segment(seg: &str) -> String {
+    let tail = match seg.rsplit_once('/') {
+        Some((_, tail)) => format!("…/{tail}"),
+        None => seg.to_string(),
+    };
+    let n = tail.chars().count();
+    if n <= 40 {
+        return tail;
+    }
+    let kept: String = tail.chars().skip(n - 32).collect();
+    format!("…{kept}")
+}
+
 /// Table/brief form: `enabledPlugins → false (local)`, `claudeMdExcludes (local)` and
 /// `permissions.deny (local)` (append pointers `…/-` name the list), `NAME=1 (local)`,
-/// `quarantine (project)`, `none (built-in)`. The full pointer and value are in `why`.
+/// `quarantine (project)`, `none (built-in)`. A TOML file (Codex) shows its whole key in dotted
+/// form, long quoted keys shortened: `agents.enabled = false (user)`,
+/// `hooks.state."…/hooks.json:session_start:0:0".enabled = false (user)`,
+/// `skills.config += {…} (user)`. The full pointer and value are in `why`.
 pub(crate) fn knob_compact(knob: &Knob, g: &Glyphs) -> String {
     match knob {
+        Knob::Setting {
+            file,
+            pointer,
+            value,
+            scope,
+            ..
+        } if is_toml(file) => {
+            let (key, append) = toml_key(pointer, short_segment);
+            let value = match value {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => "{…}".to_string(),
+                serde_json::Value::String(s) => toml_string(&short_segment(s)),
+                other => toml_value(other, &|s| s.to_string()),
+            };
+            let op = if append { "+=" } else { "=" };
+            format!("{key} {op} {value} ({scope})")
+        }
         Knob::Setting {
             pointer,
             value,
@@ -273,13 +401,31 @@ pub(crate) fn default_action(item: &Item, g: &Glyphs) -> String {
     }
 }
 
-/// Detail form (why, plan): file relative to `base` when inside it, full pointer and value.
+/// Detail form (why, plan): file relative to `base` when inside it, full pointer and value; a
+/// TOML file (Codex) with its whole key and value as TOML writes them
+/// (`hooks.state."<key>".enabled = false`, `skills.config += { path = "…", enabled = false }`).
 pub(crate) fn knob_full(knob: &Knob, base: &Path, g: &Glyphs) -> String {
     let note = |note: &Option<String>| match note {
         Some(n) => format!("  {} {n}", g.dash),
         None => String::new(),
     };
     match knob {
+        Knob::Setting {
+            file,
+            pointer,
+            value,
+            scope,
+            note: n,
+        } if is_toml(file) => {
+            let (key, append) = toml_key(pointer, |s| s.to_string());
+            format!(
+                "{}  {key} {} {}  ({scope}){}",
+                display_path(file, base),
+                if append { "+=" } else { "=" },
+                toml_value(value, &|s| s.to_string()),
+                note(n)
+            )
+        }
         Knob::Setting {
             file,
             pointer,
@@ -324,6 +470,24 @@ pub(crate) fn display_path(path: &Path, base: &Path) -> String {
         Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
         Ok(rel) => rel.display().to_string(),
         Err(_) => path.display().to_string(),
+    }
+}
+
+/// A container's label with its child count appended (`CLAUDE.md · 2`), unless the label
+/// already ends in a count of its own (`skill listing · 23`, `agent roster · 31`): the resolver's
+/// count is the one that means something there, and a second one read as a repeat.
+pub(crate) fn label_with_count(label: &str, children: usize, g: &Glyphs) -> String {
+    if children == 0 {
+        return label.to_string();
+    }
+    let counted = label
+        .rsplit_once(&format!(" {} ", g.dot))
+        .or_else(|| label.rsplit_once(" · "))
+        .is_some_and(|(_, tail)| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()));
+    if counted {
+        label.to_string()
+    } else {
+        format!("{label} {} {children}", g.dot)
     }
 }
 
@@ -407,13 +571,29 @@ pub(crate) fn facts(tree: &Tree, g: &Glyphs, unit: fn(u64) -> String) -> Facts {
         ),
     };
     let cause = tree.tool_search_cause.as_deref();
-    let tool_search = match tree.tool_search {
-        Some(true) => vec![format!(
+    let tool_search = match (tree.agent, tree.tool_search) {
+        // Codex decides it from the model's catalog entry, not from a setting harn can write.
+        (Agent::Codex, Some(true)) => vec![format!(
+            "tool search: ON{} {} MCP tools deferred behind tool_search (loaded when used)",
+            cause.map(|c| format!(" ({c})")).unwrap_or_default(),
+            g.arrow
+        )],
+        (Agent::Codex, Some(false)) => vec![format!(
+            "tool search: OFF{} {} MCP tool schemas load eagerly; no config key changes it (the model's supports_search_tool decides)",
+            cause.map(|c| format!(" ({c})")).unwrap_or_default(),
+            g.arrow
+        )],
+        // A resolver that has not decided it (no MCP rows yet) says nothing.
+        (Agent::Codex, None) => cause
+            .map(|c| format!("tool search: ? (undecidable from the files: {c})"))
+            .into_iter()
+            .collect(),
+        (_, Some(true)) => vec![format!(
             "tool search: ON{} {} MCP tool schemas deferred (stubs until used)",
             cause.map(|c| format!(" ({c})")).unwrap_or_default(),
             g.arrow
         )],
-        Some(false) => vec![
+        (_, Some(false)) => vec![
             format!(
                 "tool search: OFF ({}) {} MCP tool schemas load eagerly",
                 cause.unwrap_or("ANTHROPIC_BASE_URL is non-first-party"),
@@ -424,11 +604,10 @@ pub(crate) fn facts(tree: &Tree, g: &Glyphs, unit: fn(u64) -> String) -> Facts {
                 g.dash
             ),
         ],
-        None if tree.agent == Agent::ClaudeCode => vec![format!(
+        (_, None) => vec![format!(
             "tool search: ? (undecidable from settings and env{})",
             cause.map(|c| format!(": {c}")).unwrap_or_default()
         )],
-        None => Vec::new(),
     };
     Facts {
         title,
@@ -512,6 +691,7 @@ pub(crate) fn step_text(step: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Scope;
 
     #[test]
     fn a_json_string_tail_is_read_back_to_its_opening_quote() {
@@ -546,6 +726,152 @@ mod tests {
         );
         assert_eq!(step_text("f#/x = true"), "f#/x = true");
         assert_eq!(link_value_text("true"), "true");
+    }
+
+    fn setting(file: &str, pointer: &str, value: serde_json::Value, scope: Scope) -> Knob {
+        Knob::Setting {
+            file: std::path::PathBuf::from(file),
+            pointer: pointer.to_string(),
+            value,
+            scope,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_toml_knob_shows_its_whole_key_in_dotted_form() {
+        let toml = "/home/me/.codex/config.toml";
+        let g = &UNICODE;
+        let compact = |pointer: &str, value: serde_json::Value| {
+            knob_compact(&setting(toml, pointer, value, Scope::User), g)
+        };
+        assert_eq!(
+            compact("/agents/enabled", serde_json::json!(false)),
+            "agents.enabled = false (user)"
+        );
+        assert_eq!(
+            compact("/features/hooks", serde_json::json!(false)),
+            "features.hooks = false (user)"
+        );
+        assert_eq!(
+            compact("/include_environment_context", serde_json::json!(false)),
+            "include_environment_context = false (user)"
+        );
+        assert_eq!(
+            compact("/project_doc_max_bytes", serde_json::json!(0)),
+            "project_doc_max_bytes = 0 (user)"
+        );
+        assert_eq!(
+            compact("/developer_instructions", serde_json::json!("")),
+            "developer_instructions = \"\" (user)"
+        );
+        // A key that is not bare is quoted; one with a path keeps its last component.
+        assert_eq!(
+            compact("/plugins/docs@market/enabled", serde_json::json!(false)),
+            "plugins.\"docs@market\".enabled = false (user)"
+        );
+        assert_eq!(
+            compact(
+                "/hooks/state/~1home~1me~1.codex~1hooks.json:session_start:0:0/enabled",
+                serde_json::json!(false)
+            ),
+            "hooks.state.\"…/hooks.json:session_start:0:0\".enabled = false (user)"
+        );
+        // `[[skills.config]]`: an appended table.
+        assert_eq!(
+            compact(
+                "/skills/config/-",
+                serde_json::json!({"path": "/home/me/.codex/skills/x/SKILL.md", "enabled": false})
+            ),
+            "skills.config += {…} (user)"
+        );
+        // Claude Code's JSON pointers are unchanged.
+        let json = "/repo/.claude/settings.local.json";
+        assert_eq!(
+            knob_compact(
+                &setting(
+                    json,
+                    "/enabledPlugins/slack@claude-plugins-official",
+                    serde_json::json!(false),
+                    Scope::Local
+                ),
+                g
+            ),
+            "enabledPlugins → false (local)"
+        );
+        assert_eq!(
+            knob_compact(
+                &setting(
+                    json,
+                    "/permissions/deny/-",
+                    serde_json::json!("Bash"),
+                    Scope::Local
+                ),
+                g
+            ),
+            "permissions.deny (local)"
+        );
+    }
+
+    #[test]
+    fn a_toml_knob_in_full_shows_the_key_and_the_value_as_toml_writes_them() {
+        let base = std::path::Path::new("/repo");
+        let knob = setting(
+            "/repo/.codex/config.toml",
+            "/skills/config/-",
+            serde_json::json!({"path": "/repo/.agents/skills/x/SKILL.md", "enabled": false}),
+            Scope::Project,
+        );
+        assert_eq!(
+            knob_full(&knob, base, &UNICODE),
+            ".codex/config.toml  skills.config += { path = \"/repo/.agents/skills/x/SKILL.md\", enabled = false }  (project)"
+        );
+        assert_eq!(
+            knob_full(
+                &setting(
+                    "/repo/.claude/settings.local.json",
+                    "/enabledPlugins/slack@x",
+                    serde_json::json!(false),
+                    Scope::Local
+                ),
+                base,
+                &UNICODE
+            ),
+            ".claude/settings.local.json  /enabledPlugins/slack@x = false  (local)"
+        );
+    }
+
+    #[test]
+    fn an_inline_table_field_is_one_key_whatever_its_name() {
+        let shown = |s: &str| s.to_string();
+        assert_eq!(
+            toml_value(
+                &serde_json::json!({"-": 1, "a b": true, "x/y": "z", "ok_1": false}),
+                &shown
+            ),
+            r#"{ - = 1, "a b" = true, "x/y" = "z", ok_1 = false }"#
+        );
+        assert_eq!(toml_key_segment("-", shown), "-");
+        assert_eq!(toml_key_segment("", shown), r#""""#);
+    }
+
+    #[test]
+    fn a_label_that_carries_its_count_gets_no_second_one() {
+        assert_eq!(
+            label_with_count("skill listing · 23", 23, &UNICODE),
+            "skill listing · 23"
+        );
+        assert_eq!(
+            label_with_count("skill listing · 23", 25, &ASCII),
+            "skill listing · 23"
+        );
+        assert_eq!(label_with_count("CLAUDE.md", 2, &UNICODE), "CLAUDE.md · 2");
+        assert_eq!(label_with_count("CLAUDE.md", 2, &ASCII), "CLAUDE.md | 2");
+        assert_eq!(label_with_count("CLAUDE.md", 0, &UNICODE), "CLAUDE.md");
+        assert_eq!(
+            label_with_count("SessionStart hook · ~/.codex/hooks.json 0:0", 1, &UNICODE),
+            "SessionStart hook · ~/.codex/hooks.json 0:0 · 1"
+        );
     }
 
     #[test]

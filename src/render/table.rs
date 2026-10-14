@@ -2,7 +2,7 @@
 
 use super::common::{
     cost_column, default_action, denominator, facts, freed_cell, freed_computed, glyphs, kb,
-    partition, percent, request_bytes, share_tenths, sorted, truncate, Glyphs,
+    label_with_count, partition, percent, request_bytes, share_tenths, sorted, truncate, Glyphs,
 };
 use super::RenderOpts;
 use crate::model::{Item, Origin, Tree};
@@ -168,10 +168,11 @@ fn push_item(lines: &mut Vec<Line>, notes: &mut Vec<String>, item: &Item, depth:
 
 fn cells(item: &Item, depth: usize, notes: &mut Vec<String>, ctx: &Ctx) -> Cells {
     let g = ctx.g;
-    let mut label = format!("{}{}", "  ".repeat(depth), item.label);
-    if !item.children.is_empty() {
-        label.push_str(&format!(" {} {}", g.dot, item.children.len()));
-    }
+    let mut label = format!(
+        "{}{}",
+        "  ".repeat(depth),
+        label_with_count(&item.label, item.children.len(), g)
+    );
     if let Some(signal) = &item.signal {
         notes.push(format!("{}: {signal}", item.label));
         label.push_str(&format!(" [{}]", notes.len()));

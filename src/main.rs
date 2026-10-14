@@ -14,7 +14,7 @@ use harn::resolve::{self, Resolver};
 use harn::{oracle, trim, verify, writers};
 use serde::Serialize;
 use std::ffi::OsString;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -94,7 +94,8 @@ enum Cmd {
     /// [AI operator] Turn an item off through the agent's official switch (plan, then apply)
     Off {
         selector: String,
-        /// Scope of the switch; never widened silently (default: local)
+        /// Scope of the switch; never widened silently (default: per agent — Claude Code: local;
+        /// Codex: the narrowest config file where the switch takes effect)
         #[arg(long, value_enum)]
         scope: Option<ScopeArg>,
         /// Print the plan, write nothing
@@ -228,7 +229,9 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("harn: {err:#}");
+            // Not eprintln!: it panics (exit 101) when stderr is gone, as it is once the
+            // terminal the view ran on hung up.
+            let _ = writeln!(std::io::stderr(), "harn: {err:#}");
             ExitCode::from(exit_code_for(&err))
         }
     }
@@ -430,11 +433,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 ))
                 .into());
             }
-            let agent = single_agent(cli, "apply")?;
-            let resolver = resolve::for_agent(agent);
-            let tree = resolver
-                .resolve(&target, None)
-                .with_context(|| agent.to_string())?;
+            let (resolver, tree) = plan_agent(cli, &target, &req)?;
             let plan = plan::build_plan_from_request(resolver.as_ref(), &target, &tree, &req)?;
             apply_plan(cli, &plan, *dry_run)?;
         }
@@ -444,12 +443,22 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             yes,
             agent_cmd,
         }) => {
+            // Codex is P1 for trim: refused first, whatever else the flags or the terminal say.
+            if cli.agent == Some(AgentArg::Codex) {
+                return Err(Refused(
+                    "trim for codex is not implemented yet; `harn --agent codex` lists the tree \
+                     and `harn off --agent codex <item>` turns one item off"
+                        .to_string(),
+                )
+                .into());
+            }
             // Before the model request: a plan nobody can confirm is not worth one.
             if !dry_run && !yes && !std::io::stdin().is_terminal() {
                 bail!("not a terminal: pass --yes to apply");
             }
             let target = target(cli, dir_pos.as_deref())?;
-            let agent = single_agent(cli, "trim")?;
+            // Without --agent: Claude Code, the one agent trim knows.
+            let agent = Agent::ClaudeCode;
             let resolver = resolve::for_agent(agent);
             let tree = resolver
                 .resolve(&target, None)
@@ -545,6 +554,11 @@ fn tui_cmd(cli: &Cli, opts: &RenderOpts) -> Result<ExitCode> {
     let mut tabs = Vec::new();
     for resolved in resolve_trees(cli, &target)? {
         let mut tree = resolved.tree;
+        // Without --agent, an agent with nothing here (codex never ran on this machine) gets no
+        // tab; the first one always stays.
+        if cli.agent.is_none() && tree.items.is_empty() && !tabs.is_empty() {
+            continue;
+        }
         plan::annotate_freed(resolved.resolver.as_ref(), &target, &mut tree)
             .with_context(|| tree.agent.to_string())?;
         tabs.push((resolved.resolver, tree));
@@ -757,10 +771,57 @@ fn agents(cli: &Cli) -> Vec<Agent> {
     }
 }
 
-fn single_agent(cli: &Cli, command: &str) -> Result<Agent> {
-    match agents(cli).as_slice() {
-        [agent] => Ok(*agent),
-        _ => bail!("`harn {command}` works on one agent; pass --agent"),
+/// The agent an AI-authored plan is for: `--agent`, else the one default agent whose tree has
+/// every selector of the plan (a selector ambiguous there still counts: `apply` reports it).
+/// When no tree has them all, Claude Code (the error names what is missing); when two do, the
+/// caller must say which.
+fn plan_agent(
+    cli: &Cli,
+    target: &Target,
+    req: &PlanRequest,
+) -> Result<(Box<dyn Resolver>, model::Tree)> {
+    if cli.agent.is_some() {
+        let [agent] = agents(cli)[..] else {
+            unreachable!("--agent names one agent")
+        };
+        let resolver = resolve::for_agent(agent);
+        let tree = resolver
+            .resolve(target, None)
+            .with_context(|| agent.to_string())?;
+        return Ok((resolver, tree));
+    }
+    let mut fits = Vec::new();
+    let mut first = None;
+    for resolved in resolve_trees(cli, target)? {
+        let all_found = req.ops.iter().all(|op| {
+            !matches!(
+                model::select(&resolved.tree, &op.selector),
+                Err(SelectError::NotFound(_))
+            )
+        });
+        if all_found {
+            fits.push(resolved);
+        } else if first.is_none() {
+            first = Some(resolved);
+        }
+    }
+    match fits.len() {
+        0 => {
+            let resolved = first.expect("at least one default agent");
+            Ok((resolved.resolver, resolved.tree))
+        }
+        1 => {
+            let resolved = fits.pop().expect("one");
+            Ok((resolved.resolver, resolved.tree))
+        }
+        _ => {
+            let names: Vec<String> = fits.iter().map(|r| r.tree.agent.to_string()).collect();
+            Err(Refused(format!(
+                "the plan's selectors are found in {}; pass --agent",
+                names.join(" and ")
+            ))
+            .into())
+        }
     }
 }
 
@@ -1283,6 +1344,7 @@ mod tests {
         let v = version_text();
         assert!(v.starts_with(env!("CARGO_PKG_VERSION")), "{v}");
         assert!(v.contains(") rules: claude-code "), "{v}");
+        assert!(v.ends_with(", codex 0.160.1"), "{v}");
     }
 
     #[test]

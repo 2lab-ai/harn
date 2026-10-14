@@ -47,7 +47,8 @@ mod rules;
 mod skills;
 
 use crate::model::{
-    item_id, Agent, Cost, Item, Kind, Knob, Layer, Mode, Origin, Overlay, Scope, Target, Tree,
+    item_id, Agent, CatalogWhy, Cost, Item, Kind, Knob, Layer, Mode, Origin, Overlay, Scope,
+    Target, Tree,
 };
 use crate::resolve::claude::fs::{self, Fs, Json};
 use config::{Config, LayerFile, Paths, Source, TrustLevel};
@@ -88,6 +89,9 @@ pub(crate) struct ModelFacts {
     pub slug: Option<String>,
     /// Where the slug came from (`"<file>#/model"` or `"target"`).
     pub slug_from: Option<String>,
+    /// The config file whose `model` sets the slug, or holds a value that is not a string
+    /// (None: the target names it, or nothing sets it).
+    pub slug_file: Option<PathBuf>,
     /// `"<file>#/model"` when the effective `model` is set but not a string (unknown model).
     pub slug_unreadable: Option<String>,
     pub context_window: Option<u64>,
@@ -104,6 +108,8 @@ pub(crate) struct ModelFacts {
     /// so every catalog fact (base instructions, window) stays unknown rather than mixing in
     /// `models_cache.json`.
     pub catalog_unread: Option<String>,
+    /// The config file that names that catalog.
+    pub catalog_unread_file: Option<PathBuf>,
     /// Whether harn accepts `models_cache.json` as its snapshot ([`CacheUse`], [`cache_use`]).
     /// Every catalog fact depends on it, without exception: the catalog-gated rows, the skills
     /// usage section, the tool-search state, the base instructions' size, the context window and
@@ -147,12 +153,10 @@ pub(crate) enum CacheUse {
     /// No file yet: codex writes it on its first run.
     #[default]
     Missing,
-    /// Not accepted, and codex would not load it either: it cannot parse it, or the file belongs
-    /// to another version or login. Why.
-    Refetched(String),
-    /// Not accepted: harn cannot tell whether codex loads it (no codex version, a shape harn does
-    /// not read). Why.
-    Unknown(String),
+    /// Not accepted. Either codex would not load it either (it cannot parse it, or the file
+    /// belongs to another version or login), or harn cannot tell whether codex loads it (no
+    /// codex version, a shape harn does not read): [`CatalogWhy::refetched`].
+    NotUsed(CatalogWhy),
 }
 
 impl CacheUse {
@@ -163,7 +167,40 @@ impl CacheUse {
             CacheUse::Missing => {
                 Some("no models_cache.json yet (codex writes it on its first run)".to_string())
             }
-            CacheUse::Refetched(why) | CacheUse::Unknown(why) => Some(why.clone()),
+            CacheUse::NotUsed(why) => Some(why_text(why)),
+        }
+    }
+}
+
+/// [`CatalogWhy`] as the signals and rows say it (`harn why`, the CLI, the report).
+fn why_text(why: &CatalogWhy) -> String {
+    let refetch = "codex fetches the catalog instead (models-manager/src/manager.rs:725-752)";
+    match why {
+        CatalogWhy::NotJson => format!("models_cache.json is not valid JSON; {refetch}"),
+        CatalogWhy::Rejected { detail } => {
+            format!("models_cache.json: {detail}, so codex cannot parse the file; {refetch}")
+        }
+        CatalogWhy::UnreadShape { detail } => format!(
+            "models_cache.json: {detail}, a shape harn does not read; catalog facts unknown"
+        ),
+        CatalogWhy::CodexNotFound => {
+            "codex not found on PATH: cannot tell whether it accepts models_cache.json".to_string()
+        }
+        CatalogWhy::CodexVersionUnknown => {
+            "the installed codex's version could not be determined: cannot tell whether it accepts models_cache.json"
+                .to_string()
+        }
+        CatalogWhy::NoClientVersion => {
+            format!("models_cache.json has no client_version; {refetch}")
+        }
+        CatalogWhy::OtherVersion {
+            written_by,
+            installed,
+        } => format!(
+            "models_cache.json was written by codex {written_by}, not {installed}; {refetch}"
+        ),
+        CatalogWhy::NoIdentity => {
+            format!("models_cache.json has no identity (a legacy cache); {refetch}")
         }
     }
 }
@@ -262,59 +299,34 @@ pub(crate) fn json_type(v: &Value) -> &'static str {
 /// shape; codex is not on `PATH` or its version is unknown; `client_version` is missing or not the
 /// installed version (`manager.rs:739-746`); `identity` is missing (`manager.rs:747-752`).
 fn cache_use(cache: &Json, installed: &Installed) -> CacheUse {
-    let refetch = "codex fetches the catalog instead (models-manager/src/manager.rs:725-752)";
+    let not_used = CacheUse::NotUsed;
     let cache = match cache {
         Json::Missing => return CacheUse::Missing,
-        Json::Invalid(_) => {
-            return CacheUse::Refetched(format!("models_cache.json is not valid JSON; {refetch}"))
-        }
+        Json::Invalid(_) => return not_used(CatalogWhy::NotJson),
         Json::Ok(v) => v,
     };
     let fetched_at = match validate_cache(cache) {
         Ok(fetched_at) => fetched_at.to_string(),
-        Err(Invalid::Rejected(why)) => {
-            return CacheUse::Refetched(format!(
-                "models_cache.json: {why}, so codex cannot parse the file; {refetch}"
-            ))
-        }
-        Err(Invalid::Unreadable(why)) => {
-            return CacheUse::Unknown(format!(
-                "models_cache.json: {why}, a shape harn does not read; catalog facts unknown"
-            ))
-        }
+        Err(Invalid::Rejected(detail)) => return not_used(CatalogWhy::Rejected { detail }),
+        Err(Invalid::Unreadable(detail)) => return not_used(CatalogWhy::UnreadShape { detail }),
     };
     let codex_version = match installed {
         Installed::Version(v) => v,
-        Installed::NotFound => {
-            return CacheUse::Unknown(
-                "codex not found on PATH: cannot tell whether it accepts models_cache.json"
-                    .to_string(),
-            )
-        }
-        Installed::Unversioned => {
-            return CacheUse::Unknown(
-                "the installed codex's version could not be determined: cannot tell whether it accepts models_cache.json"
-                    .to_string(),
-            )
-        }
+        Installed::NotFound => return not_used(CatalogWhy::CodexNotFound),
+        Installed::Unversioned => return not_used(CatalogWhy::CodexVersionUnknown),
     };
     match cache.get("client_version").and_then(Value::as_str) {
-        None => {
-            return CacheUse::Refetched(format!(
-                "models_cache.json has no client_version; {refetch}"
-            ))
-        }
+        None => return not_used(CatalogWhy::NoClientVersion),
         Some(v) if v != codex_version => {
-            return CacheUse::Refetched(format!(
-                "models_cache.json was written by codex {v}, not {codex_version}; {refetch}"
-            ))
+            return not_used(CatalogWhy::OtherVersion {
+                written_by: v.to_string(),
+                installed: codex_version.clone(),
+            })
         }
         Some(_) => {}
     }
     if cache.get("identity").and_then(Value::as_str).is_none() {
-        return CacheUse::Refetched(format!(
-            "models_cache.json has no identity (a legacy cache); {refetch}"
-        ));
+        return not_used(CatalogWhy::NoIdentity);
     }
     CacheUse::Used { fetched_at }
 }
@@ -553,6 +565,8 @@ pub(crate) fn resolve_with(
         home: Some(target.home.clone()),
         observed_regions: Vec::new(),
         tool_search_cause: None,
+        trust: None,
+        codex: None,
     };
     if !fs.is_dir(&codex_home) {
         let why = match target.env.get("CODEX_HOME").filter(|v| !v.is_empty()) {
@@ -563,6 +577,7 @@ pub(crate) fn resolve_with(
             "no codex home at {}: {why}; nothing to list",
             codex_home.display()
         ));
+        tree.codex = Some(homeless_facts(target, &codex_home));
         return Ok(tree);
     }
 
@@ -634,7 +649,10 @@ pub(crate) fn resolve_with(
     tree.tool_search = tool_search;
     tree.tool_search_cause = Some(tool_search_cause);
 
-    tree.signals.push(trust_signal(&ctx));
+    let trust = trust(&ctx);
+    tree.signals.push(trust_signal(&trust));
+    tree.trust = Some(trust);
+    tree.codex = Some(codex_facts(&ctx));
     tree.signals.push(model_signal(&ctx));
     tree.signals.extend(skills::bundled_note(&ctx, &tree.items));
     if let Some(profile) = &ctx.config.profile {
@@ -674,46 +692,113 @@ pub fn codex_home(target: &Target) -> PathBuf {
     }
 }
 
-/// `trust: <state> (<where>)` for the target dir: the AGENTS.md gate and the project-config gate,
-/// which look the entry up differently (`config.rs` module docs).
-fn trust_signal(ctx: &Ctx) -> String {
-    let c = &ctx.config;
-    let entry = |d: &config::Decision| match &d.set_at {
-        Some(at) => format!(
-            "projects.{}.trust_level in {}",
-            json_key(&d.key),
-            at_file(at)
-        ),
-        None => format!("no projects.{} entry", json_key(&d.key)),
+/// The two trust decisions codex keeps apart for the target dir (`config.rs` module docs): the
+/// config gate (`dir_decision`) for the project `.codex/config.toml`, hooks and rules, the AGENTS.md
+/// gate (`active_project`) for the project AGENTS.md files.
+fn trust(ctx: &Ctx) -> crate::model::Trust {
+    use crate::model::{Trust, TrustGate, TrustLevel as Level};
+    let gate = |d: &config::Decision| TrustGate {
+        level: d.level.map(|level| match level {
+            TrustLevel::Trusted => Level::Trusted,
+            TrustLevel::Untrusted => Level::Untrusted,
+        }),
+        key: d.key.clone(),
+        set_in: d.set_in.clone(),
     };
-    let dir = &c.dir_decision;
-    let agents = &c.active_project;
-    let state = match dir.level {
-        Some(level) => level.as_str(),
-        None => "unset",
-    };
-    let mut out = format!("trust: {state} ({})", entry(dir));
-    match (dir.level, agents.level) {
-        (Some(TrustLevel::Trusted), a) if a != Some(TrustLevel::Untrusted) => {
-            out.push_str(": project .codex/config.toml, hooks and rules load");
-        }
-        (_, Some(TrustLevel::Untrusted)) => {
-            out.push_str(
-                ": project AGENTS.md files, .codex/config.toml, hooks and rules are skipped; skills still load",
-            );
-        }
-        _ => out.push_str(
-            ": project .codex/config.toml, hooks and rules are ignored; AGENTS.md and skills still load",
-        ),
+    Trust {
+        folder: gate(&ctx.config.dir_decision),
+        agents_md: gate(&ctx.config.active_project),
     }
-    if agents.level != dir.level || (agents.set_at.is_some() && agents.key != dir.key) {
-        out.push_str(&format!(" · AGENTS.md gate: {}", entry(agents)));
+}
+
+/// `trust: <state> (<where>): <claims>` for the target dir, from [`trust`]: the project
+/// `.codex/config.toml`, hooks and rules load only when the config gate is `trusted`, the project
+/// AGENTS.md files are skipped only when the AGENTS.md gate is `untrusted`, skills follow neither.
+/// When the AGENTS.md gate is a decision of its own (`Trust::agents_md_apart`),
+/// ` · AGENTS.md gate: <state> (<where>)` names it with its own level.
+fn trust_signal(trust: &crate::model::Trust) -> String {
+    use crate::model::{TrustGate, TrustLevel as Level};
+    let entry = |g: &TrustGate| match &g.set_in {
+        Some(file) => format!(
+            "projects.{}.trust_level in {}",
+            json_key(&g.key),
+            file.display()
+        ),
+        None => format!("no projects.{} entry", json_key(&g.key)),
+    };
+    let state = |g: &TrustGate| g.level.map_or("unset", Level::as_str);
+    let (dir, agents) = (&trust.folder, &trust.agents_md);
+    let config_claim = match dir.level {
+        Some(Level::Trusted) => "load",
+        Some(Level::Untrusted) => "are skipped",
+        None => "are ignored",
+    };
+    let agents_claim = match agents.level {
+        Some(Level::Untrusted) => "are skipped",
+        _ => "load",
+    };
+    let mut out = format!(
+        "trust: {} ({}): project .codex/config.toml, hooks and rules {config_claim}; project AGENTS.md files {agents_claim}; skills load either way",
+        state(dir),
+        entry(dir)
+    );
+    if trust.agents_md_apart() {
+        out.push_str(&format!(
+            " · AGENTS.md gate: {} ({})",
+            state(agents),
+            entry(agents)
+        ));
     }
     out
 }
 
-fn at_file(at: &str) -> &str {
-    at.split_once('#').map(|(f, _)| f).unwrap_or(at)
+/// [`codex_facts`] when the Codex home does not exist: the home is known, no config or catalog
+/// could be read — the model only when the target names it, the catalog missing.
+fn homeless_facts(target: &Target, codex_home: &Path) -> crate::model::CodexFacts {
+    use crate::model::{Catalog, CatalogState, CodexFacts, CodexModel};
+    CodexFacts {
+        home: codex_home.to_path_buf(),
+        model: CodexModel {
+            slug: target.model.clone(),
+            set_in: None,
+            context_window: target.context_window,
+        },
+        catalog: Catalog {
+            written_by: None,
+            lists_model: false,
+            state: CatalogState::Missing,
+        },
+    }
+}
+
+/// The facts the screens word themselves ([`crate::model::CodexFacts`]); the `model:` signal
+/// ([`model_signal`]) says the same for the CLI.
+fn codex_facts(ctx: &Ctx) -> crate::model::CodexFacts {
+    use crate::model::{Catalog, CatalogState, CodexFacts, CodexModel};
+    let m = &ctx.model;
+    let state = match (&m.catalog_unread, &m.cache_use) {
+        (Some(_), _) => CatalogState::Elsewhere {
+            set_in: m.catalog_unread_file.clone(),
+        },
+        (None, CacheUse::Used { fetched_at }) => CatalogState::Used {
+            fetched_at: fetched_at.clone(),
+        },
+        (None, CacheUse::Missing) => CatalogState::Missing,
+        (None, CacheUse::NotUsed(why)) => CatalogState::NotUsed { why: why.clone() },
+    };
+    CodexFacts {
+        home: ctx.codex_home.clone(),
+        model: CodexModel {
+            slug: m.slug.clone(),
+            set_in: m.slug_file.clone(),
+            context_window: m.context_window,
+        },
+        catalog: Catalog {
+            written_by: m.catalog_version.clone(),
+            lists_model: m.catalog.is_some(),
+            state,
+        },
+    }
 }
 
 /// A `projects` key as it is written in TOML (`"…"`).
@@ -754,8 +839,8 @@ fn model_signal(ctx: &Ctx) -> String {
         );
     }
     match (&m.catalog_unread, &m.cache_use) {
-        (None, CacheUse::Refetched(why) | CacheUse::Unknown(why)) => {
-            format!("{model} · models_cache.json not used: {why}")
+        (None, CacheUse::NotUsed(why)) => {
+            format!("{model} · models_cache.json not used: {}", why_text(why))
         }
         _ => model,
     }
@@ -785,13 +870,18 @@ fn model_facts(
             Some(slug) => {
                 m.slug = Some(slug.to_string());
                 m.slug_from = Some(layer.at("/model"));
+                m.slug_file = layer.path.clone();
             }
             // Set but unreadable: unknown, never a lower layer's model.
-            None => m.slug_unreadable = Some(layer.at("/model")),
+            None => {
+                m.slug_unreadable = Some(layer.at("/model"));
+                m.slug_file = layer.path.clone();
+            }
         }
     }
     if let Some((_, layer)) = config.get("/model_catalog_json") {
         m.catalog_unread = Some(layer.at("/model_catalog_json"));
+        m.catalog_unread_file = layer.path.clone();
         if let Some(w) = target.context_window {
             m.context_window = Some(w);
             m.window_from = Some("target".to_string());

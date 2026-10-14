@@ -3,13 +3,14 @@
 //! [`App`] is the terminal-free core (keys in, frames out); [`run`] owns raw
 //! mode, the alternate screen and the event loop, and restores the terminal on every exit path:
 //! `q`, an error, a panic, and SIGINT / SIGTERM / SIGHUP (a flag the loop polls every
-//! [`TICK`]).
+//! [`TICK`]; when the loop cannot get back to it, a watchdog thread restores what it can and
+//! exits with the same code a second later, never in the middle of a write).
 
 mod app;
 pub mod model;
 mod view;
 
-pub use app::{App, Message, Part, Pending, Staged, Tone, TRIM_HINT};
+pub use app::{App, Message, Part, Pending, Staged, Tone, TRIM_HINT, TRIM_HINT_CODEX};
 pub use model::Sort;
 
 use crate::journal::Journal;
@@ -26,8 +27,10 @@ use ratatui::Terminal;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
@@ -125,12 +128,13 @@ fn leave() -> io::Result<()> {
     Ok(())
 }
 
-/// Best effort on the way out of [`run`], whatever path it takes.
+/// Best effort on the way out of [`run`], whatever path it takes, and bounded
+/// ([`leave_briefly`]): a terminal that takes no more output does not hold harn up.
 struct Restore;
 
 impl Drop for Restore {
     fn drop(&mut self) {
-        let _ = leave();
+        leave_briefly(NoThread::Inline);
     }
 }
 
@@ -159,6 +163,213 @@ fn trap_signals() -> io::Result<(Arc<AtomicUsize>, Vec<signal_hook::SigId>)> {
         )?);
     }
     Ok((flag, ids))
+}
+
+/// How long a signal may go unanswered before the watchdog stops the process. The loop can be
+/// stuck where it never sees the flag: on a hung-up terminal (its tmux session killed), crossterm
+/// 0.29 retries a read that returns 0 bytes, or fails with anything but WouldBlock, without end
+/// (`event/source/unix/mio.rs`), and SIGTERM or SIGHUP only set the flag.
+const GRACE: Duration = Duration::from_secs(1);
+
+/// The bit of the watchdog's state that says it has claimed the exit; the bits below count the
+/// [`Busy`] holds. One atomic word, so a write's admission and the exit claim exclude each other:
+/// the claim only goes from exactly 0 (no write), and no hold is admitted once it is set.
+const EXITING: usize = 1 << (usize::BITS - 1);
+
+/// The most holds the bits below [`EXITING`] can count; one more is refused, never carried into
+/// the exit bit.
+const MAX_HOLDS: usize = EXITING - 1;
+
+/// Holds the watchdog off while it lives: harn is writing (a plan, an undo, the journal), where a
+/// forced exit would leave the files and the journal disagreeing, or `$EDITOR` runs, whose Ctrl-C
+/// reaches harn too. A signal that lands meanwhile is acted on after: by the loop, or by the
+/// watchdog a full grace later.
+pub(crate) struct Busy(Arc<AtomicUsize>);
+
+impl Busy {
+    /// Admission before a write, on the watchdog's `state`. Once the watchdog has claimed the
+    /// exit, never returns: the process is stopping, and no write may start. (Nor while
+    /// [`MAX_HOLDS`] holds are live, which no harn reaches.)
+    pub(crate) fn hold(state: &Arc<AtomicUsize>) -> Busy {
+        loop {
+            if let Some(busy) = Busy::try_hold(state) {
+                return busy;
+            }
+            thread::park();
+        }
+    }
+
+    /// Admission, or None once the exit is claimed (or the count is full).
+    fn try_hold(state: &Arc<AtomicUsize>) -> Option<Busy> {
+        // A plain CAS loop (`fetch_update` is deprecated on newer toolchains, `try_update` absent on
+        // older ones): refuse once the exit is claimed, else count one more hold.
+        let mut held = state.load(Ordering::SeqCst);
+        loop {
+            if held & EXITING != 0 || held == MAX_HOLDS {
+                return None;
+            }
+            match state.compare_exchange_weak(held, held + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(Busy(Arc::clone(state))),
+                Err(now) => held = now,
+            }
+        }
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The watchdog takes the exit: only while no write is admitted, and none is admitted after.
+fn claim_exit(state: &AtomicUsize) -> bool {
+    state
+        .compare_exchange(0, EXITING, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// The watchdog's view of the signal flag.
+#[derive(Debug, Default)]
+struct Watch {
+    /// When the flag was first seen set, since it was last seen clear with nothing [`Busy`].
+    since: Option<Instant>,
+}
+
+impl Watch {
+    /// One look at the flag at `now`: 128 + the signal once one has gone unanswered for `grace`.
+    /// A clear flag, or harn [`Busy`], starts the wait over.
+    fn look(&mut self, signal: usize, busy: bool, now: Instant, grace: Duration) -> Option<i32> {
+        if signal == 0 || busy {
+            self.since = None;
+            return None;
+        }
+        let since = *self.since.get_or_insert(now);
+        (now.saturating_duration_since(since) >= grace).then_some(128 + signal as i32)
+    }
+}
+
+/// Looks at `signal` and `state` every [`TICK`] until `stop` hangs up (the end of [`run`]). A
+/// signal unanswered for `grace`: the exit claimed, then `restore`, then `exit` with 128 + it.
+fn watch(
+    signal: &AtomicUsize,
+    state: &AtomicUsize,
+    stop: &Receiver<()>,
+    grace: Duration,
+    restore: impl FnOnce(),
+    exit: impl FnOnce(i32),
+) {
+    let mut watch = Watch::default();
+    while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(TICK) {
+        let busy = state.load(Ordering::SeqCst) != 0;
+        let Some(code) = watch.look(signal.load(Ordering::SeqCst), busy, Instant::now(), grace)
+        else {
+            continue;
+        };
+        if claim_exit(state) {
+            restore();
+            exit(code);
+            return;
+        }
+        // A write was admitted after the look: it runs whole, and a full grace follows it.
+        watch.since = None;
+    }
+}
+
+/// [`watch`] on a thread of its own while [`run`] lasts. Dropped on every way out of `run`, a
+/// panic too: the thread sees the hang-up at once and is joined, so it never acts after `run`
+/// returned (unless it was already exiting the process, with the code `run` would have given).
+struct Watchdog {
+    /// Never sent on: dropping it is the stop.
+    stop: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watchdog {
+    /// `state`: the [`Busy`] holds and the exit claim ([`EXITING`]).
+    fn start(
+        signal: Arc<AtomicUsize>,
+        state: Arc<AtomicUsize>,
+        grace: Duration,
+        restore: impl FnOnce() + Send + 'static,
+        exit: impl FnOnce(i32) + Send + 'static,
+    ) -> io::Result<Watchdog> {
+        let (stop, stopped) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("harn-watchdog".to_string())
+            .spawn(move || watch(&signal, &state, &stopped, grace, restore, exit))?;
+        Ok(Watchdog {
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What [`leave_briefly`] does when no thread can be spawned for [`leave`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoThread {
+    /// [`leave`] here, unbounded: the normal way out of [`run`], as before there was a watchdog.
+    Inline,
+    /// No restore: the watchdog must reach its exit whatever the terminal does, and once it has
+    /// claimed the exit every write waits on that exit.
+    Skip,
+}
+
+/// [`leave`] on a thread of its own, waited for at most [`GRACE`]: a terminal that takes no more
+/// output (its writes block) cannot keep the process alive. A hung-up one fails at once. When no
+/// thread can be started, `no_thread` decides: [`NoThread::Skip`] keeps the bound (no restore),
+/// [`NoThread::Inline`] restores here and is unbounded again.
+fn leave_briefly(no_thread: NoThread) {
+    /// A thread of this function is still in [`leave`].
+    static LEAVING: AtomicBool = AtomicBool::new(false);
+    leave_bounded(
+        &LEAVING,
+        no_thread,
+        |work| thread::Builder::new().spawn(work).map(drop),
+        || {
+            let _ = leave();
+        },
+    );
+}
+
+/// [`leave_briefly`] with the thread and the restore handed in. One at a time (`leaving`): while
+/// an earlier `leave` is still stuck, a second is not started.
+fn leave_bounded(
+    leaving: &'static AtomicBool,
+    no_thread: NoThread,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+    leave: impl Fn() + Send + Sync + 'static,
+) {
+    if leaving.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let leave = Arc::new(leave);
+    let worker = Arc::clone(&leave);
+    let (done, finished) = mpsc::channel();
+    let started = spawn(Box::new(move || {
+        worker();
+        leaving.store(false, Ordering::SeqCst);
+        let _ = done.send(());
+    }));
+    match (started, no_thread) {
+        (Ok(()), _) => {
+            let _ = finished.recv_timeout(GRACE);
+        }
+        (Err(_), NoThread::Inline) => {
+            leave();
+            leaving.store(false, Ordering::SeqCst);
+        }
+        (Err(_), NoThread::Skip) => leaving.store(false, Ordering::SeqCst),
+    }
 }
 
 /// A full-screen [`Terminal`] on `backend`, blank and owed a full repaint.
@@ -199,6 +410,16 @@ pub fn run(
     let (signal, ids) = trap_signals()?;
     install_panic_hook();
     let restore = Restore;
+    let busy = app.busy();
+    // After `restore`: dropped (stopped and joined) before it on every way out, so the two never
+    // restore at once.
+    let watchdog = Watchdog::start(
+        Arc::clone(&signal),
+        Arc::clone(&busy),
+        GRACE,
+        || leave_briefly(NoThread::Skip),
+        |code| std::process::exit(code),
+    )?;
     enter()?;
     let mut terminal = full_screen(CrosstermBackend::new(io::stdout()))?;
     let exit = drive(
@@ -218,17 +439,21 @@ pub fn run(
                 return Ok(());
             }
             let before = signal.load(Ordering::SeqCst);
+            // Before the editor starts; never returns once the watchdog has claimed the exit.
+            let editing = Busy::hold(&busy);
             app.edit(&item_id, &editor);
             // A Ctrl-C typed in the editor reached harn too (same process group): the editor's.
             if before == 0 {
                 let _ =
                     signal.compare_exchange(SIGINT as usize, 0, Ordering::SeqCst, Ordering::SeqCst);
             }
+            drop(editing);
             enter()?;
             repaint(terminal)?;
             Ok(())
         },
     );
+    drop(watchdog);
     drop(restore);
     for id in ids {
         signal_hook::low_level::unregister(id);
@@ -248,6 +473,7 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::convert::Infallible;
     use std::path::PathBuf;
+    use std::sync::{Barrier, Mutex};
 
     fn app() -> App {
         let dir = PathBuf::from("/nonexistent/harn-tui-test");
@@ -266,6 +492,8 @@ mod tests {
             home: None,
             observed_regions: Vec::new(),
             tool_search_cause: None,
+            trust: None,
+            codex: None,
         };
         let target = Target {
             dir: dir.clone(),
@@ -509,5 +737,318 @@ mod tests {
             assert_eq!(exit.unwrap(), Exit::Quit);
             assert_eq!(events.ticks, 2);
         }
+    }
+
+    #[test]
+    fn the_watchdog_acts_once_a_signal_has_waited_out_the_grace() {
+        let (t0, grace) = (Instant::now(), Duration::from_secs(1));
+        let mut watch = Watch::default();
+        assert_eq!(watch.look(0, false, t0, grace), None);
+        assert_eq!(watch.look(SIGTERM as usize, false, t0, grace), None);
+        assert_eq!(
+            watch.look(SIGTERM as usize, false, t0 + grace / 2, grace),
+            None
+        );
+        assert_eq!(
+            watch.look(SIGTERM as usize, false, t0 + grace, grace),
+            Some(128 + SIGTERM)
+        );
+    }
+
+    #[test]
+    fn a_cleared_flag_or_a_busy_harn_starts_the_wait_over() {
+        let (t0, grace) = (Instant::now(), Duration::from_secs(1));
+        let mut watch = Watch::default();
+        assert_eq!(watch.look(SIGINT as usize, false, t0, grace), None);
+        // The loop answered, or the editor's Ctrl-C was taken back.
+        assert_eq!(watch.look(0, false, t0 + grace / 2, grace), None);
+        assert_eq!(watch.look(SIGINT as usize, false, t0 + grace, grace), None);
+        assert_eq!(
+            watch.look(SIGINT as usize, false, t0 + grace * 2, grace),
+            Some(128 + SIGINT)
+        );
+        // While a write or $EDITOR runs, however long, and for a full grace after it.
+        let mut watch = Watch::default();
+        assert_eq!(watch.look(SIGTERM as usize, true, t0, grace), None);
+        assert_eq!(
+            watch.look(SIGTERM as usize, true, t0 + grace * 10, grace),
+            None
+        );
+        assert_eq!(
+            watch.look(SIGTERM as usize, false, t0 + grace * 10, grace),
+            None
+        );
+        assert_eq!(
+            watch.look(SIGTERM as usize, false, t0 + grace * 11, grace),
+            Some(128 + SIGTERM)
+        );
+    }
+
+    /// A watchdog on `signal` and `busy` whose restore and exit only report what they were
+    /// called with, in order.
+    fn watchdog(
+        signal: &Arc<AtomicUsize>,
+        busy: &Arc<AtomicUsize>,
+        grace: Duration,
+    ) -> (Watchdog, Receiver<String>) {
+        let (acted, acts) = mpsc::channel();
+        let restored = acted.clone();
+        let dog = Watchdog::start(
+            Arc::clone(signal),
+            Arc::clone(busy),
+            grace,
+            move || {
+                let _ = restored.send("restore".to_string());
+            },
+            move |code| {
+                let _ = acted.send(format!("exit {code}"));
+            },
+        )
+        .unwrap();
+        (dog, acts)
+    }
+
+    fn counter(n: usize) -> Arc<AtomicUsize> {
+        Arc::new(AtomicUsize::new(n))
+    }
+
+    #[test]
+    fn a_signal_the_loop_never_answers_restores_the_terminal_then_exits_with_128_plus_it() {
+        let (dog, acts) = watchdog(&counter(SIGTERM as usize), &counter(0), Duration::ZERO);
+        let wait = Duration::from_secs(10);
+        let first = acts.recv_timeout(wait).expect("the watchdog acted");
+        let second = acts.recv_timeout(wait).expect("and exited");
+        drop(dog);
+        assert_eq!(
+            [first, second],
+            ["restore".to_string(), format!("exit {}", 128 + SIGTERM)]
+        );
+    }
+
+    #[test]
+    fn the_end_of_run_stops_the_watchdog_before_it_acts() {
+        let grace = Duration::from_secs(3600);
+        let (dog, acts) = watchdog(&counter(SIGTERM as usize), &counter(0), grace);
+        // Joined: nothing can come after this.
+        drop(dog);
+        assert_eq!(acts.try_iter().collect::<Vec<_>>(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_ctrl_c_the_editor_took_never_stops_the_process() {
+        let (signal, busy) = (counter(0), counter(0));
+        let (dog, acts) = watchdog(&signal, &busy, Duration::from_millis(10));
+        // As `run` does around $EDITOR, with the editor's Ctrl-C landing while it runs.
+        let editing = Busy::hold(&busy);
+        signal.store(SIGINT as usize, Ordering::SeqCst);
+        thread::sleep(TICK * 3);
+        let _ = signal.compare_exchange(SIGINT as usize, 0, Ordering::SeqCst, Ordering::SeqCst);
+        drop(editing);
+        thread::sleep(TICK * 3);
+        drop(dog);
+        assert_eq!(acts.try_iter().collect::<Vec<_>>(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_sigterm_during_a_write_waits_for_it_then_a_full_grace() {
+        let (signal, busy) = (counter(0), counter(0));
+        let grace = TICK * 3;
+        let (dog, acts) = watchdog(&signal, &busy, grace);
+        // As `App` does around a plan, an undo or a journal write; nested holds count.
+        let writing = Busy::hold(&busy);
+        let nested = Busy::hold(&busy);
+        signal.store(SIGTERM as usize, Ordering::SeqCst);
+        thread::sleep(grace * 3);
+        drop(nested);
+        thread::sleep(grace * 2);
+        assert_eq!(acts.try_recv().ok(), None, "not while the write runs");
+        let done = Instant::now();
+        drop(writing);
+        let wait = Duration::from_secs(10);
+        assert_eq!(acts.recv_timeout(wait).as_deref(), Ok("restore"));
+        assert!(
+            done.elapsed() >= grace,
+            "{:?} after the write",
+            done.elapsed()
+        );
+        assert_eq!(
+            acts.recv_timeout(wait),
+            Ok(format!("exit {}", 128 + SIGTERM))
+        );
+        drop(dog);
+        // Every hold released, and the exit claimed: no write can start any more.
+        assert_eq!(busy.load(Ordering::SeqCst), EXITING);
+    }
+
+    /// The race the claim closes: the watchdog has decided to exit on a state that showed no
+    /// write (as `watch` does: load, then look) when a write reaches its admission. A barrier
+    /// forces each order of the claim and the admission; every outcome is logged, nothing is
+    /// asserted inside the threads, so a wrong outcome fails the test instead of hanging it.
+    #[test]
+    fn a_write_at_its_admission_when_the_exit_is_decided_runs_whole_or_not_at_all() {
+        for exit_first in [true, false] {
+            let state = counter(0);
+            let log: Arc<Mutex<Vec<&str>>> = Arc::default();
+            let step = Arc::new(Barrier::new(2));
+            let dog = {
+                let (state, log, step) = (Arc::clone(&state), Arc::clone(&log), Arc::clone(&step));
+                thread::spawn(move || {
+                    let say = |what| log.lock().unwrap().push(what);
+                    let claim = || {
+                        say(if claim_exit(&state) {
+                            "exit claimed"
+                        } else {
+                            "exit refused"
+                        })
+                    };
+                    let busy = state.load(Ordering::SeqCst) != 0;
+                    let code = Watch::default().look(
+                        SIGTERM as usize,
+                        busy,
+                        Instant::now(),
+                        Duration::ZERO,
+                    );
+                    say(if code == Some(128 + SIGTERM) {
+                        "exit decided"
+                    } else {
+                        "no decision"
+                    });
+                    step.wait(); // 1: decided; the write stands at its admission.
+                    if exit_first {
+                        claim();
+                        step.wait(); // 2: the write is admitted or refused after the claim.
+                    } else {
+                        step.wait(); // 2: the write was admitted (or refused) first.
+                        claim();
+                        step.wait(); // 3: the write may finish.
+                        step.wait(); // 4: it has.
+                        claim();
+                    }
+                })
+            };
+            let say = |what| log.lock().unwrap().push(what);
+            let admit = || {
+                let held = Busy::try_hold(&state);
+                say(if held.is_some() {
+                    "write started"
+                } else {
+                    "write refused"
+                });
+                held
+            };
+            step.wait(); // 1
+            if exit_first {
+                step.wait(); // 2
+                drop(admit());
+            } else {
+                let held = admit();
+                step.wait(); // 2
+                step.wait(); // 3
+                if held.is_some() {
+                    say("write finished");
+                }
+                drop(held);
+                step.wait(); // 4
+            }
+            dog.join().unwrap();
+            let log = log.lock().unwrap().clone();
+            if exit_first {
+                assert_eq!(log, ["exit decided", "exit claimed", "write refused"]);
+            } else {
+                assert_eq!(
+                    log,
+                    [
+                        "exit decided",
+                        "write started",
+                        "exit refused",
+                        "write finished",
+                        "exit claimed"
+                    ]
+                );
+            }
+            assert_eq!(state.load(Ordering::SeqCst), EXITING);
+        }
+    }
+
+    #[test]
+    fn the_hold_count_stops_below_the_exit_bit() {
+        let state = counter(MAX_HOLDS - 1);
+        let last = Busy::try_hold(&state).expect("the last hold that fits");
+        assert_eq!(state.load(Ordering::SeqCst), MAX_HOLDS);
+        assert!(Busy::try_hold(&state).is_none(), "one more is refused");
+        assert_eq!(
+            state.load(Ordering::SeqCst),
+            MAX_HOLDS,
+            "never carried into EXITING"
+        );
+        assert!(!claim_exit(&state), "writes are still live");
+        drop(last);
+        assert_eq!(state.load(Ordering::SeqCst), MAX_HOLDS - 1);
+    }
+
+    fn no_thread(_: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        Err(io::Error::other("no thread to be had"))
+    }
+
+    #[test]
+    fn a_watchdog_with_no_thread_for_the_restore_goes_straight_to_its_exit() {
+        static LEAVING: AtomicBool = AtomicBool::new(false);
+        // A terminal whose restore would block until the test ends.
+        let left: Arc<Mutex<Vec<&str>>> = Arc::default();
+        let (unblock, blocked) = mpsc::channel::<()>();
+        let blocked = Mutex::new(blocked);
+        let leave = {
+            let left = Arc::clone(&left);
+            move || {
+                left.lock().unwrap().push("leave");
+                let _ = blocked.lock().unwrap().recv();
+            }
+        };
+        let (acted, acts) = mpsc::channel();
+        let dog = Watchdog::start(
+            counter(SIGTERM as usize),
+            counter(0),
+            Duration::ZERO,
+            move || leave_bounded(&LEAVING, NoThread::Skip, no_thread, leave),
+            move |code| {
+                let _ = acted.send(code);
+            },
+        )
+        .unwrap();
+        let exited = acts.recv_timeout(Duration::from_secs(10));
+        drop(unblock);
+        drop(dog);
+        assert_eq!(exited, Ok(128 + SIGTERM));
+        assert_eq!(
+            *left.lock().unwrap(),
+            Vec::<&str>::new(),
+            "no restore tried"
+        );
+        assert!(!LEAVING.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_normal_restore_runs_on_a_thread_or_here_when_there_is_none() {
+        static ON_A_THREAD: AtomicBool = AtomicBool::new(false);
+        static HERE: AtomicBool = AtomicBool::new(false);
+        let (left, leaves) = mpsc::channel();
+        let leave = |what: &'static str| {
+            let left = Mutex::new(left.clone());
+            move || {
+                let _ = left.lock().unwrap().send(what);
+            }
+        };
+        leave_bounded(
+            &ON_A_THREAD,
+            NoThread::Inline,
+            |work| thread::Builder::new().spawn(work).map(drop),
+            leave("on its thread"),
+        );
+        let wait = Duration::from_secs(10);
+        assert_eq!(leaves.recv_timeout(wait), Ok("on its thread"));
+        // Inline: done by the time the call returns.
+        leave_bounded(&HERE, NoThread::Inline, no_thread, leave("here"));
+        assert_eq!(leaves.try_recv(), Ok("here"));
+        assert!(!HERE.load(Ordering::SeqCst));
     }
 }
