@@ -2,7 +2,7 @@
 
 use super::common::{exact, freed_value, glyphs, kb, knob_full, UNICODE};
 use crate::journal::JournalEntry;
-use crate::model::RunContext;
+use crate::model::{Mode, RunContext};
 use crate::plan::ActionPlan;
 use crate::verify::{RowVerdict, VerifyReport};
 
@@ -78,8 +78,9 @@ fn context_line(ctx: &RunContext) -> String {
 }
 
 /// Target dir, ops (item id, knob, scope, file, reason), predicted before → after, freed,
-/// side effects, warnings, then the unified diff verbatim. `unicode` false = ASCII decorations;
-/// ids, paths, side effects and the diff are printed as they are.
+/// what leaves (by the mode each had before), side effects, warnings, then the unified diff
+/// verbatim. `unicode` false = ASCII decorations; ids, paths, side effects and the diff are
+/// printed as they are.
 pub fn plan(plan: &ActionPlan, unicode: bool) -> String {
     let g = glyphs(unicode);
     let base = plan.target_dir.as_path();
@@ -109,6 +110,14 @@ pub fn plan(plan: &ActionPlan, unicode: bool) -> String {
         exact(plan.predicted_after),
         freed_value(&plan.freed, g, kb)
     ));
+    // `advertised  alpha:alpha-skill (skill)`: modes in `Mode::ALL` order, walk order within one.
+    let mut leaving: Vec<_> = plan.leaving.iter().collect();
+    leaving.sort_by_key(|l| Mode::ALL.iter().position(|m| *m == l.mode_before));
+    let leaving: Vec<String> = leaving
+        .iter()
+        .map(|l| format!("{:<10}  {} ({})", l.mode_before.as_str(), l.label, l.kind))
+        .collect();
+    push_list(&mut out, "leaves", &leaving);
     push_list(&mut out, "side effects", &plan.side_effects);
     push_list(&mut out, "warnings", &plan.warnings);
     let diff = plan.diff.trim_end_matches('\n');

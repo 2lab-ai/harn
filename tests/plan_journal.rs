@@ -445,6 +445,138 @@ fn plugin_knob_reports_its_other_rows_as_side_effects() {
     );
 }
 
+/// `plan.leaving` as (id, kind, mode before).
+fn leaving(plan: &plan::ActionPlan) -> Vec<(&str, Kind, Mode)> {
+    plan.leaving
+        .iter()
+        .map(|l| (l.id.as_str(), l.kind, l.mode_before))
+        .collect()
+}
+
+/// Items in the first request: mode always or advertised.
+fn at_start(tree: &Tree) -> usize {
+    harn::model::walk(tree)
+        .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
+        .count()
+}
+
+#[test]
+fn leaving_lists_the_planned_item_and_every_row_that_goes_with_it_by_mode() {
+    let sb = Sandbox::new();
+    let plan = sb.plan(SLACK, None).unwrap();
+    // Walk order, each with its mode before: the planned server and its tool (the side effects
+    // leave them out as the plan's own), then the plugin's two skills in the listing.
+    assert_eq!(
+        leaving(&plan),
+        [
+            (SLACK, Kind::McpServer, Mode::Always),
+            (
+                "claude-code/mcp-tool/plugin/plugin:slack:slack/send_message",
+                Kind::McpTool,
+                Mode::Always
+            ),
+            (
+                "claude-code/skill/plugin/slack:slack-search",
+                Kind::Skill,
+                Mode::Advertised
+            ),
+            (
+                "claude-code/skill/plugin/slack:slack-post",
+                Kind::Skill,
+                Mode::Advertised
+            ),
+        ]
+    );
+    assert_eq!(plan.leaving[0].label, "plugin:slack:slack");
+    assert_eq!(plan.side_effects.len(), 2, "{:?}", plan.side_effects);
+    // The four loaded at start: the count after is the count before less them.
+    assert_eq!(plan.items_after, at_start(&sb.resolve()) - 4);
+}
+
+#[test]
+fn a_row_that_loaded_nothing_and_goes_is_leaving_with_mode_none() {
+    // A tool of slack's server that loads nothing (mode none, no `off:` signal): it goes from
+    // the tree with its server, and is listed as leaving, its mode before none.
+    let mut sb = Sandbox::new();
+    let mut spec: Value = serde_json::from_str(&sb.fake.spec).unwrap();
+    let server = spec
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|s| s["id"] == json!(SLACK))
+        .unwrap();
+    server["children"].as_array_mut().unwrap().push(json!({
+        "id": "claude-code/mcp-tool/plugin/plugin:slack:slack/dormant",
+        "label": "dormant",
+        "kind": "mcp-tool",
+        "layer": "plugin",
+        "plugin": "slack@x",
+        "mode": "none",
+        "predicted": null
+    }));
+    sb.fake.spec = spec.to_string();
+    let plan = sb.plan(SLACK, None).unwrap();
+    assert!(
+        leaving(&plan).contains(&(
+            "claude-code/mcp-tool/plugin/plugin:slack:slack/dormant",
+            Kind::McpTool,
+            Mode::None
+        )),
+        "{:?}",
+        leaving(&plan)
+    );
+    // It loaded nothing: the count after loses only the four that did.
+    assert_eq!(plan.leaving.len(), 5);
+    assert_eq!(plan.items_after, at_start(&sb.resolve()) - 4);
+}
+
+#[test]
+fn a_planned_item_that_stays_is_not_leaving_when_a_disabled_server_appears() {
+    // Review r9: an agent whose switch keeps it in the roster (as a deny rule does), and a
+    // server, disabled (mode none), that the same write makes appear. Nothing leaves; the
+    // server is a side effect that appears and loads nothing.
+    let mut sb = Sandbox::new();
+    let local = sb.local();
+    let mut spec: Value = serde_json::from_str(&sb.fake.spec).unwrap();
+    let items = spec.as_array_mut().unwrap();
+    items.push(json!({
+        "id": "claude-code/sub-agent/project/critic",
+        "label": "critic",
+        "kind": "sub-agent",
+        "layer": "project",
+        "mode": "advertised",
+        "predicted": 50,
+        "knobs": [{
+            "type": "setting",
+            "file": local,
+            "pointer": "/model",
+            "value": "opus",
+            "scope": "local",
+            "note": null
+        }]
+    }));
+    items.push(json!({
+        "id": "claude-code/mcp-server/project/srv",
+        "label": "srv",
+        "kind": "mcp-server",
+        "layer": "project",
+        "mode": "none",
+        "predicted": null,
+        "off_if": [{ "file": local, "pointer": "/model", "equals": "sonnet" }]
+    }));
+    sb.fake.spec = spec.to_string();
+    let tree = sb.resolve();
+    assert!(find(&tree, "claude-code/mcp-server/project/srv").is_none());
+
+    let plan = sb
+        .plan("claude-code/sub-agent/project/critic", None)
+        .unwrap();
+    assert_eq!(leaving(&plan), []);
+    assert_eq!(plan.side_effects, ["srv (mcp-server) appears"]);
+    // The count at start does not move: the agent stays, the server loads nothing.
+    assert_eq!(plan.items_after, at_start(&tree));
+}
+
 #[test]
 fn a_listing_entry_leaving_is_delta_unknown_even_with_known_bytes() {
     let sb = Sandbox::new();
@@ -747,6 +879,21 @@ fn plan_json_round_trips_agent_version_and_loads_without_it() {
     assert!(doc.as_object_mut().unwrap().remove("items_after").is_some());
     let older: plan::ActionPlan = serde_json::from_str(&doc.to_string()).unwrap();
     assert_eq!(older.items_after, 0);
+
+    // Nor a `leaving` key: it loads as an empty list.
+    assert_eq!(plan.leaving.len(), 4);
+    assert!(doc.as_object_mut().unwrap().remove("leaving").is_some());
+    let oldest: plan::ActionPlan = serde_json::from_str(&doc.to_string()).unwrap();
+    assert!(oldest.leaving.is_empty());
+    assert_eq!(
+        plan::ActionPlan {
+            agent_version: None,
+            items_after: 0,
+            leaving: Vec::new(),
+            ..plan.clone()
+        },
+        oldest
+    );
 }
 
 #[test]

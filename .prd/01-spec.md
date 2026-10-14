@@ -193,7 +193,8 @@ knob      {file, key, value, scope}  the official off switch, narrowest scope th
           | quarantine {from, to}     only when no knob exists
           | none {reason}             built-in / undocumented
 ActionPlan  target_dir, items[], mechanism per item, scope, file hashes at read time,
-            predicted(before), predicted(after), freed, side effects (what else leaves or appears),
+            predicted(before), predicted(after), freed, what leaves (each item with its mode before),
+            side effects (what else leaves or appears),
             warnings (git-tracked file, agent process running, scope wider than local)
 RunContext  canonical cwd, agent + version, model, launch options/profile, settings fingerprint,
             capture kind + time — attached to every capture and every journal entry
@@ -259,17 +260,17 @@ selects one agent (default: all, one table each).
 | command | does | output |
 |---|---|---|
 | `harn [DIR]` / `harn --dir D` | **human entry point.** On a terminal: the interactive view (TUI) — the whole tree foldable, searchable, sortable, with `w` why, `d`/`space` stage off, `a` apply (confirm), `o` on, `u` undo, `e` edit, `t` hint to `harn trim`, `?` keys; every write through the same ActionPlan + journal; `--readonly` greys write keys. Not a terminal, or `--table`: the full table | TUI; `--table`: freed · predicted · share · item · origin · mode · default action |
-| `harn trim [DIR] [--dry-run] [--yes] [--agent-cmd <cmd>]` | **human entry point, the default way to trim.** The AI operator loop in one command: build the brief, hand it to the coding agent headless (`claude -p`, one model request, announced before it runs), receive a `harn-plan/1`, validate it exactly as `apply` does, print the plan with each op's reason, freed, side effects and diff, ask `apply? [y/N]` on a TTY (`--yes` skips, `--dry-run` stops before asking), apply, journal, and print the one line that undoes it. No item name is ever typed by the human. The agent command is injectable for tests and for Codex | plan + journal id + undo line |
+| `harn trim [DIR] [--dry-run] [--yes] [--agent-cmd <cmd>]` | **human entry point, the default way to trim.** The AI operator loop in one command: build the brief, hand it to the coding agent headless (`claude -p`, one model request, announced before it runs), receive a `harn-plan/1`, validate it exactly as `apply` does, print the plan with each op's reason, freed, what leaves (by mode), side effects and diff, ask `apply? [y/N]` on a TTY (`--yes` skips, `--dry-run` stops before asking), apply, journal, and print the one line that undoes it. No item name is ever typed by the human. The agent command is injectable for tests and for Codex | plan + journal id + undo line |
 | `harn --json` | the full model | `{"schema":"harn/1", "agents":[…]}` |
 | `harn why <item>` | admission chain, realpath, knob candidates by scope, the freed bytes of each | text |
 | `harn path <item>` | the resolved realpath, one line | path |
-| `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + side effects + warnings, then apply the official knob in the given scope (default `local`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
+| `harn off <item> [--scope local\|project\|user] [--dry-run]` | build an `ActionPlan`, print the diff + freed delta + what leaves (by mode) + side effects + warnings, then apply the official knob in the given scope (default `local`); quarantine only when no knob exists and only in the same scope; a wider scope is never chosen silently | plan + journal id |
 | `harn on <item>` / `harn undo [N]` / `harn history [--prune <age>]` | reverse journal ops; stale targets reported, not forced; `--prune` is the only way journal entries are ever deleted | text |
 | `harn edit <item>` | snapshot → `$EDITOR <realpath>` → diff → journal entry; a JSON/TOML/frontmatter file that no longer parses is journaled and warned about, not reverted; refused for `builtin`/`managed` items | diff + journal id |
 | `harn verify --capture <path>` | read-only diff of the tree against a bound capture | per-row `seen` / `predicted-not-seen` / `seen-not-predicted` / `content-mismatch`; exit 1 on any presence diff or content-conformance mismatch within the projection |
 | `harn verify --run` | runs the agent once under its official capture after printing what it will execute; refused under `--readonly` | same |
 | `harn brief [DIR]` | the same facts as `--json`, rendered as compact text for an LLM: header totals and signals, rows with id · origin · mode · cost · freed · default knob, open unknowns, and the exact `apply` plan format | text |
-| `harn apply <plan.json> [--dry-run]` | validate an AI-authored plan (`{"schema":"harn-plan/1","target_dir","ops":[{"selector","scope"?,"knob"?,"reason"}]}`): every selector resolves uniquely, every knob is one the item supports, scope never widens silently; then build one `ActionPlan`, print the diff + freed + side effects + each op's reason, apply, journal | plan + journal id |
+| `harn apply <plan.json> [--dry-run]` | validate an AI-authored plan (`{"schema":"harn-plan/1","target_dir","ops":[{"selector","scope"?,"knob"?,"reason"}]}`): every selector resolves uniquely, every knob is one the item supports, scope never widens silently; then build one `ActionPlan`, print the diff + freed + what leaves (by mode) + side effects + each op's reason, apply, journal | plan + journal id |
 | `harn report [DIR] --html <out>` | a read-only visualization of the current loadout for the human (one page, both agents, the same rows and signals, no write controls) | file |
 | `harn completions <shell>` | clap completions | — |
 

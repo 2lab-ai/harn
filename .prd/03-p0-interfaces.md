@@ -85,8 +85,10 @@ later shows overflow (resolver leaves `signal` None; verify fills it). `tool_sea
 
 ```rust
 pub struct PlannedOp { pub item_id: String, pub knob: Knob, pub file: Option<PathBuf>, pub hash_before: Option<String>, pub reason: Option<String> }
+pub struct Leaving { pub id: String, pub label: String, pub kind: Kind, pub mode_before: Mode }  // an item the plan takes out of the request: gone from the tree, or kept but switched off (an `off:` signal, or mode none where it had another mode); rows already carrying an `off:` signal are never listed; other mode-none rows the plan takes from the tree are listed with mode_before none
 pub struct ActionPlan { pub target_dir: PathBuf, pub agent: Agent, pub ops: Vec<PlannedOp>,
     pub predicted_before: u64, pub predicted_after: u64, pub freed: Freed,
+    pub leaving: Vec<Leaving> /* every item that leaves, planned items included, walk order; serde default [] */,
     pub side_effects: Vec<String>, pub warnings: Vec<String>, pub diff: String /* unified, all files */ }
 pub fn build_plan(resolver: &dyn Resolver, target: &Target, tree: &Tree, item_id: &str, scope: Option<Scope>) -> anyhow::Result<ActionPlan>;
 /// AI-authored plan (schema "harn-plan/1"): {"schema","target_dir","ops":[{"selector","scope"?:"local|project|user","knob"?:usize,"reason"}]}

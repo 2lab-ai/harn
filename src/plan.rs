@@ -27,6 +27,20 @@ pub struct PlannedOp {
     pub reason: Option<String>,
 }
 
+/// An item a plan takes out of the request: gone from the tree once the plan is applied, or
+/// kept but switched off by it (an `off:` signal, or mode none where it had another mode). A
+/// row that already carries an `off:` signal is never listed. Another row that loaded nothing
+/// (mode none and no `off:` signal: a disabled MCP server, an unapproved import) is listed, with
+/// `mode_before` none, when the plan takes it from the tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Leaving {
+    pub id: String,
+    pub label: String,
+    pub kind: Kind,
+    /// The item's mode before the plan (always or advertised = it loaded at start).
+    pub mode_before: Mode,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionPlan {
     pub target_dir: PathBuf,
@@ -42,6 +56,10 @@ pub struct ActionPlan {
     #[serde(default)]
     pub items_after: usize,
     pub freed: Freed,
+    /// Every item that leaves (see [`Leaving`] for which rows count), the planned items and what
+    /// is under them included, in walk order; empty in a plan written before the field existed.
+    #[serde(default)]
+    pub leaving: Vec<Leaving>,
     pub side_effects: Vec<String>,
     pub warnings: Vec<String>,
     /// Unified diff, all files.
@@ -540,6 +558,7 @@ fn build(
         own.extend(walk_item(pick.item).map(|i| i.id.as_str()));
     }
     let side_effects = delta.side_effects(&own);
+    let leaving = delta.leaving();
 
     let mut ops: Vec<PlannedOp> = picks
         .iter()
@@ -572,6 +591,7 @@ fn build(
             .filter(|i| matches!(i.mode, Mode::Always | Mode::Advertised))
             .count(),
         freed,
+        leaving,
         side_effects,
         warnings,
         diff,
@@ -837,6 +857,20 @@ impl<'a> Delta<'a> {
         }
     }
 
+    /// Every row that leaves ([`left`]), with its mode before the overlay: none for a row that
+    /// loaded nothing and goes from the tree.
+    fn leaving(&self) -> Vec<Leaving> {
+        self.removed
+            .iter()
+            .map(|(item, _)| Leaving {
+                id: item.id.clone(),
+                label: item.label.clone(),
+                kind: item.kind,
+                mode_before: item.mode,
+            })
+            .collect()
+    }
+
     /// Rows other than `own` (the planned items and their descendants) that leave or appear;
     /// a row whose parent also leaves is folded into the parent's line.
     fn side_effects(&self, own: &HashSet<&str>) -> Vec<String> {
@@ -867,13 +901,18 @@ impl<'a> Delta<'a> {
 }
 
 /// `item` (as before the overlay) leaves the request: it is gone from the after tree (`now`
-/// None), or still there but switched off — mode none with an `off:` signal. A resolver keeps
-/// such an item to say what turned it off (every hook and the status line under
-/// `disableAllHooks`); it leaves all the same. An item already switched off before the overlay
-/// never leaves, whether it stays or goes (a hook of a plugin turned off while every hook is
-/// off was not running).
+/// None), or still there but switched off — mode none with an `off:` signal, or mode none where
+/// it had another mode before. A resolver keeps such an item to say what turned it off (every
+/// hook and the status line under `disableAllHooks`; a disabled MCP server, the reason in its
+/// origin); it leaves all the same. An item that already carries an `off:` signal before the
+/// overlay never leaves, whether it stays or goes (a hook of a plugin turned off while every
+/// hook is off was not running). One with mode none and no such signal (a disabled MCP server
+/// of a plugin the plan turns off) leaves when it goes from the tree.
 fn left(item: &Item, now: Option<&Item>) -> bool {
-    !switched_off(item) && now.is_none_or(switched_off)
+    !switched_off(item)
+        && now.is_none_or(|now| {
+            switched_off(now) || (now.mode == Mode::None && item.mode != Mode::None)
+        })
 }
 
 /// Mode none with an `off:` signal: listed, but something turned it off.
