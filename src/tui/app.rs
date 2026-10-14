@@ -159,8 +159,8 @@ pub struct App {
     pub(crate) last_live: Option<JournalEntry>,
     pending: Option<Pending>,
     quit: bool,
-    /// Raised by a [`Busy`] around every write (apply, undo, edit); the watchdog of
-    /// [`super::run`] reads it.
+    /// The watchdog's state ([`super::run`]): a [`Busy`] is held around every write (apply,
+    /// undo, edit), and none is admitted once the watchdog has claimed the exit.
     busy: Arc<AtomicUsize>,
 }
 
@@ -222,7 +222,7 @@ impl App {
         self.quit
     }
 
-    /// Above 0 while a write is under way: the count the watchdog waits on.
+    /// Not 0 while a write is under way or once the watchdog has claimed the exit.
     pub(crate) fn busy(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.busy)
     }

@@ -192,8 +192,10 @@ fn sigterm_stops_harn_after_its_terminal_is_gone() {
     // Give the view's loop time to reach the read that never returns.
     std::thread::sleep(Duration::from_millis(300));
     // The close may land in the middle of a draw (one per tick): the write fails and harn stops
-    // with an error on its own. That is not outliving the terminal either.
-    if child.try_wait().expect("wait for harn").is_some() {
+    // with that error on its own (exit 1). That is not outliving the terminal either; any other
+    // way out (a panic, a crash) is.
+    if let Some(status) = child.try_wait().expect("wait for harn") {
+        assert_eq!(status.code(), Some(1), "{status}");
         return;
     }
     kill(&child, libc::SIGTERM);
