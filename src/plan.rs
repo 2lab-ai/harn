@@ -66,8 +66,8 @@ pub struct ActionPlan {
     pub diff: String,
 }
 
-/// Plans turning `item_id` off. `scope` None = the default (`local`); a scope with no knob is
-/// refused (`model::Refused`), never widened.
+/// Plans turning `item_id` off. `scope` None = the agent's default ([`default_scope`]); a scope
+/// with no knob is refused (`model::Refused`), never widened.
 ///
 /// Knob choice: the knob in exactly the requested scope, else the narrowest knob below it;
 /// only wider knobs → refused, naming the scope to pass.
@@ -177,7 +177,7 @@ pub struct PlanRequest {
 #[serde(deny_unknown_fields)]
 pub struct PlanOp {
     pub selector: String,
-    /// `local` | `project` | `user`; None = default (`local`).
+    /// `local` | `project` | `user`; None = the agent's default ([`default_scope`]).
     pub scope: Option<Scope>,
     /// Index into `Item.knobs`; None = `knobs[0]`.
     pub knob: Option<usize>,
@@ -234,7 +234,7 @@ pub fn build_plan_from_request(
                         item.knobs.len()
                     ))
                 })?;
-                let wanted = op.scope.unwrap_or(Scope::Local);
+                let wanted = op.scope.unwrap_or_else(|| default_scope(item));
                 match (knob, knob_scope(knob)) {
                     (Knob::None { reason }, _) => {
                         return Err(Refused(format!(
@@ -269,7 +269,8 @@ pub fn build_plan_from_request(
 
 /// Fills `Item.freed` for `knobs[0]` of every item via an overlay re-resolve.
 ///
-/// Only the local-scope default is annotated (an item whose knobs are all wider keeps `None`).
+/// Only the knob the default scope picks is annotated ([`default_scope`]: a Claude Code item whose
+/// knobs are all wider than local keeps `None`; a Codex item gets its narrowest knob's).
 /// A knob the resolver proves removes only its own row ([`Resolver::after_removal`]) is computed
 /// from the tree without a re-resolve; every other knob re-resolves once per distinct overlay
 /// (a plugin's rows share one), the overlays spread over the available cores. Over
@@ -448,9 +449,32 @@ pub fn knob_scope(knob: &Knob) -> Option<Scope> {
     }
 }
 
+/// The scope `harn off` writes when none is given. Claude Code: `local`. Codex has no local-only
+/// config file, and its resolver lists a knob only where the write takes effect — the target's
+/// `.codex/config.toml` (`project`) while the dir is trusted and no higher layer decides the key,
+/// `$CODEX_HOME/config.toml` (`user`) otherwise — so its default is the narrowest knob listed.
+/// An explicit scope is never widened either way (`choose_knob`).
+pub fn default_scope(item: &Item) -> Scope {
+    match item_agent(item) {
+        Some(Agent::Codex) => item
+            .knobs
+            .iter()
+            .filter_map(knob_scope)
+            .min()
+            .unwrap_or(Scope::Local),
+        _ => Scope::Local,
+    }
+}
+
+/// The agent of an item, from its id (`<agent>/<kind>/<layer>/<name>`, `model::item_id`).
+fn item_agent(item: &Item) -> Option<Agent> {
+    let prefix = item.id.split('/').next()?;
+    serde_json::from_value(serde_json::Value::String(prefix.to_string())).ok()
+}
+
 /// The knob `scope` selects: exact scope first, else the narrowest knob narrower than it.
 fn choose_knob(item: &Item, scope: Option<Scope>) -> anyhow::Result<&Knob> {
-    let wanted = scope.unwrap_or(Scope::Local);
+    let wanted = scope.unwrap_or_else(|| default_scope(item));
     let usable: Vec<(&Knob, Scope)> = item
         .knobs
         .iter()
@@ -642,8 +666,9 @@ fn build(
     })
 }
 
-/// The diff the apply will produce (each JSON file patched in op order, renames for moves),
-/// and the hash of every JSON file as read for it (None = absent).
+/// The diff the apply will produce (each settings file patched in op order — TOML or JSON by its
+/// extension, `writers::patch_file` — renames for moves), and the hash of every settings file as
+/// read for it (None = absent).
 fn render_diff(ops: &[PlannedOp]) -> anyhow::Result<(String, HashMap<PathBuf, Option<String>>)> {
     let mut files: Vec<(PathBuf, Vec<(String, serde_json::Value)>)> = Vec::new();
     let mut moves = String::new();
@@ -673,7 +698,7 @@ fn render_diff(ops: &[PlannedOp]) -> anyhow::Result<(String, HashMap<PathBuf, Op
     let mut read = HashMap::new();
     for (file, sets) in &files {
         let current = writers::read_optional(file)?;
-        let new = writers::patch_json(current.as_deref(), sets)
+        let new = writers::patch_file(file, current.as_deref(), sets)
             .with_context(|| file.display().to_string())?;
         diff.push_str(&writers::unified_diff(file, current.as_deref(), Some(&new)));
         read.insert(file.clone(), current.as_deref().map(writers::hash_bytes));
@@ -690,13 +715,17 @@ fn warnings(target: &Target, picks: &[Pick], ops: &[PlannedOp]) -> Vec<String> {
             .as_deref()
             .map(|f| f.display().to_string())
             .unwrap_or_default();
+        let wider = match item_agent(pick.item) {
+            Some(Agent::Codex) => "codex has no local-only config file",
+            _ => "wider than local",
+        };
         match knob_scope(pick.knob) {
             Some(Scope::Project) => out.push(format!(
-                "{}: scope project, wider than local — {file} is shared with everyone using this repo",
+                "{}: scope project, {wider} — {file} is shared with everyone using this repo",
                 pick.item.id
             )),
             Some(Scope::User) => out.push(format!(
-                "{}: scope user, wider than local — {file} applies to every project",
+                "{}: scope user, {wider} — {file} applies to every project",
                 pick.item.id
             )),
             _ => {}
@@ -730,7 +759,33 @@ fn warnings(target: &Target, picks: &[Pick], ops: &[PlannedOp]) -> Vec<String> {
             claude_json.display()
         ));
     }
+    if picks
+        .iter()
+        .any(|p| item_agent(p.item) == Some(Agent::Codex))
+    {
+        out.extend(codex_config_warning(target, &files, || {
+            process_running("codex")
+        }));
+    }
     out
+}
+
+/// The warning for a plan whose `files` include Codex's user config (`$CODEX_HOME/config.toml`),
+/// which Codex rewrites itself (trust entries, hook trust state). The race exists only while a
+/// codex runs, so `codex_running` (asked only when that file is written) decides it.
+pub fn codex_config_warning(
+    target: &Target,
+    files: &[&Path],
+    codex_running: impl FnOnce() -> bool,
+) -> Option<String> {
+    let codex_config = crate::resolve::codex::codex_home(target).join("config.toml");
+    (files.iter().any(|f| *f == codex_config) && codex_running()).then(|| {
+        format!(
+            "{} is also written by Codex (trust entries, hook state) and a `codex` process is \
+             running now: apply with no codex running",
+            codex_config.display()
+        )
+    })
 }
 
 /// `git ls-files` lists `path` (a file or a directory with tracked files). False when git is
