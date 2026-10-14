@@ -533,10 +533,11 @@ fn run_step(
     })
 }
 
-/// Polls `try_wait` on `child` until it exits (its exit code) or `deadline` passes (`None`).
-/// `kill` runs on the timeout and when waiting fails — except with ECHILD: the child was reaped
-/// elsewhere, so its pid — the group id — may already name another process; neither is
-/// signalled then.
+/// Polls `try_wait` on `child` until it exits (its exit code; `None` when a signal ended it) or
+/// `deadline` passes (`None`). `kill` runs once on the timeout, and once when waiting fails —
+/// except with ECHILD: the child was reaped elsewhere, so its pid — the group id — may already
+/// name another process; neither is signalled then. A wait error, EINTR included, is returned,
+/// never retried.
 fn supervise<C>(
     child: &mut C,
     mut try_wait: impl FnMut(&mut C) -> std::io::Result<Option<std::process::ExitStatus>>,
@@ -1482,25 +1483,75 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_child_reaped_elsewhere_is_not_signalled() {
-        // `run_step`'s wait loop, with a fake child: `kills` counts the kill action's calls.
+    fn the_wait_loop_kills_once_on_timeout_or_a_wait_error_never_on_echild_or_an_exit() {
+        // `run_step`'s wait loop, with a fake child that counts its polls and the kill action's
+        // calls.
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        #[derive(Default)]
+        struct Child {
+            polls: u32,
+            kills: u32,
+        }
         let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let failing = |errno: i32| move |_: &mut u32| Err(std::io::Error::from_raw_os_error(errno));
-        let kill = |kills: &mut u32| *kills += 1;
+        let kill = |c: &mut Child| c.kills += 1;
+        let failing =
+            |errno: i32| move |_: &mut Child| Err(std::io::Error::from_raw_os_error(errno));
 
-        let mut kills = 0u32;
-        let err = supervise(&mut kills, failing(libc::ECHILD), kill, later).unwrap_err();
+        // Exited with a code: the code, no kill.
+        let mut c = Child::default();
+        let exit = supervise(
+            &mut c,
+            |_| Ok(Some(ExitStatus::from_raw(3 << 8))),
+            kill,
+            later,
+        );
+        assert_eq!((exit.unwrap(), c.kills), (Some(3), 0));
+
+        // Ended by a signal: no code, no kill.
+        let mut c = Child::default();
+        let signalled = ExitStatus::from_raw(libc::SIGTERM);
+        let exit = supervise(&mut c, |_| Ok(Some(signalled)), kill, later);
+        assert_eq!((exit.unwrap(), c.kills), (None, 0));
+
+        // Still running for a few polls, then exited: polled until then, its code, no kill.
+        let mut c = Child::default();
+        let exit = supervise(
+            &mut c,
+            |c| {
+                c.polls += 1;
+                Ok((c.polls == 3).then(|| ExitStatus::from_raw(0)))
+            },
+            kill,
+            later,
+        );
+        assert_eq!((exit.unwrap(), c.polls, c.kills), (Some(0), 3, 0));
+
+        // Reaped elsewhere (ECHILD): the error, no kill.
+        let mut c = Child::default();
+        let err = supervise(&mut c, failing(libc::ECHILD), kill, later).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::ECHILD));
-        assert_eq!(kills, 0, "a child reaped elsewhere is not signalled");
+        assert_eq!(c.kills, 0, "a child reaped elsewhere is not signalled");
 
-        let err = supervise(&mut kills, failing(libc::EINTR), kill, later).unwrap_err();
+        // Any other wait error, EINTR included, is not retried: one kill, then the error.
+        let mut c = Child::default();
+        let err = supervise(
+            &mut c,
+            |c| {
+                c.polls += 1;
+                Err(std::io::Error::from_raw_os_error(libc::EINTR))
+            },
+            kill,
+            later,
+        )
+        .unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EINTR));
-        assert_eq!(kills, 1, "any other wait failure kills the group");
+        assert_eq!((c.polls, c.kills), (1, 1), "polled once, killed once");
 
-        // Still running at the deadline: killed, no exit code.
-        let mut kills = 0u32;
-        let exit = supervise(&mut kills, |_| Ok(None), kill, std::time::Instant::now()).unwrap();
-        assert_eq!((exit, kills), (None, 1));
+        // Still running at the deadline: killed once, no exit code.
+        let mut c = Child::default();
+        let exit = supervise(&mut c, |_| Ok(None), kill, std::time::Instant::now());
+        assert_eq!((exit.unwrap(), c.kills), (None, 1));
     }
 
     #[test]
