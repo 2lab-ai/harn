@@ -4,7 +4,7 @@
 //! settings). Layering with the system and managed files is covered in `src/resolve/codex`.
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
-use harn::resolve::codex::{CATALOG_GATED, PROFILE_ENV};
+use harn::resolve::codex::{CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV};
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -710,6 +710,11 @@ fn base_instructions_and_context_window_come_from_models_cache() {
 #[test]
 fn a_snapshot_outside_the_contract_supplies_no_window_and_no_base_size() {
     let f = fx();
+    // One visible skill: the listing's budget is 2 % of the window (skills.rs `window_budget`).
+    write(
+        &f.codex.join("skills/alpha/SKILL.md"),
+        "---\nname: alpha\ndescription: Does alpha.\n---\nbody\n",
+    );
     let entry = json!({
         "slug": "m",
         "context_window": 1000,
@@ -746,12 +751,26 @@ fn a_snapshot_outside_the_contract_supplies_no_window_and_no_base_size() {
         let t = resolve(&ctarget(&f), None);
         let model = signal(&t, "model:");
         let base = row(&t, "/builtin/instructions");
+        let listing = row(&t, "codex/skill-listing/builtin/skills");
+        let listing_says = |needle: &str| listing.origin.why.iter().any(|w| w.contains(needle));
         match why {
             Some(why) => {
                 assert!(
                     model.contains(" · context window unknown · ") && model.contains(why),
                     "{model}"
                 );
+                // Downstream: no window, so the listing's budget is unknown.
+                assert!(
+                    t.warnings.iter().any(|w| w == CAP_STATE_UNKNOWN),
+                    "{why}: {:?}",
+                    t.warnings
+                );
+                assert!(
+                    listing_says("budget unknown (see the warnings"),
+                    "{:?}",
+                    listing.origin.why
+                );
+                assert_eq!(listing.signal, None, "{why}");
                 assert_eq!(base.cost.predicted, None, "{why}");
                 assert!(
                     base.origin.why.contains(
@@ -768,6 +787,23 @@ fn a_snapshot_outside_the_contract_supplies_no_window_and_no_base_size() {
                     "{model}"
                 );
                 assert_eq!(base.cost.predicted, Some(30));
+                // Downstream: 2 % of 1,000 = a 20-token budget.
+                assert!(!t.warnings.iter().any(|w| w == CAP_STATE_UNKNOWN));
+                assert!(
+                    listing_says(
+                        "budget 20 codex tokens: 2 % of the 1000-token context window (models_cache.json; render.rs:138-148)"
+                    ),
+                    "{:?}",
+                    listing.origin.why
+                );
+                // The `r0/…` form fits: `- alpha: Does alpha. (file: r0/alpha/SKILL.md)` + `\n`
+                // is ceil(47 / 4) = 12 codex tokens.
+                assert_eq!(listing.signal, None);
+                assert!(
+                    listing_says("within budget: 12 of 20 codex tokens"),
+                    "{:?}",
+                    listing.origin.why
+                );
             }
         }
 

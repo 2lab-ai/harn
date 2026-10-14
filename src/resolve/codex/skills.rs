@@ -31,8 +31,9 @@
 //! (render.rs:983-1061, `aliases.rs:13-50`, `host_aliases.rs:8-68`). `### How to use skills`
 //! follows only when the model's catalog entry sets `include_skills_usage_instructions`
 //! (`fragments.rs:18-36`; a `#[serde(default)] bool`, `protocol/src/openai_models.rs:432-433`, so
-//! missing is false; unknown while codex would not use `models_cache.json` as it is,
-//! [`super::Ctx::catalog_flag`]). SKILL.md bodies are not loaded (entries are `advertised`).
+//! missing is false; unknown while harn does not accept `models_cache.json` as its snapshot —
+//! the contract on `CacheUse` — [`super::Ctx::catalog_flag`]). SKILL.md bodies are not loaded
+//! (entries are `advertised`).
 //!
 //! Budget: `skills.max_context_tokens` capped at 10,000 when set, else 2 % of the context window
 //! (render.rs:126-152), counted in Codex's own tokens, `ceil(bytes / 4)` per line + `\n`
