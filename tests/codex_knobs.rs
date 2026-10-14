@@ -618,6 +618,9 @@ fn annotate_freed_fills_codex_rows() {
     let text = "be brief";
     f.user_config(false, &format!("developer_instructions = \"{text}\"\n"));
     let mut tree = f.resolve();
+    // The fixture's `[plugins."a@b"]` is not installed and it has no bundled skills: the resolver
+    // warns about both (C2); annotating adds nothing to that.
+    let resolved_warnings = tree.warnings.clone();
     plan::annotate_freed(&Codex, &f.target(), &mut tree).unwrap();
     let dev = row(&tree, "#/developer_instructions")
         .freed
@@ -630,7 +633,7 @@ fn annotate_freed_fills_codex_rows() {
         (0, true),
         "the block is `?`"
     );
-    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    assert_eq!(tree.warnings, resolved_warnings);
     // No knob at all: no freed.
     assert!(row(&tree, "codex/system-prompt/builtin/instructions")
         .freed

@@ -13,7 +13,10 @@
 //!    forms — come from the main checkout's matching `.codex` (`loader:1106-1116`,
 //!    `loader:1778-1800`).
 //!
-//! Plugin hooks are the plugin work unit's (C2).
+//! 3. each loaded plugin's hooks, after every layer (`discovery:189-197`, `:244-290`): found and
+//!    parsed by the plugin module (C2), keyed by `<plugin id>:<file relative to the plugin>` or
+//!    `<plugin id>:plugin.json#hooks[<i>]` ([`plugin_hook_key_source`]), never managed. Their rows
+//!    carry `origin.plugin`; everything else below applies to them unchanged.
 //!
 //! One row per handler: Codex keys trust state per handler,
 //! `<source_path>:<event_snake>:<group>:<handler>` (`hooks/src/lib.rs:94-123`), where the indices
@@ -121,8 +124,14 @@ pub(crate) struct Group {
 pub(crate) type Events = Vec<(usize, Vec<Group>)>;
 
 struct HookSource {
-    /// The key source and the file a row points at.
+    /// The file a row points at (and, outside plugins, the key source).
     path: PathBuf,
+    /// The state-key source: `path` as text, or [`plugin_hook_key_source`] for a plugin.
+    key_source: String,
+    /// The JSON pointer of the events map in `file` (`/hooks`, or inside a plugin manifest).
+    pointer: String,
+    /// `name@marketplace` for a plugin's hooks.
+    plugin: Option<String>,
     /// The file the handlers are written in (`path` unless a requirements `managed_dir` names
     /// the key source).
     file: PathBuf,
@@ -148,13 +157,32 @@ struct State {
     trusted_hash: Option<(String, String)>,
 }
 
-pub(crate) fn collect(ctx: &mut Ctx) -> Vec<Item> {
-    let (items, warnings) = rows(ctx);
+/// One plugin hooks source, found and parsed by the plugin module.
+pub(crate) struct PluginHooks {
+    /// `name@marketplace`.
+    pub plugin_id: String,
+    /// The hooks file, or the manifest for inline hooks.
+    pub file: PathBuf,
+    /// `hooks/hooks.json` (relative to the plugin root) or `plugin.json#hooks[<i>]`.
+    pub relative: String,
+    /// The JSON pointer of the events map in `file`.
+    pub pointer: String,
+    pub events: Events,
+}
+
+/// `plugin_hook_key_source` (`hooks/src/declarations.rs:35-37`, used at `discovery:279-282`).
+pub(crate) fn plugin_hook_key_source(plugin_id: &str, relative: &str) -> String {
+    format!("{plugin_id}:{relative}")
+}
+
+/// Every hook row: config layers and requirements, then `plugins` (loaded plugins' sources).
+pub(crate) fn collect(ctx: &mut Ctx, plugins: Vec<PluginHooks>) -> Vec<Item> {
+    let (items, warnings) = rows(ctx, plugins);
     ctx.warnings.extend(warnings);
     items
 }
 
-fn rows(ctx: &mut Ctx) -> (Vec<Item>, Vec<String>) {
+fn rows(ctx: &mut Ctx, plugins: Vec<PluginHooks>) -> (Vec<Item>, Vec<String>) {
     let requirements = read_requirements(ctx);
     let managed_only = match &requirements {
         Some((path, value)) => match value.get("allow_managed_hooks_only") {
@@ -197,7 +225,18 @@ fn rows(ctx: &mut Ctx) -> (Vec<Item>, Vec<String>) {
     if let Some(bad) = &features_bad {
         ctx.warnings.push(bad.clone());
     }
-    let sources = sources(ctx, requirements.as_ref());
+    let mut sources = sources(ctx, requirements.as_ref());
+    sources.extend(plugins.into_iter().map(|p| HookSource {
+        key_source: plugin_hook_key_source(&p.plugin_id, &p.relative),
+        pointer: p.pointer,
+        plugin: Some(p.plugin_id),
+        path: p.file.clone(),
+        file: p.file,
+        layer: Layer::Plugin,
+        managed: false,
+        required: false,
+        events: p.events,
+    }));
     let feature_knobs: Vec<Knob> = config_knobs(
         ctx,
         "/features/hooks",
@@ -243,7 +282,7 @@ fn rows(ctx: &mut Ctx) -> (Vec<Item>, Vec<String>) {
                     let Some(normalized) = normalized else {
                         continue;
                     };
-                    let key = hook_key(&source.path.display().to_string(), snake, g, h);
+                    let key = hook_key(&source.key_source, snake, g, h);
                     let hash = hook_hash(snake, matcher, &normalized);
                     let state = hook_state(ctx, &key);
                     let mut item = row(ctx, source, event, g, h, matcher, &key);
@@ -354,7 +393,7 @@ fn row(
     matcher: Option<&str>,
     key: &str,
 ) -> Item {
-    let pointer = format!("/hooks/{}/{g}/hooks/{h}", fs::esc(event));
+    let pointer = format!("{}/{}/{g}/hooks/{h}", source.pointer, fs::esc(event));
     let setting = format!("{}#{pointer}", source.file.display());
     let label = match matcher.filter(|m| !m.is_empty()) {
         Some(m) => format!("{event} hook [{m}] · {} {g}:{h}", ctx.display(&source.path)),
@@ -363,6 +402,7 @@ fn row(
     let mut item = new_item(Kind::Hook, source.layer, key, &label);
     item.origin.path = Some(source.file.clone());
     item.origin.setting = Some(setting.clone());
+    item.origin.plugin = source.plugin.clone();
     item.origin.why = vec![setting, format!("state key {key}")];
     item
 }
@@ -725,8 +765,12 @@ fn sources(ctx: &mut Ctx, requirements: Option<&(PathBuf, Value)>) -> Vec<HookSo
                         .and_then(Value::as_str)
                         .map(PathBuf::from)
                         .filter(|p| p.is_absolute());
+                    let path = managed_dir.unwrap_or_else(|| file.clone());
                     out.push(HookSource {
-                        path: managed_dir.unwrap_or_else(|| file.clone()),
+                        key_source: path.display().to_string(),
+                        pointer: "/hooks".to_string(),
+                        plugin: None,
+                        path,
                         file: file.clone(),
                         layer: Layer::Managed,
                         managed: true,
@@ -847,6 +891,9 @@ fn sources(ctx: &mut Ctx, requirements: Option<&(PathBuf, Value)>) -> Vec<HookSo
         }
         for (path, events) in [json_hooks, toml_hooks].into_iter().flatten() {
             out.push(HookSource {
+                key_source: path.display().to_string(),
+                pointer: "/hooks".to_string(),
+                plugin: None,
                 file: path.clone(),
                 path,
                 layer: layer_kind,

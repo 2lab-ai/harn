@@ -203,11 +203,13 @@ fn builtin_rows_are_present_with_their_knobs() {
             "permissions_instructions",
             "collaboration_mode",
             "apps_instructions",
+            "recommended_plugins",
             "multi_agent",
             "environment_context"
         ]
     );
-    assert_eq!(t.unknown_rows, 6);
+    // `<recommended_plugins>` is on by default (features.plugins) and its size is `?`.
+    assert_eq!(t.unknown_rows, 7);
     assert_eq!(t.predicted_known, 0);
 
     // Trusted: the target dir's `.codex/config.toml` is the narrower knob, listed first.
@@ -237,7 +239,7 @@ fn switched_off_blocks_leave_the_tree() {
     user_config(
         &f,
         None,
-        "include_permissions_instructions = false\ninclude_collaboration_mode_instructions = false\ninclude_apps_instructions = false\ninclude_environment_context = false\n[agents]\nenabled = false\n",
+        "include_permissions_instructions = false\ninclude_collaboration_mode_instructions = false\ninclude_apps_instructions = false\ninclude_environment_context = false\n[agents]\nenabled = false\n[features]\nplugins = false\n",
     );
     let t = resolve(&target(&f), None);
     for (name, _) in BLOCKS {
