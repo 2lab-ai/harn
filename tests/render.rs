@@ -6,7 +6,7 @@ use harn::model::{
     item_id, walk, Agent, Cost, Document, Freed, Item, Kind, Knob, Layer, Mode, Origin, RunContext,
     Scope, Tree, SCHEMA,
 };
-use harn::plan::{ActionPlan, PlanRequest, PlannedOp, PLAN_SCHEMA};
+use harn::plan::{ActionPlan, Leaving, PlanRequest, PlannedOp, PLAN_SCHEMA};
 use harn::render::{self, RenderOpts};
 use harn::verify::{RowVerdict, VerifyReport};
 use std::path::PathBuf;
@@ -826,6 +826,7 @@ fn plan_for(item: &Item, knob: Knob, known: u64, warnings: Vec<String>) -> Actio
             delta_unknown: true,
             is_estimate: false,
         },
+        leaving: Vec::new(),
         side_effects: vec!["8 skills leave the listing".to_string()],
         warnings,
         diff: String::new(),
@@ -1553,6 +1554,21 @@ fn plan_shows_ops_numbers_side_effects_warnings_then_the_diff() {
     );
     p.ops[0].reason = Some("unused in this repo".to_string());
     p.diff = "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n".to_string();
+    let leaving = |label: &str, kind: Kind, mode_before: Mode| Leaving {
+        id: format!("claude-code/{kind}/plugin/{label}"),
+        label: label.to_string(),
+        kind,
+        mode_before,
+    };
+    p.leaving = vec![
+        leaving("slack:block-kit", Kind::Skill, Mode::Advertised),
+        leaving("plugin:slack:slack", Kind::McpServer, Mode::Always),
+        leaving(
+            "Stop hook · 1 cmd · plugin slack",
+            Kind::Hook,
+            Mode::Runtime,
+        ),
+    ];
     let out = render::plan(&p, true);
     assert!(out.starts_with(&format!(
         "plan for {DIR} · claude-code\nops (1)\n  [1] {}",
@@ -1565,11 +1581,22 @@ fn plan_shows_ops_numbers_side_effects_warnings_then_the_diff() {
         out.contains("predicted  229,705 B → 152,169 B   freed 77.5 KB+Δ?"),
         "{out}"
     );
+    // What leaves, by the mode each had: always first, then advertised, then runtime.
+    assert!(
+        out.contains(
+            "leaves\n  always      plugin:slack:slack (mcp-server)\n  advertised  slack:block-kit \
+             (skill)\n  runtime     Stop hook · 1 cmd · plugin slack (hook)\nside effects\n"
+        ),
+        "{out}"
+    );
     assert!(
         out.contains("side effects\n  8 skills leave the listing"),
         "{out}"
     );
     assert!(out.contains("warnings\n  w1"), "{out}");
+    // Nothing leaves: one line says so.
+    p.leaving.clear();
+    assert!(render::plan(&p, true).contains("leaves: none\nside effects\n"));
     assert!(
         out.ends_with("diff\n--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y"),
         "{out}"

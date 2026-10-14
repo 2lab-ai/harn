@@ -2728,19 +2728,23 @@ pub fn off_card(
         .iter()
         .any(|op| matches!(&op.knob, Knob::Setting { pointer, .. } if pointer == ALL_HOOKS));
     let (gone, added) = leaving(plan, tree);
-    let shown = |i: &Item| {
+    let shown = |i: &crate::plan::Leaving| {
         if i.id == item.id {
             name.to_string()
         } else {
             human_label(tree, &i.label, i.kind, &places)
         }
     };
-    // At start (what the header counts), later (runs or is read later; the status line runs
-    // locally), already off (loaded nothing before the change: never counted).
-    let (start, rest): (Vec<&Item>, Vec<&Item>) = gone.iter().partition(|i| at_start(i));
-    let (off, later): (Vec<&Item>, Vec<&Item>) = rest.into_iter().partition(|i| already_off(i));
+    // By the mode each had before the change: at start (what the header counts), later (runs or
+    // is read later; the status line runs locally), already off (loaded nothing before the
+    // change: never counted).
+    type Gone<'p> = Vec<&'p crate::plan::Leaving>;
+    let (start, rest): (Gone, Gone) = gone.iter().partition(|i| at_start(i.mode_before));
+    let (off, later): (Gone, Gone) = rest
+        .into_iter()
+        .partition(|i| already_off(i.mode_before, i.kind));
     // `alpha, 2 skills, 1 MCP server`: the picked item by name, the rest counted by kind.
-    let summary = |items: &[&Item]| -> String {
+    let summary = |items: &[&crate::plan::Leaving]| -> String {
         let mut parts: Vec<String> = items
             .iter()
             .filter(|i| i.id == item.id)
@@ -2772,7 +2776,7 @@ pub fn off_card(
         leaves.push_str(&format!(" · {} already off", off.len()));
     }
     // `UserPromptSubmit (hook)`: the kind word once. The status line has no row to point at.
-    let line = |i: &Item| {
+    let line = |i: &crate::plan::Leaving| {
         let word = kind_word(i.kind);
         let n = shown(i);
         let n = n
@@ -2865,34 +2869,14 @@ pub(crate) fn start_count(before: usize, after: usize) -> String {
 }
 
 /// At start: mode always or advertised, as the header counts items.
-fn at_start(item: &Item) -> bool {
-    matches!(item.mode, Mode::Always | Mode::Advertised)
+fn at_start(mode: Mode) -> bool {
+    matches!(mode, Mode::Always | Mode::Advertised)
 }
 
 /// Loaded nothing before the change (mode none), the status line aside: it runs locally and
 /// stops with the hooks.
-fn already_off(item: &Item) -> bool {
-    item.mode == Mode::None && item.kind != Kind::StatusLine
-}
-
-/// Whether an item of `kind` (labelled `label`) that a change makes appear would load at start,
-/// by its kind: it is not in the tree yet, so its mode is not known (the follow-up list of what
-/// leaves and appears on `ActionPlan` would carry it). A hook loads at start when its event
-/// prints into the request, an MCP server unless tool search defers it.
-fn appears_at_start(kind: Kind, label: &str, tree: &Tree) -> bool {
-    match kind {
-        Kind::Hook => [
-            "SessionStart",
-            "UserPromptSubmit",
-            "UserPromptExpansion",
-            "PostModelSwitch",
-        ]
-        .iter()
-        .any(|event| label.starts_with(&format!("{event} hook"))),
-        Kind::McpServer | Kind::McpTool => tree.tool_search != Some(true),
-        Kind::PermissionRule | Kind::StatusLine | Kind::Unresolved => false,
-        _ => true,
-    }
+fn already_off(mode: Mode, kind: Kind) -> bool {
+    mode == Mode::None && kind != Kind::StatusLine
 }
 
 /// `item` and everything under it.
@@ -2904,36 +2888,27 @@ fn subtree(item: &Item) -> Vec<&Item> {
     out
 }
 
-/// What `plan` stops loading, in the tree as it is now: the picked items with
-/// what is under them first, then each side effect's item with what is under it, by kind
-/// (skills, commands, agents, MCP servers, hooks, the rest); and what appears, worded. The
-/// plan's side effects name every other item that leaves; whether a picked item leaves too is
-/// read from the plan's count after it — a denied agent stays in the roster, and then neither
-/// it nor what is under it is listed.
-fn leaving<'t>(plan: &ActionPlan, tree: &'t Tree) -> (Vec<&'t Item>, Vec<String>) {
+/// What `plan` stops loading, as the plan lists it (each item with its mode before the
+/// change): the picked items with what is under them first, then the rest by kind (skills,
+/// commands, agents, MCP servers, hooks, the rest); and what appears, worded. A picked item
+/// that stays (a denied agent stays in the roster) is not on the plan's list, nor is anything
+/// that was switched off already.
+fn leaving<'p>(plan: &'p ActionPlan, tree: &Tree) -> (Vec<&'p crate::plan::Leaving>, Vec<String>) {
     let places = Places::of(tree);
-    let mut side: Vec<&'t Item> = Vec::new();
-    let mut added: Vec<String> = Vec::new();
-    let mut appeared_start = 0;
-    let mut used: HashSet<&str> = HashSet::new();
-    for effect in &plan.side_effects {
-        let Some((label, kind, leaves)) = parse_effect(effect) else {
-            continue;
-        };
-        if !leaves {
+    let added = plan
+        .side_effects
+        .iter()
+        .filter_map(|effect| parse_effect(effect))
+        .filter(|(_, _, leaves)| !leaves)
+        .map(|(label, kind, _)| {
             let shown = human_label(tree, &label, kind, &places);
-            added.push(format!("{shown} ({})", kind_word(kind)));
-            appeared_start += usize::from(appears_at_start(kind, &label, tree));
-            continue;
-        }
-        let found = model::walk(tree)
-            .find(|i| i.label == label && i.kind == kind && !used.contains(i.id.as_str()));
-        if let Some(found) = found {
-            for i in subtree(found) {
-                if used.insert(i.id.as_str()) {
-                    side.push(i);
-                }
-            }
+            format!("{shown} ({})", kind_word(kind))
+        })
+        .collect();
+    let mut picked: HashSet<&str> = HashSet::new();
+    for op in &plan.ops {
+        if let Some(item) = model::walk(tree).find(|i| i.id == op.item_id) {
+            picked.extend(subtree(item).into_iter().map(|i| i.id.as_str()));
         }
     }
     let order = |k: Kind| match k {
@@ -2944,33 +2919,13 @@ fn leaving<'t>(plan: &ActionPlan, tree: &'t Tree) -> (Vec<&'t Item>, Vec<String>
         Kind::Hook => 4,
         _ => 5,
     };
-    side.sort_by_key(|i| order(i.kind));
-    let mut own: Vec<&'t Item> = Vec::new();
-    for op in &plan.ops {
-        if let Some(picked) = model::walk(tree).find(|i| i.id == op.item_id) {
-            for i in subtree(picked) {
-                if used.insert(i.id.as_str()) {
-                    own.push(i);
-                }
-            }
-        }
-    }
-    // The picked items stay where they are (a denied agent stays in the roster) when the count
-    // after is the count before less what the side effects take, plus what appears at start
-    // (by its kind: see `appears_at_start`). An inference from `items_after`: a structured list
-    // of what leaves and appears (ids and modes, picked items included) on `ActionPlan` would
-    // make it exact — a follow-up.
-    let before = model::walk(tree).filter(|i| at_start(i)).count();
-    let side_start = side.iter().filter(|i| at_start(i)).count();
-    let own_start = own.iter().filter(|i| at_start(i)).count();
-    let stays = plan.items_after > 0
-        && own_start > 0
-        && before + appeared_start == plan.items_after + side_start;
-    if stays {
-        own.clear();
-    }
-    own.extend(side);
-    (own, added)
+    let (mut gone, mut side): (Vec<_>, Vec<_>) = plan
+        .leaving
+        .iter()
+        .partition(|l| picked.contains(l.id.as_str()));
+    side.sort_by_key(|l| order(l.kind));
+    gone.extend(side);
+    (gone, added)
 }
 
 /// `label (kind) leaves[ with N children]` / `label (kind) appears` → (label, kind, leaves).
@@ -3661,9 +3616,9 @@ mod tests {
         }
     }
 
-    /// A plan turning `picked` off through its first knob, with these side effects and this
-    /// count at start after it.
-    fn plan_off(picked: &Item, side_effects: &[&str], items_after: usize) -> ActionPlan {
+    /// A plan turning `picked` off through its first knob, under which `leaving` leave (each
+    /// with its mode as it is now), with these side effects.
+    fn plan_off(picked: &Item, leaving: &[&Item], side_effects: &[&str]) -> ActionPlan {
         ActionPlan {
             target_dir: PathBuf::from("/home/me/2lab.ai/zbrain"),
             agent: Agent::ClaudeCode,
@@ -3677,38 +3632,44 @@ mod tests {
             }],
             predicted_before: 0,
             predicted_after: 0,
-            items_after,
+            items_after: 0,
             freed: crate::model::Freed {
                 known: 0,
                 delta_unknown: false,
                 is_estimate: false,
             },
+            leaving: leaving
+                .iter()
+                .map(|i| crate::plan::Leaving {
+                    id: i.id.clone(),
+                    label: i.label.clone(),
+                    kind: i.kind,
+                    mode_before: i.mode,
+                })
+                .collect(),
             side_effects: side_effects.iter().map(|e| e.to_string()).collect(),
             warnings: Vec::new(),
             diff: String::new(),
         }
     }
 
-    fn count_at_start(tree: &Tree) -> usize {
-        model::walk(tree).filter(|i| at_start(i)).count()
-    }
-
     #[test]
     fn what_was_already_off_is_its_own_group_and_never_counted() {
         let mut tree = synthetic();
-        let mut hook = item(
-            "slack-stop",
-            "Stop hook · 1 cmd · plugin slack",
-            Kind::Hook,
+        // A server of slack's that the settings disable: mode none, no `off:` signal; it goes
+        // with its plugin.
+        let mut server = item(
+            "plugin:slack:extra",
+            "plugin:slack:extra",
+            Kind::McpServer,
             Some(SLACK),
             Layer::Plugin,
             None,
         );
-        hook.mode = Mode::None;
-        hook.signal = Some(OFF_ALL_HOOKS.to_string());
-        tree.items[0].children.push(hook);
+        server.mode = Mode::None;
+        tree.items[0].children.push(server);
         let picked = tree.items[0].clone();
-        let plan = plan_off(&picked, &[], count_at_start(&tree) - 1);
+        let plan = plan_off(&picked, &[&picked, &picked.children[0]], &[]);
         let card = off_card(&plan, &tree, &picked, "slack", "→", None);
         assert_eq!(card.leaves, "1 at start (slack) · 1 already off");
         assert_eq!(
@@ -3717,7 +3678,7 @@ mod tests {
                 "at start (1)",
                 "  slack (plugin)",
                 "already off (1)",
-                "  Stop (hook)"
+                "  extra (MCP server)"
             ]
         );
     }
@@ -3727,9 +3688,8 @@ mod tests {
         let tree = synthetic();
         let picked = tree.items[4].children[2].clone();
         assert_eq!(picked.label, "mine");
-        // `mine` goes, a skill of the same count appears: the count at start does not move.
-        let before = count_at_start(&tree);
-        let plan = plan_off(&picked, &["mine-too (skill) appears"], before);
+        // `mine` goes, a skill appears.
+        let plan = plan_off(&picked, &[&picked], &["mine-too (skill) appears"]);
         let card = off_card(&plan, &tree, &picked, "mine", "→", None);
         assert_eq!(card.leaves, "1 at start (mine)");
         assert_eq!(
@@ -3741,10 +3701,24 @@ mod tests {
                 "  mine-too (skill)"
             ]
         );
-        // With nothing appearing and the count unmoved, the picked item stays (a denied agent).
-        let plan = plan_off(&picked, &[], before);
+        // Not on the plan's list of what leaves: the picked item stays (a denied agent).
+        let plan = plan_off(&picked, &[], &[]);
         let card = off_card(&plan, &tree, &picked, "mine", "→", None);
         assert_eq!(card.leaves, "nothing that loads");
+    }
+
+    #[test]
+    fn a_picked_item_that_stays_is_not_listed_when_a_disabled_server_appears() {
+        // Tool search off: an MCP server loads at start, unless it is disabled (mode none).
+        let mut tree = synthetic();
+        tree.tool_search = Some(false);
+        let picked = tree.items[4].children[2].clone();
+        assert_eq!(picked.label, "mine");
+        // `mine` stays (nothing leaves); a disabled server appears and loads nothing.
+        let plan = plan_off(&picked, &[], &["plugin:other:srv (mcp-server) appears"]);
+        let card = off_card(&plan, &tree, &picked, "mine", "→", None);
+        assert_eq!(card.leaves, "nothing that loads");
+        assert_eq!(card.leave_list, ["appears (1)", "  srv (MCP server)"]);
     }
 
     #[test]

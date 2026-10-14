@@ -551,6 +551,88 @@ fn items_after_is_the_count_at_start_once_the_plan_is_applied() {
     assert_eq!(plan.items_after, 76);
 }
 
+#[test]
+fn leaving_is_the_plugin_and_every_row_it_brings_each_with_its_mode() {
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+    let alpha = find(&tree, Kind::Plugin, "alpha@market-one").id.clone();
+    // The 6 rows `items_after_is_the_count_at_start_once_the_plan_is_applied` counts by hand:
+    // the plugin row, its 2 skills' listing entries, its server and that server's
+    // instructions, its UserPromptSubmit hook; in walk order, each with its mode now.
+    let rows: Vec<(String, Kind, Mode)> = model::walk(&tree)
+        .filter(|i| i.id == alpha || i.origin.plugin.as_deref() == Some("alpha@market-one"))
+        .map(|i| (i.id.clone(), i.kind, i.mode))
+        .collect();
+    assert_eq!(rows.len(), 6, "{rows:?}");
+    assert_eq!(rows.iter().filter(|(_, k, _)| *k == Kind::Skill).count(), 2);
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &alpha, None).unwrap();
+    let leaving: Vec<(String, Kind, Mode)> = plan
+        .leaving
+        .iter()
+        .map(|l| (l.id.clone(), l.kind, l.mode_before))
+        .collect();
+    assert_eq!(leaving, rows);
+    // The plugin row is the planned item: on the list, not among the side effects.
+    assert!(leaving.iter().any(|(id, ..)| *id == alpha));
+    assert!(
+        !plan.side_effects.iter().any(|e| e.contains("(plugin)")),
+        "{:#?}",
+        plan.side_effects
+    );
+}
+
+#[test]
+fn a_server_its_switch_disables_leaves_though_the_tree_keeps_it() {
+    // `disabledMcpjsonServers`: the server stays listed (mode none, the reason in its origin, no
+    // `off:` signal) and stops loading; its instructions go from the tree.
+    let f = fixture();
+    let t = target(&f);
+    let tree = resolve(&f, None);
+    let server = of_kind(&tree, Kind::McpServer)
+        .into_iter()
+        .find(|s| s.label == "project-server")
+        .unwrap();
+    assert!(matches!(server.mode, Mode::Always | Mode::Deferred));
+    let plan = plan::build_plan(&ClaudeCode, &t, &tree, &server.id, None).unwrap();
+    let after = resolve(
+        &f,
+        Some(&Overlay {
+            ops: vec![match &plan.ops[0].knob {
+                Knob::Setting {
+                    file,
+                    pointer,
+                    value,
+                    ..
+                } => OverlayOp::SetJson {
+                    file: file.clone(),
+                    pointer: pointer.clone(),
+                    value: value.clone(),
+                },
+                other => panic!("{other:?}"),
+            }],
+        }),
+    );
+    let kept = model::walk(&after).find(|i| i.id == server.id).unwrap();
+    assert_eq!((kept.mode, kept.signal.as_deref()), (Mode::None, None));
+    let leaving: Vec<(&str, Mode)> = plan
+        .leaving
+        .iter()
+        .map(|l| (l.id.as_str(), l.mode_before))
+        .collect();
+    assert!(
+        leaving.contains(&(server.id.as_str(), server.mode)),
+        "{leaving:?}"
+    );
+    // What leaves at start is what the count after loses.
+    let at_start_leaving = plan
+        .leaving
+        .iter()
+        .filter(|l| matches!(l.mode_before, Mode::Always | Mode::Advertised))
+        .count();
+    assert_eq!(plan.items_after, at_start(&tree) - at_start_leaving);
+}
+
 /// The fixture with a value of every link-writing setting: every hook off, a memory dir whose
 /// name has a space and parentheses (`~/memory (old)`), an output style and an advisor model
 /// with them too. Returns that memory dir.
