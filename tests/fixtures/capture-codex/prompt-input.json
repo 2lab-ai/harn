@@ -1,0 +1,58 @@
+[
+  {
+    "type": "message",
+    "id": "msg_dev",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "Answer briefly."
+      },
+      {
+        "type": "input_text",
+        "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used.\n### Skill roots\n- `r0` = `@HOME@/.codex/skills`\n- `r1` = `@HOME@/.codex/plugins/cache/demo-mkt/demo-plugin/local/skills`\n### Available skills\n- alpha: The alpha skill. (file: r0/alpha/SKILL.md)\n- demo-plugin:beta: The beta skill. (file: r1/beta/SKILL.md)\n### How to use skills\n- Discovery: The list above is the skills available in this session.\n</skills_instructions>"
+      },
+      {
+        "type": "input_text",
+        "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written.\n</permissions instructions>"
+      },
+      {
+        "type": "input_text",
+        "text": "<plugins_instructions>\n## Plugins\nA plugin is a local bundle of skills, MCP servers, and apps.\n</plugins_instructions>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "auto-compact-0",
+      "create_time": 1791950000.0,
+      "content_item_kinds": [
+        "generic.developer_instructions",
+        "host_skills.instructions",
+        "permissions.instructions",
+        "plugins.usage_instructions"
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "msg_user",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "# AGENTS.md instructions for @REPO@/sub\n\n<INSTRUCTIONS>\nGlobal rules.\n\n--- project-doc ---\n\nRoot rules.\n\n\nSub rules.\n\n</INSTRUCTIONS>"
+      },
+      {
+        "type": "input_text",
+        "text": "<environment_context>\n  <cwd>@REPO@/sub</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-14</current_date>\n  <timezone>UTC</timezone>\n</environment_context>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "auto-compact-0",
+      "create_time": 1791950000.0,
+      "content_item_kinds": [
+        "agents_md.instructions",
+        "environments.environment_context"
+      ]
+    }
+  }
+]

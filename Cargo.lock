@@ -587,6 +587,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dirs",
+ "libc",
  "ratatui",
  "regex",
  "semver",

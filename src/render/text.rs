@@ -14,17 +14,23 @@ const GROUPS: [&str; 4] = [
     "content-mismatch",
 ];
 
+/// Rows the oracle cannot show (Codex); printed only when there are some.
+const NOT_CHECKABLE: &str = "not-checkable";
+
 fn group(verdict: &RowVerdict) -> &'static str {
     match verdict {
         RowVerdict::Seen => GROUPS[0],
         RowVerdict::PredictedNotSeen => GROUPS[1],
         RowVerdict::SeenNotPredicted => GROUPS[2],
         RowVerdict::ContentMismatch { .. } => GROUPS[3],
+        RowVerdict::NotCheckable { .. } => NOT_CHECKABLE,
     }
 }
 
 /// The context line, then rows grouped by verdict (`seen`, `predicted-not-seen`,
-/// `seen-not-predicted`, `content-mismatch` with both numbers), then `passed` and `promoted`.
+/// `seen-not-predicted`, `content-mismatch` with both numbers, then `not-checkable` with its
+/// reason when there are such rows), the report's notes when it has any, then `passed` and
+/// `promoted`.
 pub fn verify_report(report: &VerifyReport) -> String {
     let g = &UNICODE;
     let mut out = vec![format!("verify {}", context_line(&report.context))];
@@ -44,11 +50,29 @@ pub fn verify_report(report: &VerifyReport) -> String {
                     "  {id}   predicted {} {} observed {}",
                     exact(*predicted),
                     g.dot,
-                    exact(*observed)
+                    observed.map_or("?".to_string(), exact)
                 )),
                 _ => out.push(format!("  {id}")),
             }
         }
+    }
+    let unchecked: Vec<(&String, &String)> = report
+        .rows
+        .iter()
+        .filter_map(|(id, v)| match v {
+            RowVerdict::NotCheckable { reason } => Some((id, reason)),
+            _ => None,
+        })
+        .collect();
+    if !unchecked.is_empty() {
+        out.push(format!("{NOT_CHECKABLE} ({})", unchecked.len()));
+        for (id, reason) in unchecked {
+            out.push(format!("  {id}   {reason}"));
+        }
+    }
+    if !report.notes.is_empty() {
+        out.push("notes".to_string());
+        out.extend(report.notes.iter().map(|n| format!("  {n}")));
     }
     out.push(format!(
         "passed: {}",

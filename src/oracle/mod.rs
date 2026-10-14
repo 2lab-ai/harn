@@ -1,8 +1,11 @@
 //! The agents' own ground truth (WU-D): a headless run under the official capture, or a capture
-//! read from disk, turned into a [`Capture`] bound to its [`RunContext`].
+//! read from disk, turned into a [`Capture`] bound to its [`RunContext`]. Codex (P0.5 C5) has no
+//! request capture without a model call; its oracle ([`codex`]) reads codex's own inspection
+//! commands into a [`codex::CodexCapture`].
 
 pub mod capture;
 pub mod claude;
+pub mod codex;
 
 pub use capture::{read_capture, read_llmux_record, read_otel_dir};
 pub use claude::{

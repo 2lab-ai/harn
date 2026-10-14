@@ -1,0 +1,5 @@
+{
+  "models": [
+    {"slug": "demo-model", "context_window": 272000, "base_instructions": "You are a demo model.", "supports_search_tool": false}
+  ]
+}

@@ -174,10 +174,12 @@ struct VerifyArgs {
 #[derive(Args, Debug)]
 #[group(required = true, multiple = false)]
 struct VerifySource {
-    /// Read an existing capture (OTEL raw-body dir or llmux raw-io.jsonl); never writes
+    /// Read an existing capture (OTEL raw-body dir, llmux raw-io.jsonl, or a Codex capture dir
+    /// written by `--run --agent codex`); never writes
     #[arg(long, value_name = "PATH")]
     capture: Option<PathBuf>,
-    /// Run the agent once under its official capture (runs hooks and MCP servers)
+    /// Run the agent once under its official capture (runs hooks and MCP servers; Codex: its
+    /// inspection commands, which start MCP servers)
     #[arg(long)]
     run: bool,
 }
@@ -572,8 +574,24 @@ fn opens_tui(cli: &Cli, stdin_tty: bool, stdout_tty: bool) -> bool {
 /// The report, then the verified tree's header (`--table`: the whole table, freed annotated) so
 /// the observed totals and their region split are visible; `--json` prints the report only.
 fn verify_cmd(cli: &Cli, args: &VerifyArgs, opts: &RenderOpts) -> Result<ExitCode> {
-    if cli.agent == Some(AgentArg::Codex) {
-        bail!("not implemented: codex verify (P0.5)");
+    // A Codex capture dir is recognised by its manifest, so `--capture` needs no `--agent`.
+    let codex_capture = args
+        .source
+        .capture
+        .as_deref()
+        .is_some_and(oracle::codex::is_capture_dir);
+    match (cli.agent, codex_capture) {
+        (Some(AgentArg::Codex), _) | (None, true) => return verify_codex_cmd(cli, args, opts),
+        (Some(AgentArg::ClaudeCode), true) => bail!(
+            "{} is a Codex capture ({}); pass --agent codex",
+            args.source
+                .capture
+                .as_deref()
+                .unwrap_or(Path::new(""))
+                .display(),
+            oracle::codex::MANIFEST
+        ),
+        _ => {}
     }
     let target = target(cli, None)?;
     let resolver = resolve::for_agent(Agent::ClaudeCode);
@@ -601,6 +619,61 @@ fn verify_cmd(cli: &Cli, args: &VerifyArgs, opts: &RenderOpts) -> Result<ExitCod
         println!();
         if args.table {
             plan::annotate_freed(resolver.as_ref(), &target, &mut tree).context("claude-code")?;
+            println!("{}", render::table(&tree, opts));
+        } else {
+            println!("{}", render::header(&tree, opts));
+        }
+    }
+    Ok(if report.passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_DIFF)
+    })
+}
+
+/// `harn verify --agent codex`: codex's inspection commands (or a capture dir of them) against
+/// the Codex tree (`verify::verify_codex`).
+fn verify_codex_cmd(cli: &Cli, args: &VerifyArgs, opts: &RenderOpts) -> Result<ExitCode> {
+    let target = target(cli, None)?;
+    let resolver = resolve::for_agent(Agent::Codex);
+    let mut tree = resolver.resolve(&target, None).context("codex")?;
+    let capture = match (&args.source.capture, args.source.run) {
+        (Some(path), _) => oracle::codex::read_capture_dir(path, &target)?,
+        (None, _) => {
+            let codex = find_on_path("codex").ok_or_else(|| anyhow!("`codex` is not on PATH"))?;
+            let steps: Vec<String> = oracle::codex::planned_steps(&target)
+                .into_iter()
+                .map(|(args, _)| format!("  {} {}", codex.display(), args.join(" ")))
+                .collect();
+            eprintln!(
+                "harn verify --run: running {} in {} (no model request):\n{}\n\
+                 `debug prompt-input` starts your configured MCP servers and may write into \
+                 CODEX_HOME ({}); the outputs are kept in a new directory under {}",
+                codex.display(),
+                target.dir.display(),
+                steps.join("\n"),
+                resolve::codex::codex_home(&target).display(),
+                std::env::temp_dir().display()
+            );
+            oracle::codex::run_codex(&target, &codex)?
+        }
+    };
+    if let Some(dir) = &capture.dir {
+        eprintln!(
+            "capture: {} (re-check offline: harn verify --agent codex --capture {} --dir {})",
+            dir.display(),
+            dir.display(),
+            target.dir.display()
+        );
+    }
+    let report = verify::verify_codex(&mut tree, &capture);
+    if cli.json {
+        print_json(&report)?;
+    } else {
+        println!("{}", render::verify_report(&report));
+        println!();
+        if args.table {
+            plan::annotate_freed(resolver.as_ref(), &target, &mut tree).context("codex")?;
             println!("{}", render::table(&tree, opts));
         } else {
             println!("{}", render::header(&tree, opts));
