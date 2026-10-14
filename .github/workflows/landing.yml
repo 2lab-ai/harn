@@ -1,8 +1,8 @@
 name: Landing
 
 # docs/landing is published as-is (no build command) by the Cloudflare Pages Git integration,
-# project `harn`, which builds on push and watches docs/landing only. Production today:
-# https://harn-43g.pages.dev (until the domain is attached). This workflow only checks the
+# project `harn-landing`, which builds on push to main and watches docs/landing only. Production today:
+# https://harn-landing.pages.dev (until the domain is attached). This workflow only checks the
 # directory, so a broken page fails here instead of shipping.
 
 on:
