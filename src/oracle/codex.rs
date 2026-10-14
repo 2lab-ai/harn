@@ -38,10 +38,10 @@
 //! kind not in [`BLOCKS`]) the block's opening marker decides; an unmarked first part of the
 //! first developer message is `developer_instructions` (`core/src/session/mod.rs:4321-4328`).
 //! Anything else is kept under its kind (or position) so `verify` can report it. Both fail
-//! closed, with a capture warning: a message whose kinds are not one per content item is named
-//! as if it had none (paired by index, a kind would name another item), and a part whose kind
-//! names one block while its text opens with another block's marker is named by neither — it is
-//! kept as an unknown block that shows both. A region is one
+//! closed, with a capture warning: a message whose kinds are not a list with one per content
+//! item is named as if it had none (paired by index, a kind would name another item), and a
+//! part whose kind names one block while its text opens with another block's marker is named by
+//! neither — it is kept as an unknown block that shows both. A region is one
 //! block: `input[<i>] <role> · <block>`, its bytes the UTF-8 length of the text; the regions
 //! partition the text of the input list, not a wire body (instructions and tools are absent).
 
@@ -49,7 +49,7 @@ use super::Region;
 use crate::model::{
     item_id, now_iso8601, Agent, Cost, Item, Kind, Layer, Mode, Origin, RunContext, Target, Tree,
 };
-use crate::resolve::codex::{codex_home, PROFILE_ENV};
+use crate::resolve::codex::{codex_home, json_type, PROFILE_ENV};
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -897,10 +897,11 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<(Vec<Block>, Vec<String>
         if role == "developer" && first_developer.is_none() {
             first_developer = Some(i);
         }
-        let kinds: Option<Vec<Option<&str>>> = item["internal_chat_message_metadata_passthrough"]
-            ["content_item_kinds"]
-            .as_array()
-            .map(|a| a.iter().map(Value::as_str).collect());
+        // `null` is no kinds, like a missing key.
+        let kinds = item
+            .get("internal_chat_message_metadata_passthrough")
+            .and_then(|m| m.get("content_item_kinds"))
+            .filter(|v| !v.is_null());
         let Some(content) = item["content"].as_array() else {
             // Not the `ResponseItem::Message` shape (`content` is a list): kept, so verify
             // reports it rather than losing it.
@@ -915,9 +916,18 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<(Vec<Block>, Vec<String>
             });
             continue;
         };
-        // Kinds pair with content items by index only when there is one per item.
-        let kinds = match kinds {
-            Some(kinds) if kinds.len() != content.len() => {
+        // Kinds pair with content items by index only when they are a list, one per item.
+        let kinds: Vec<Option<&str>> = match kinds.map(|v| v.as_array().ok_or(v)) {
+            None => Vec::new(),
+            Some(Err(other)) => {
+                let article = if other.is_object() { "an" } else { "a" };
+                warnings.push(format!(
+                    "input[{i}]: content_item_kinds is {article} {}, not an array; its blocks are named by their markers, not their kinds",
+                    json_type(other)
+                ));
+                Vec::new()
+            }
+            Some(Ok(kinds)) if kinds.len() != content.len() => {
                 warnings.push(format!(
                     "input[{i}] has {} content items but {} content_item_kinds; its blocks are named by their markers, not their kinds",
                     content.len(),
@@ -925,7 +935,7 @@ pub fn parse_prompt_input(text: &str) -> anyhow::Result<(Vec<Block>, Vec<String>
                 ));
                 Vec::new()
             }
-            kinds => kinds.unwrap_or_default(),
+            Some(Ok(kinds)) => kinds.iter().map(Value::as_str).collect(),
         };
         for (j, part) in content.iter().enumerate() {
             let content_kind = kinds.get(j).copied().flatten();
@@ -1407,6 +1417,47 @@ mod tests {
         assert_eq!(
             warnings,
             vec!["input[0] has 2 content items but 3 content_item_kinds; its blocks are named by their markers, not their kinds"]
+        );
+    }
+
+    #[test]
+    fn kinds_that_are_not_a_list_are_set_aside_with_a_warning() {
+        let plugins = "<plugins_instructions>\ny\n</plugins_instructions>";
+        let with_kinds = |kinds: Value| {
+            let mut m = msg("developer", &[("be brief", None), (plugins, None)], true);
+            m["internal_chat_message_metadata_passthrough"]["content_item_kinds"] = kinds;
+            m
+        };
+        let input = json!([
+            with_kinds(json!("permissions.instructions")),
+            with_kinds(json!({"1": "permissions.instructions"})),
+            with_kinds(Value::Null),
+        ]);
+        let (blocks, warnings) = parse_prompt_input(&input.to_string()).unwrap();
+        let names: Vec<(&str, bool, Option<&str>)> = blocks
+            .iter()
+            .map(|b| (b.name.as_str(), b.known, b.content_kind.as_deref()))
+            .collect();
+        // By marker; the unmarked first part is developer_instructions in the first developer
+        // message only.
+        assert_eq!(
+            names,
+            vec![
+                ("developer_instructions", true, None),
+                ("plugins_instructions", true, None),
+                ("input[1].part[0]", false, None),
+                ("plugins_instructions", true, None),
+                ("input[2].part[0]", false, None),
+                ("plugins_instructions", true, None),
+            ]
+        );
+        // `null` is no kinds, like a missing key: no warning.
+        assert_eq!(
+            warnings,
+            vec![
+                "input[0]: content_item_kinds is a string, not an array; its blocks are named by their markers, not their kinds",
+                "input[1]: content_item_kinds is an object, not an array; its blocks are named by their markers, not their kinds",
+            ]
         );
     }
 
