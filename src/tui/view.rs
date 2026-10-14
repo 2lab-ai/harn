@@ -271,9 +271,13 @@ impl App {
         }
     }
 
-    /// Size of a list line (a group's or a row's).
+    /// Size of a list line (a group's or a row's; a line standing for entries listed
+    /// elsewhere has none).
     fn line_bytes(&self, line: &ListLine) -> Option<u64> {
         let screen = &self.tab().screen;
+        if line.listed.is_some() {
+            return None;
+        }
         match screen.line_row(line) {
             Some(row) => row.bytes,
             None => screen.groups[line.group].bytes,
@@ -316,6 +320,18 @@ impl App {
         for (i, line) in tab.lines.iter().enumerate().skip(offset).take(height) {
             let screen = &tab.screen;
             let group = &screen.groups[line.group];
+            // Entries listed elsewhere: where they are, in grey, in a leaf's name column; no
+            // marker, no size.
+            if let Some(listed) = &line.listed {
+                let text = format!(" {}  {}", " ".repeat(2 * line.depth), self.t(&listed.text));
+                let text = pad_right(&cut_right(&text, width, self.g()), width);
+                let mut style = self.grey();
+                if i == tab.cursor {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                out.push(Line::styled(text, style));
+                continue;
+            }
             let row = screen.line_row(line);
             let has_children = match row {
                 Some(r) => !r.children.is_empty(),
@@ -521,6 +537,9 @@ impl App {
     fn cursor_detail(&self) -> Option<&Detail> {
         let line = self.cursor_line()?;
         let screen = &self.tab().screen;
+        if let Some(listed) = &line.listed {
+            return Some(&listed.detail);
+        }
         Some(match screen.line_row(line) {
             Some(row) => &row.detail,
             None => &screen.groups[line.group].detail,
@@ -699,6 +718,8 @@ impl App {
                                 })
                             })
                     }
+                    // Entries listed elsewhere: d acts on them there.
+                    None if line.as_ref().is_some_and(|l| l.listed.is_some()) => false,
                     // The Built-in group has no switch of its own.
                     None => group.is_some_and(|g| {
                         g.can_turn_off && g.kind != super::model::GroupKind::Builtin

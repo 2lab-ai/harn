@@ -257,18 +257,13 @@ impl App {
         &self.tab().screen
     }
 
-    /// `(depth, name)` of every line the list shows, in order; a group is depth 0.
+    /// `(depth, name)` of every line the list shows, in order; a group is depth 0, a line that
+    /// stands for entries listed elsewhere is its text.
     pub fn rows(&self) -> Vec<(usize, String)> {
         let tab = self.tab();
         tab.lines
             .iter()
-            .map(|line| {
-                let name = match tab.screen.line_row(line) {
-                    Some(row) => row.name.clone(),
-                    None => tab.screen.groups[line.group].name.clone(),
-                };
-                (line.depth, name)
-            })
+            .map(|line| (line.depth, line_name(&tab.screen, line)))
             .collect()
     }
 
@@ -291,10 +286,7 @@ impl App {
     pub fn cursor_name(&self) -> Option<String> {
         let tab = self.tab();
         let line = tab.lines.get(tab.cursor)?;
-        Some(match tab.screen.line_row(line) {
-            Some(row) => row.name.clone(),
-            None => tab.screen.groups[line.group].name.clone(),
-        })
+        Some(line_name(&tab.screen, line))
     }
 
     /// Moves the cursor to the first row acting on item `id`, opening what is above it.
@@ -694,8 +686,18 @@ impl App {
     fn rebuild(&mut self, tab: usize, keep: Option<String>) {
         let filter = (!self.filter.trim().is_empty()).then_some(self.filter.as_str());
         let t = &mut self.tabs[tab];
+        // A line standing for entries listed elsewhere goes with the filter (or with what it
+        // stood for): its plugin row takes the cursor then.
+        let parent = keep
+            .as_ref()
+            .and_then(|key| t.lines.iter().find(|l| l.listed.is_some() && l.key == *key))
+            .and_then(|l| l.parent_key())
+            .map(str::to_string);
         t.lines = t.screen.lines(&t.expanded, filter);
-        let found = keep.and_then(|key| t.lines.iter().position(|l| l.key == key));
+        let found = keep
+            .into_iter()
+            .chain(parent)
+            .find_map(|key| t.lines.iter().position(|l| l.key == key));
         t.cursor = found.unwrap_or(t.cursor.min(t.lines.len().saturating_sub(1)));
     }
 
@@ -710,6 +712,9 @@ impl App {
 
     fn has_children(&self, line: &Line) -> bool {
         let screen = &self.tab().screen;
+        if line.listed.is_some() {
+            return false;
+        }
         match screen.line_row(line) {
             Some(row) => !row.children.is_empty(),
             None => !screen.groups[line.group].rows.is_empty(),
@@ -776,20 +781,26 @@ impl App {
 
     fn apply_filter(&mut self) {
         let needle = self.filter.trim().to_lowercase();
+        if needle.is_empty() {
+            // Nothing left to search for: the list as Esc leaves it.
+            self.unfiltered();
+            return;
+        }
         for i in 0..self.tabs.len() {
             let keep = self.key_of(i);
             self.rebuild(i, keep);
-            if needle.is_empty() {
-                continue;
-            }
-            // The cursor goes to the first matching row when its line is no match.
+            // The cursor goes to the first matching row when its line is no match; a line
+            // standing for matching entries listed elsewhere keeps it.
             let tab = &mut self.tabs[i];
             let matches = |line: &Line| {
                 tab.screen
                     .line_row(line)
                     .is_some_and(|r| r.name.to_lowercase().contains(&needle))
             };
-            let on_match = tab.lines.get(tab.cursor).is_some_and(matches);
+            let on_match = tab
+                .lines
+                .get(tab.cursor)
+                .is_some_and(|l| l.listed.is_some() || matches(l));
             if !on_match {
                 if let Some(first) = tab.lines.iter().position(matches) {
                     tab.cursor = first;
@@ -800,9 +811,15 @@ impl App {
 
     fn clear_filter(&mut self) {
         self.filter.clear();
+        self.unfiltered();
+    }
+
+    /// The list without a filter: what the filter showed stays in place (the lines above the
+    /// cursor open) and the cursor keeps its line, or its plugin row for a line that stood for
+    /// entries listed elsewhere.
+    fn unfiltered(&mut self) {
         for i in 0..self.tabs.len() {
             let keep = self.key_of(i);
-            // What the filter showed stays in place: the lines above the cursor open.
             if let Some(key) = &keep {
                 let parts: Vec<&str> = key.split('\n').collect();
                 for n in 1..parts.len() {
@@ -816,6 +833,13 @@ impl App {
     // ---- actions ----------------------------------------------------------------------------
 
     fn where_from(&mut self) {
+        if let Some(listed) = self.cursor_line().and_then(|l| l.listed.clone()) {
+            self.info(format!(
+                "w shows where one thing comes from: pick one {}",
+                listed.place
+            ));
+            return;
+        }
         let Some(row) = self.cursor_row().cloned() else {
             self.info(
                 "w shows where one thing comes from: open a group (→) and pick a row".to_string(),
@@ -852,6 +876,21 @@ impl App {
 
     /// `d`: the plan for the cursor row in one card.
     fn ask_off(&mut self) {
+        // A line standing for entries listed elsewhere changes nothing, read-only or not: it
+        // says where to pick one.
+        if let Some(listed) = self.cursor_line().and_then(|l| l.listed.clone()) {
+            self.info(format!(
+                "d turns off one thing: pick one {} · d on {} {} the plugin off",
+                listed.place,
+                listed.plugin,
+                if self.opts.readonly {
+                    "would turn"
+                } else {
+                    "turns"
+                }
+            ));
+            return;
+        }
         if !self.writable("d") {
             return;
         }
@@ -1373,6 +1412,18 @@ impl App {
 /// The switch that turns every hook off at once.
 fn is_all_hooks(knob: &data::Knob) -> bool {
     matches!(knob, data::Knob::Setting { pointer, .. } if pointer == model::ALL_HOOKS)
+}
+
+/// What a list line is called: its row's name, its group's, or the text of a line standing for
+/// entries listed elsewhere.
+fn line_name(screen: &Screen, line: &Line) -> String {
+    if let Some(listed) = &line.listed {
+        return listed.text.clone();
+    }
+    match screen.line_row(line) {
+        Some(row) => row.name.clone(),
+        None => screen.groups[line.group].name.clone(),
+    }
 }
 
 /// The name of the first row acting on `id`.
