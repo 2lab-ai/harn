@@ -267,7 +267,7 @@ pub(crate) fn resolve_with(
     items.extend(instructions::agents_md(&mut ctx));
     items.extend(builtins::environment_context(&ctx));
     items.extend(hooks::collect(&mut ctx));
-    items.extend(rules::collect(&ctx));
+    items.extend(rules::collect(&mut ctx));
     let (tool_search, tool_search_cause) = mcp::tool_search(&ctx);
     items.extend(mcp::collect(&mut ctx, tool_search));
     tree.items = items;

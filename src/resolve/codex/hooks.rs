@@ -49,7 +49,7 @@
 //! [`classify`], [`hook_key`], [`hook_hash`], [`normalize`], the parsers and the matcher
 //! functions do not depend on where a hook comes from, so plugin hooks can reuse them.
 
-use super::config::{self, LayerFile, Source};
+use super::config::{self, LayerFile, Lookup, Source};
 use super::{config_knobs, new_item, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode, Scope};
 use crate::resolve::claude::cost_na;
@@ -156,14 +156,47 @@ pub(crate) fn collect(ctx: &mut Ctx) -> Vec<Item> {
 
 fn rows(ctx: &mut Ctx) -> (Vec<Item>, Vec<String>) {
     let requirements = read_requirements(ctx);
-    let managed_only = requirements.as_ref().and_then(|(path, value)| {
-        (value.get("allow_managed_hooks_only") == Some(&Value::Bool(true)))
-            .then(|| format!("{}#/allow_managed_hooks_only = true", path.display()))
-    });
-    let features_off = match ctx.config.get_bool("/features/hooks") {
-        Some((false, layer)) => Some(format!("{} = false", layer.at("/features/hooks"))),
-        _ => None,
+    let managed_only = match &requirements {
+        Some((path, value)) => match value.get("allow_managed_hooks_only") {
+            Some(Value::Bool(true)) => Some(format!(
+                "{}#/allow_managed_hooks_only = true",
+                path.display()
+            )),
+            // `null` = a non-finite float, already warned by `read_requirements`.
+            None | Some(Value::Bool(false)) | Some(Value::Null) => None,
+            Some(other) => {
+                ctx.warnings.push(format!(
+                    "{}; codex refuses to start with it",
+                    not_a(
+                        &format!("{}#/allow_managed_hooks_only", path.display()),
+                        other,
+                        "a boolean"
+                    )
+                ));
+                None
+            }
+        },
+        None => None,
     };
+    // Set but not a boolean: codex refuses the config; the hooks stay as if on, never silently
+    // the default, with the reason on every row.
+    let (features_off, features_bad) = match ctx.config.get("/features/hooks") {
+        Some((Value::Bool(false), layer)) => (
+            Some(format!("{} = false", layer.at("/features/hooks"))),
+            None,
+        ),
+        Some((Value::Bool(true), _)) | None => (None, None),
+        Some((value, layer)) => (
+            None,
+            Some(format!(
+                "{}; codex refuses to start with it",
+                not_a(&layer.at("/features/hooks"), value, "a boolean")
+            )),
+        ),
+    };
+    if let Some(bad) = &features_bad {
+        ctx.warnings.push(bad.clone());
+    }
     let sources = sources(ctx, requirements.as_ref());
     let feature_knobs: Vec<Knob> = config_knobs(
         ctx,
@@ -214,6 +247,7 @@ fn rows(ctx: &mut Ctx) -> (Vec<Item>, Vec<String>) {
                     let hash = hook_hash(snake, matcher, &normalized);
                     let state = hook_state(ctx, &key);
                     let mut item = row(ctx, source, event, g, h, matcher, &key);
+                    item.origin.why.extend(features_bad.clone());
                     let off = off_reason(
                         source.managed,
                         &state,
@@ -584,30 +618,31 @@ fn hook_state(ctx: &Ctx, key: &str) -> State {
             continue;
         };
         for (k, v) in states {
-            if k.trim() != key {
+            if k.trim() != key || !v.is_object() {
                 continue;
             }
-            let Value::Object(fields) = v else {
-                continue;
+            let field = |name: &str| format!("/hooks/state/{}/{name}", fs::esc(k));
+            // A state that does not deserialize — a wrong type or a non-finite float — is skipped
+            // whole (`config_rules.rs:43-48`); `null` from an overlay means absent.
+            let enabled = match layer.lookup(&field("enabled")) {
+                Lookup::Absent => None,
+                Lookup::Set(Value::Bool(b)) => Some(*b),
+                Lookup::Set(_) | Lookup::Unreadable => continue,
             };
-            // A state that does not deserialize is skipped whole (`config_rules.rs:43-48`).
-            let enabled = fields.get("enabled");
-            let hash = fields.get("trusted_hash");
-            if !matches!(enabled, None | Some(Value::Bool(_)))
-                || !matches!(hash, None | Some(Value::String(_)))
-            {
-                continue;
-            }
-            let at = |field: &str| layer.at(&format!("/hooks/state/{}/{field}", fs::esc(k)));
-            if let Some(Value::Bool(b)) = enabled {
-                state.enabled = Some((*b, at("enabled")));
+            let hash = match layer.lookup(&field("trusted_hash")) {
+                Lookup::Absent => None,
+                Lookup::Set(Value::String(h)) => Some(h.clone()),
+                Lookup::Set(_) | Lookup::Unreadable => continue,
+            };
+            if let Some(b) = enabled {
+                state.enabled = Some((b, layer.at(&field("enabled"))));
                 state.enabled_in = layer
                     .path
                     .clone()
                     .map(|file| (file, k.clone(), layer.source == Source::Profile));
             }
-            if let Some(Value::String(s)) = hash {
-                state.trusted_hash = Some((s.clone(), at("trusted_hash")));
+            if let Some(h) = hash {
+                state.trusted_hash = Some((h, layer.at(&field("trusted_hash"))));
             }
         }
     }
@@ -638,12 +673,25 @@ fn state_knob(ctx: &Ctx, key: &str, state: &State) -> Knob {
     }
 }
 
-/// `/etc/codex/requirements.toml` as JSON, when present and valid.
+/// `/etc/codex/requirements.toml` as JSON, when present and valid UTF-8 TOML. A non-finite float
+/// reads as `null` and is warned about, as for config layers.
 fn read_requirements(ctx: &mut Ctx) -> Option<(PathBuf, Value)> {
     let path = ctx.system_dir.join(REQUIREMENTS);
     let bytes = ctx.fs.read(&path)?;
-    match config::parse(&String::from_utf8_lossy(&bytes)) {
-        Ok(value) => Some((path, value)),
+    let parsed = match String::from_utf8(bytes) {
+        Ok(text) => config::parse(&text),
+        Err(e) => Err(format!("not UTF-8: {e}")),
+    };
+    match parsed {
+        Ok((value, non_finite)) => {
+            for (pointer, literal) in non_finite {
+                ctx.warnings.push(format!(
+                    "{}#{pointer}: non-finite float `{literal}`; harn reads it as set but unreadable and codex rejects it unless the key takes a float",
+                    path.display()
+                ));
+            }
+            Some((path, value))
+        }
         Err(err) => {
             ctx.warnings.push(format!(
                 "{}: invalid TOML, codex refuses to start with it ({err})",
@@ -654,11 +702,19 @@ fn read_requirements(ctx: &mut Ctx) -> Option<(PathBuf, Value)> {
     }
 }
 
+/// `<at> is a non-finite float harn cannot read` or `<at> = <value> is not <kind>`.
+pub(crate) fn not_a(at: &str, value: &Value, kind: &str) -> String {
+    match value {
+        Value::Null => format!("{at} is a non-finite float harn cannot read"),
+        other => format!("{at} = {other} is not {kind}"),
+    }
+}
+
 fn sources(ctx: &mut Ctx, requirements: Option<&(PathBuf, Value)>) -> Vec<HookSource> {
     let mut out = Vec::new();
     if let Some((file, value)) = requirements {
         if let Some(hooks) = value.get("hooks") {
-            match parse_events(hooks) {
+            match parse_events(hooks, true) {
                 Ok(events) if handler_count(&events) > 0 => {
                     let managed_dir = hooks
                         .get(if cfg!(windows) {
@@ -748,9 +804,15 @@ fn sources(ctx: &mut Ctx, requirements: Option<&(PathBuf, Value)>) -> Vec<HookSo
         let toml_hooks = match (kind, &hooks_folder, &folder) {
             (Source::Project, Some(hf), Some(f)) if hf != f => {
                 let file = hf.join("config.toml");
-                let parsed = ctx.fs.read_string(&file).map(|text| config::parse(&text));
+                let parsed = ctx
+                    .fs
+                    .read(&file)
+                    .map(|bytes| match String::from_utf8(bytes) {
+                        Ok(text) => config::parse(&text),
+                        Err(e) => Err(format!("not UTF-8: {e}")),
+                    });
                 match parsed {
-                    Some(Ok(value)) => value
+                    Some(Ok((value, _))) => value
                         .get("hooks")
                         .cloned()
                         .and_then(|t| load_toml_hooks(ctx, &file, &t)),
@@ -767,7 +829,12 @@ fn sources(ctx: &mut Ctx, requirements: Option<&(PathBuf, Value)>) -> Vec<HookSo
             _ => index.and_then(|i| {
                 let layer: &LayerFile = &ctx.config.layers[i];
                 let file = layer.path.clone()?;
-                let table = layer.value.get("hooks")?.clone();
+                let table = match layer.lookup("/hooks") {
+                    Lookup::Absent => return None,
+                    Lookup::Set(table) => table.clone(),
+                    // `hooks = nan`: not a table (the parser says so).
+                    Lookup::Unreadable => Value::Null,
+                };
                 load_toml_hooks(ctx, &file, &table)
             }),
         };
@@ -830,7 +897,7 @@ fn load_hooks_json(ctx: &mut Ctx, path: &Path) -> Option<(PathBuf, Events)> {
 
 /// `load_toml_hooks_from_layer` (`discovery:382-400`).
 fn load_toml_hooks(ctx: &mut Ctx, file: &Path, table: &Value) -> Option<(PathBuf, Events)> {
-    match parse_events(table) {
+    match parse_events(table, true) {
         Ok(events) if !events.is_empty() => Some((file.to_path_buf(), events)),
         Ok(_) => None,
         Err(err) => {
@@ -854,7 +921,10 @@ fn handler_count(events: &Events) -> usize {
 /// `HooksFile` (`config/src/hook_config.rs:10-17`, `deny_unknown_fields`).
 pub(crate) fn parse_hooks_file(value: &Value) -> Result<Events, String> {
     let Value::Object(top) = value else {
-        return Err(format!("expected an object, found {}", type_name(value)));
+        return Err(format!(
+            "expected an object, found {}",
+            type_name(value, false)
+        ));
     };
     for key in top.keys() {
         if key != "description" && key != "hooks" {
@@ -863,18 +933,23 @@ pub(crate) fn parse_hooks_file(value: &Value) -> Result<Events, String> {
             ));
         }
     }
-    opt_string(top, "description")?;
+    opt_string(top, "description", false)?;
     match top.get("hooks") {
         None => Ok(Vec::new()),
-        Some(hooks) => parse_events(hooks),
+        Some(hooks) => parse_events(hooks, false),
     }
 }
 
 /// `HookEventsToml` (`hook_config.rs:35-61`): known event keys only (others are ignored), each a
 /// list of matcher groups. Empty when no event has a group (`HookEventsToml::is_empty`).
-pub(crate) fn parse_events(value: &Value) -> Result<Events, String> {
+/// `toml`: the value is a TOML document viewed as JSON, where `null` can only be a non-finite
+/// float — a type error for every typed field (JSON's `null` is `None` for optional fields).
+pub(crate) fn parse_events(value: &Value, toml: bool) -> Result<Events, String> {
     let Value::Object(map) = value else {
-        return Err(format!("expected a table, found {}", type_name(value)));
+        return Err(format!(
+            "expected a table, found {}",
+            type_name(value, toml)
+        ));
     };
     let mut out = Vec::new();
     for (i, (event, _)) in EVENTS.iter().enumerate() {
@@ -884,12 +959,12 @@ pub(crate) fn parse_events(value: &Value) -> Result<Events, String> {
         let Value::Array(groups) = groups else {
             return Err(format!(
                 "`{event}`: expected a list of matcher groups, found {}",
-                type_name(groups)
+                type_name(groups, toml)
             ));
         };
         let groups = groups
             .iter()
-            .map(|g| parse_group(g).map_err(|e| format!("`{event}`: {e}")))
+            .map(|g| parse_group(g, toml).map_err(|e| format!("`{event}`: {e}")))
             .collect::<Result<Vec<Group>, String>>()?;
         if !groups.is_empty() {
             out.push((i, groups));
@@ -899,24 +974,24 @@ pub(crate) fn parse_events(value: &Value) -> Result<Events, String> {
 }
 
 /// `MatcherGroup` (`hook_config.rs:153-159`).
-fn parse_group(value: &Value) -> Result<Group, String> {
+fn parse_group(value: &Value, toml: bool) -> Result<Group, String> {
     let Value::Object(map) = value else {
         return Err(format!(
             "expected a matcher group, found {}",
-            type_name(value)
+            type_name(value, toml)
         ));
     };
-    let matcher = opt_string(map, "matcher")?;
+    let matcher = opt_string(map, "matcher", toml)?;
     let handlers = match map.get("hooks") {
         None => Vec::new(),
         Some(Value::Array(items)) => items
             .iter()
-            .map(parse_handler)
+            .map(|h| parse_handler(h, toml))
             .collect::<Result<Vec<Handler>, String>>()?,
         Some(other) => {
             return Err(format!(
                 "`hooks`: expected a list, found {}",
-                type_name(other)
+                type_name(other, toml)
             ))
         }
     };
@@ -924,11 +999,11 @@ fn parse_group(value: &Value) -> Result<Group, String> {
 }
 
 /// `HookHandlerConfig` (`hook_config.rs:161-201`), tagged by `type`.
-fn parse_handler(value: &Value) -> Result<Handler, String> {
+fn parse_handler(value: &Value, toml: bool) -> Result<Handler, String> {
     let Value::Object(map) = value else {
         return Err(format!(
             "expected a hook handler, found {}",
-            type_name(value)
+            type_name(value, toml)
         ));
     };
     let kind = match map.get("type") {
@@ -936,39 +1011,42 @@ fn parse_handler(value: &Value) -> Result<Handler, String> {
         Some(other) => {
             return Err(format!(
                 "`type`: expected a string, found {}",
-                type_name(other)
+                type_name(other, toml)
             ))
         }
         None => return Err("missing field `type`".to_string()),
     };
     match kind {
         "command" => Ok(Handler::Command {
-            command: req_string(map, "command")?,
-            command_windows: match opt_string(map, "commandWindows")? {
+            command: req_string(map, "command", toml)?,
+            command_windows: match opt_string(map, "commandWindows", toml)? {
                 Some(w) => Some(w),
-                None => opt_string(map, "command_windows")?,
+                None => opt_string(map, "command_windows", toml)?,
             },
-            timeout: opt_u64(map, "timeout")?,
+            timeout: opt_u64(map, "timeout", toml)?,
             is_async: match map.get("async") {
                 None => false,
                 Some(Value::Bool(b)) => *b,
                 Some(other) => {
                     return Err(format!(
                         "`async`: expected a boolean, found {}",
-                        type_name(other)
+                        type_name(other, toml)
                     ))
                 }
             },
-            status_message: opt_string(map, "statusMessage")?,
-            context_limit: opt_u64(map, "additionalContextLimit")?,
+            status_message: opt_string(map, "statusMessage", toml)?,
+            context_limit: opt_u64(map, "additionalContextLimit", toml)?,
         }),
         "mcp_tool" => Ok(Handler::McpTool {
-            server: req_string(map, "server")?,
-            tool: req_string(map, "tool")?,
+            server: req_string(map, "server", toml)?,
+            tool: req_string(map, "tool", toml)?,
             input: match map.get("input") {
                 None => Map::new(),
                 Some(Value::Object(input)) => {
-                    if contains_null(&Value::Object(input.clone())) {
+                    // JSON `null` cannot be TOML (`hook_config.rs:203-217`); in a TOML document a
+                    // `null` here is a non-finite float, which TOML holds and the hash reads as
+                    // JSON `null` (serde_json has no non-finite number).
+                    if !toml && contains_null(&Value::Object(input.clone())) {
                         return Err(
                             "MCP hook input must be representable as TOML (no null)".to_string()
                         );
@@ -978,12 +1056,12 @@ fn parse_handler(value: &Value) -> Result<Handler, String> {
                 Some(other) => {
                     return Err(format!(
                         "`input`: expected a map, found {}",
-                        type_name(other)
+                        type_name(other, toml)
                     ))
                 }
             },
-            timeout: opt_u64(map, "timeout")?,
-            status_message: opt_string(map, "statusMessage")?,
+            timeout: opt_u64(map, "timeout", toml)?,
+            status_message: opt_string(map, "statusMessage", toml)?,
         }),
         "prompt" => Ok(Handler::Unsupported("prompt")),
         "agent" => Ok(Handler::Unsupported("agent")),
@@ -1002,35 +1080,41 @@ fn contains_null(value: &Value) -> bool {
     }
 }
 
-fn req_string(map: &Map<String, Value>, key: &str) -> Result<String, String> {
-    opt_string(map, key)?.ok_or_else(|| format!("missing field `{key}`"))
+fn req_string(map: &Map<String, Value>, key: &str, toml: bool) -> Result<String, String> {
+    opt_string(map, key, toml)?.ok_or_else(|| format!("missing field `{key}`"))
 }
 
-fn opt_string(map: &Map<String, Value>, key: &str) -> Result<Option<String>, String> {
-    match map.get(key) {
-        None | Some(Value::Null) => Ok(None),
+/// An optional field: JSON `null` is `None`; in TOML mode `null` is a non-finite float.
+fn optional<'a>(map: &'a Map<String, Value>, key: &str, toml: bool) -> Option<&'a Value> {
+    map.get(key).filter(|v| toml || !v.is_null())
+}
+
+fn opt_string(map: &Map<String, Value>, key: &str, toml: bool) -> Result<Option<String>, String> {
+    match optional(map, key, toml) {
+        None => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(other) => Err(format!(
             "`{key}`: expected a string, found {}",
-            type_name(other)
+            type_name(other, toml)
         )),
     }
 }
 
-fn opt_u64(map: &Map<String, Value>, key: &str) -> Result<Option<u64>, String> {
-    match map.get(key) {
-        None | Some(Value::Null) => Ok(None),
+fn opt_u64(map: &Map<String, Value>, key: &str, toml: bool) -> Result<Option<u64>, String> {
+    match optional(map, key, toml) {
+        None => Ok(None),
         Some(v) => v.as_u64().map(Some).ok_or_else(|| {
             format!(
                 "`{key}`: expected a non-negative integer, found {}",
-                type_name(v)
+                type_name(v, toml)
             )
         }),
     }
 }
 
-fn type_name(value: &Value) -> &'static str {
+fn type_name(value: &Value, toml: bool) -> &'static str {
     match value {
+        Value::Null if toml => "a non-finite float",
         Value::Null => "null",
         Value::Bool(_) => "a boolean",
         Value::Number(_) => "a number",
@@ -1167,8 +1251,11 @@ mod tests {
         assert_eq!(timeout_for("PreToolUse", Some(0)), 1);
         assert_eq!(timeout_for("SessionEnd", None), 1);
         assert_eq!(timeout_for("Interrupt", Some(10)), 3);
-        let parsed = parse_handler(&json!({"type": "command", "command": "c",
-            "additionalContextLimit": 2500, "timeout": 5}))
+        let parsed = parse_handler(
+            &json!({"type": "command", "command": "c",
+            "additionalContextLimit": 2500, "timeout": 5}),
+            false,
+        )
         .unwrap();
         // The default limit and a limit on an event without context are left out of the hash.
         let mut w = Vec::new();
@@ -1177,8 +1264,11 @@ mod tests {
             v,
             json!({"type": "command", "command": "c", "timeout": 5, "async": false})
         );
-        let limited = parse_handler(&json!({"type": "command", "command": "c",
-            "additionalContextLimit": 10}))
+        let limited = parse_handler(
+            &json!({"type": "command", "command": "c",
+            "additionalContextLimit": 10}),
+            false,
+        )
         .unwrap();
         let v = normalize("f", "Stop", &limited, &mut w).unwrap();
         assert!(v.get("additionalContextLimit").is_none(), "{v}");
@@ -1724,7 +1814,7 @@ mod tests {
             let normalized = normalize(
                 "f",
                 event,
-                &parse_handler(&handler).unwrap(),
+                &parse_handler(&handler, false).unwrap(),
                 &mut Vec::new(),
             )
             .unwrap();
@@ -1764,5 +1854,106 @@ mod tests {
             .collect();
         assert_eq!(current.len(), 2);
         assert_eq!(current[0], current[1]);
+    }
+
+    #[test]
+    fn wrong_typed_or_non_finite_values_are_set_and_warned() {
+        let t = tmp();
+        let root = &t.0;
+        let target = setup(root);
+        let codex = root.join("home/.codex");
+        let json_file = codex.join("hooks.json");
+        write(&json_file, HOOKS_JSON);
+        let start = format!("{}:session_start:0:0", json_file.display());
+        let good = command_hash("session_start", Some("startup|resume"), "echo start", 600);
+
+        // `features.hooks` set to a non-boolean: codex refuses to start; never read as the default.
+        write(
+            &codex.join("config.toml"),
+            &format!(
+                "[features]\nhooks = \"no\"\n{}",
+                state(&start, None, Some(&good))
+            ),
+        );
+        let tree = resolve(root, &target, None);
+        assert!(
+            tree.warnings
+                .iter()
+                .any(|w| w.contains("#/features/hooks") && w.contains("codex refuses to start")),
+            "{:?}",
+            tree.warnings
+        );
+        assert!(hook(&tree, &start)
+            .origin
+            .why
+            .iter()
+            .any(|w| w.contains("#/features/hooks") && w.contains("not a boolean")));
+
+        // A non-finite `enabled` makes the state entry fail to deserialize: skipped whole, so the
+        // trusted_hash beside it does not count (`hooks/src/config_rules.rs:43-48`).
+        write(
+            &codex.join("config.toml"),
+            &format!(
+                "[hooks.state.{}]\nenabled = nan\ntrusted_hash = \"{good}\"\n",
+                serde_json::to_string(&start).unwrap()
+            ),
+        );
+        let tree = resolve(root, &target, None);
+        let row = hook(&tree, &start);
+        assert!(
+            row.signal.as_deref().unwrap().starts_with("off: untrusted"),
+            "{:?}",
+            row.signal
+        );
+
+        // A non-finite timeout in inline hooks: the TOML hooks fail to parse (no silent default).
+        write(
+            &codex.join("config.toml"),
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"s\"\ntimeout = inf\n",
+        );
+        let tree = resolve(root, &target, None);
+        assert!(hooks(&tree).iter().all(|i| !i.id.contains(":stop:")));
+        assert!(tree
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("failed to parse TOML hooks") && w.contains("timeout")));
+    }
+
+    #[test]
+    fn requirements_values_are_read_strictly() {
+        let t = tmp();
+        let root = &t.0;
+        let target = setup(root);
+        let codex = root.join("home/.codex");
+        write(&codex.join("hooks.json"), HOOKS_JSON);
+        let req = root.join("etc/codex/requirements.toml");
+        write(&req, "allow_managed_hooks_only = \"yes\"\n");
+        let tree = resolve(root, &target, None);
+        assert!(
+            tree.warnings
+                .iter()
+                .any(|w| w.contains("#/allow_managed_hooks_only")
+                    && w.contains("codex refuses to start")),
+            "{:?}",
+            tree.warnings
+        );
+        write(&req, "allow_managed_hooks_only = nan\n");
+        let tree = resolve(root, &target, None);
+        assert!(
+            tree.warnings
+                .iter()
+                .any(|w| w.contains("#/allow_managed_hooks_only") && w.contains("non-finite")),
+            "{:?}",
+            tree.warnings
+        );
+        std::fs::write(&req, b"allow_managed_hooks_only = true\n# \xff\n").unwrap();
+        let tree = resolve(root, &target, None);
+        assert!(
+            tree.warnings
+                .iter()
+                .any(|w| w.contains("requirements.toml") && w.contains("not UTF-8")),
+            "{:?}",
+            tree.warnings
+        );
     }
 }

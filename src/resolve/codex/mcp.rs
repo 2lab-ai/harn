@@ -27,7 +27,8 @@
 //! Codex validates the merged config, not each file (`core/src/config/mod.rs:1536-1550`), so such
 //! a table works until the defining layer drops out.
 
-use super::config::{LayerFile, Source};
+use super::config::{LayerFile, Lookup, Source};
+use super::hooks::not_a;
 use super::{config_knobs, layer_of, new_item, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Mode};
 use crate::resolve::claude::cost_na;
@@ -37,17 +38,24 @@ use std::path::Path;
 
 /// The tool-search state and its cause, from the model catalog.
 pub(crate) fn tool_search(ctx: &Ctx) -> (Option<bool>, String) {
-    if let Some((file, _)) = ctx.config.get_str("/model_catalog_json") {
+    if let Some(at) = &ctx.model.catalog_unread {
         return (
             None,
-            format!("model_catalog_json = {file}: the catalog comes from that file (not read)"),
+            format!("{at} is set: the catalog comes from that file (not read)"),
         );
     }
     let Some(slug) = &ctx.model.slug else {
-        return (
-            None,
-            "no model in config: codex picks its default from the catalog at startup".to_string(),
-        );
+        return match &ctx.model.slug_unreadable {
+            Some(at) => (
+                None,
+                format!("{at} is not a string: model unknown (codex refuses to start with it)"),
+            ),
+            None => (
+                None,
+                "no model in config: codex picks its default from the catalog at startup"
+                    .to_string(),
+            ),
+        };
     };
     let Some(entry) = &ctx.model.catalog else {
         return (
@@ -78,6 +86,26 @@ struct Server<'a> {
     layers: Vec<&'a LayerFile>,
 }
 
+/// The layer's value at `pointer` as the merge sees it: `null` that an overlay wrote means absent
+/// and is dropped; `null` for a non-finite float ([`Lookup::Unreadable`]) is kept — a value that
+/// replaces what is below it and that no typed reader accepts. None when absent.
+fn readable(layer: &LayerFile, pointer: &str) -> Option<Value> {
+    match layer.lookup(pointer) {
+        Lookup::Absent => None,
+        Lookup::Unreadable => Some(Value::Null),
+        Lookup::Set(Value::Object(map)) => {
+            let mut out = serde_json::Map::new();
+            for key in map.keys() {
+                if let Some(v) = readable(layer, &format!("{pointer}/{}", fs::esc(key))) {
+                    out.insert(key.clone(), v);
+                }
+            }
+            Some(Value::Object(out))
+        }
+        Lookup::Set(other) => Some(other.clone()),
+    }
+}
+
 /// The effective `mcp_servers` the way Codex builds it: every enabled layer merged in order with
 /// `merge_toml_values` (`config/src/merge.rs:96-150`) — tables key by key, any other value
 /// replacing what is below it, so a scalar drops a lower table and a table replaces a lower
@@ -88,9 +116,10 @@ fn effective_servers<'a>(ctx: &'a Ctx, warnings: &mut Vec<String>) -> Vec<Server
     let mut last_setter: Option<&LayerFile> = None;
     let mut provenance: Vec<(String, Vec<&LayerFile>)> = Vec::new();
     for layer in ctx.config.layers.iter().filter(|l| l.enabled()) {
-        let Some(value) = layer.value.get("mcp_servers") else {
+        let Some(cleaned) = readable(layer, "/mcp_servers") else {
             continue;
         };
+        let value = &cleaned;
         last_setter = Some(layer);
         match (merged.as_mut(), value) {
             (Some(Value::Object(base)), Value::Object(over)) => {
@@ -162,6 +191,7 @@ fn rows(ctx: &Ctx, tool_search: Option<bool>) -> (Vec<Item>, Vec<String>) {
     let any_enabled = servers
         .iter()
         .any(|s| s.def.get("enabled") != Some(&Value::Bool(false)));
+    // In the merged definition `null` is a non-finite float (see [`readable`]).
     if any_enabled && tool_search.is_none() {
         warnings.push(
             "tool search state undecidable statically (model unknown or not in models_cache.json): MCP rows are listed as always"
@@ -173,9 +203,20 @@ fn rows(ctx: &Ctx, tool_search: Option<bool>) -> (Vec<Item>, Vec<String>) {
     for s in &servers {
         let top = *s.layers.last().expect("a server has a defining layer");
         let at = top.at(&pointer(&s.id, ""));
+        for key in ["command", "url"] {
+            if let Some(value) = s.def.get(key).filter(|v| !v.is_string()) {
+                let field = pointer(&s.id, &format!("/{key}"));
+                let set_at = setter(s, &field).unwrap_or_else(|| at.clone());
+                warnings.push(format!(
+                    "{}; codex refuses to start with it",
+                    not_a(&set_at, value, "a string")
+                ));
+            }
+        }
         let transport = match (s.def.get("command"), s.def.get("url")) {
-            (Some(_), None) => "stdio",
-            (None, Some(_)) => "http",
+            (Some(Value::String(_)), None) => "stdio",
+            (None, Some(Value::String(_))) => "http",
+            (Some(_), None) | (None, Some(_)) => "?",
             (Some(_), Some(_)) => {
                 warnings.push(format!(
                     "{at}: both command and url; codex refuses to start (config/src/mcp_types.rs:499-500)"
@@ -198,13 +239,19 @@ fn rows(ctx: &Ctx, tool_search: Option<bool>) -> (Vec<Item>, Vec<String>) {
         }
         item.knobs = knobs(ctx, s);
 
-        let enabled_ptr = pointer(&s.id, "/enabled");
-        let enabled_at = s
-            .layers
-            .iter()
-            .rev()
-            .find(|l| l.value.pointer(&enabled_ptr).is_some())
-            .map(|l| l.at(&enabled_ptr));
+        let enabled_at = setter(s, &pointer(&s.id, "/enabled"));
+        // Set but not a boolean: codex refuses the config; the row stays as if on, with the
+        // reason, never silently the default.
+        if let (Some(value), Some(at)) = (s.def.get("enabled"), &enabled_at) {
+            if !value.is_boolean() {
+                let bad = format!(
+                    "{}; codex refuses to start with it",
+                    not_a(at, value, "a boolean")
+                );
+                warnings.push(bad.clone());
+                item.origin.why.push(bad);
+            }
+        }
         if let (Some(Value::Bool(false)), Some(at)) = (s.def.get("enabled"), enabled_at) {
             item.mode = Mode::None;
             item.cost = cost_na(None);
@@ -244,6 +291,15 @@ fn rows(ctx: &Ctx, tool_search: Option<bool>) -> (Vec<Item>, Vec<String>) {
     (out, warnings)
 }
 
+/// `"<file>#<pointer>"` of the highest surviving layer that sets `pointer` (readable or not).
+fn setter(s: &Server, pointer: &str) -> Option<String> {
+    s.layers
+        .iter()
+        .rev()
+        .find(|l| !matches!(l.lookup(pointer), Lookup::Absent))
+        .map(|l| l.at(pointer))
+}
+
 /// `mcp_servers.<id>.enabled = false` in the narrowest file that takes effect, kept only when the
 /// server's `command`/`url` comes from a layer that loads whenever that file does: the system,
 /// user and legacy managed files always load, the file itself loads with itself. A profile (not
@@ -257,9 +313,10 @@ fn knobs(ctx: &Ctx, s: &Server) -> Vec<Knob> {
             let stable = matches!(l.source, Source::System | Source::User | Source::Managed)
                 || l.path.as_deref().map(fs::normalize).as_ref() == Some(&file);
             stable
-                && l.value
-                    .pointer(&pointer(&s.id, ""))
-                    .is_some_and(|d| d.get("command").is_some() || d.get("url").is_some())
+                && l.value.pointer(&pointer(&s.id, "")).is_some_and(|d| {
+                    d.get("command").is_some_and(Value::is_string)
+                        || d.get("url").is_some_and(Value::is_string)
+                })
         })
     };
     let note = "this server only; its config stays";
@@ -747,5 +804,64 @@ enabled = false
             .warnings
             .iter()
             .any(|w| w.starts_with("tool search state undecidable")));
+    }
+
+    #[test]
+    fn a_non_finite_or_wrong_typed_enabled_is_set_and_warned() {
+        let t = tmp();
+        let root = &t.0;
+        let codex = root.join("home/.codex");
+        write(
+            &codex.join("config.toml"),
+            "[mcp_servers.a]\ncommand = \"a\"\nenabled = nan\n[mcp_servers.b]\ncommand = 7\n",
+        );
+        let tree = resolve(root, None);
+        let a = server(&tree, "a");
+        assert!(
+            a.origin
+                .why
+                .iter()
+                .any(|w| w.contains("/mcp_servers/a/enabled") && w.contains("non-finite")),
+            "{:?}",
+            a.origin.why
+        );
+        assert!(tree
+            .warnings
+            .iter()
+            .any(|w| w.contains("/mcp_servers/a/enabled") && w.contains("codex refuses to start")));
+        assert!(tree
+            .warnings
+            .iter()
+            .any(|w| w.contains("#/mcp_servers/b/command = 7 is not a string")));
+        // A non-string command is no transport for a stub knob.
+        assert!(matches!(
+            server(&tree, "b").knobs.as_slice(),
+            [Knob::None { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_catalog_file_or_unreadable_model_leaves_tool_search_unknown() {
+        let t = tmp();
+        let root = &t.0;
+        let codex = root.join("home/.codex");
+        write(
+            &codex.join("models_cache.json"),
+            &json!({"models": [{"slug": "m", "supports_search_tool": true}]}).to_string(),
+        );
+        write(
+            &codex.join("config.toml"),
+            "model = \"m\"\nmodel_catalog_json = 5\n",
+        );
+        let tree = resolve(root, None);
+        assert_eq!(tree.tool_search, None, "{:?}", tree.tool_search_cause);
+        write(&codex.join("config.toml"), "model = 5\n");
+        let tree = resolve(root, None);
+        assert_eq!(tree.tool_search, None);
+        assert!(tree
+            .tool_search_cause
+            .as_deref()
+            .unwrap()
+            .contains("not a string"));
     }
 }
