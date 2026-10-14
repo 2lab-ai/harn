@@ -494,6 +494,43 @@ fn leaving_lists_the_planned_item_and_every_row_that_goes_with_it_by_mode() {
 }
 
 #[test]
+fn a_row_that_loaded_nothing_and_goes_is_leaving_with_mode_none() {
+    // A tool of slack's server that loads nothing (mode none, no `off:` signal): it goes from
+    // the tree with its server, and is listed as leaving, its mode before none.
+    let mut sb = Sandbox::new();
+    let mut spec: Value = serde_json::from_str(&sb.fake.spec).unwrap();
+    let server = spec
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|s| s["id"] == json!(SLACK))
+        .unwrap();
+    server["children"].as_array_mut().unwrap().push(json!({
+        "id": "claude-code/mcp-tool/plugin/plugin:slack:slack/dormant",
+        "label": "dormant",
+        "kind": "mcp-tool",
+        "layer": "plugin",
+        "plugin": "slack@x",
+        "mode": "none",
+        "predicted": null
+    }));
+    sb.fake.spec = spec.to_string();
+    let plan = sb.plan(SLACK, None).unwrap();
+    assert!(
+        leaving(&plan).contains(&(
+            "claude-code/mcp-tool/plugin/plugin:slack:slack/dormant",
+            Kind::McpTool,
+            Mode::None
+        )),
+        "{:?}",
+        leaving(&plan)
+    );
+    // It loaded nothing: the count after loses only the four that did.
+    assert_eq!(plan.leaving.len(), 5);
+    assert_eq!(plan.items_after, at_start(&sb.resolve()) - 4);
+}
+
+#[test]
 fn a_planned_item_that_stays_is_not_leaving_when_a_disabled_server_appears() {
     // Review r9: an agent whose switch keeps it in the roster (as a deny rule does), and a
     // server, disabled (mode none), that the same write makes appear. Nothing leaves; the

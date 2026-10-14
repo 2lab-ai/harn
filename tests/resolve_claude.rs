@@ -504,6 +504,17 @@ fn a_plugin_hook_leaving_by_both_rules_is_one_side_effect() {
     }
     // Its skills and server still leave.
     assert!(!plan.side_effects.is_empty());
+    // Nor is any hook or the status line on its list of what leaves: each carried the `off:`
+    // signal already.
+    assert!(
+        !plan
+            .leaving
+            .iter()
+            .any(|l| matches!(l.kind, Kind::Hook | Kind::StatusLine)),
+        "{:#?}",
+        plan.leaving
+    );
+    assert!(plan.leaving.iter().any(|l| l.id == off));
 }
 
 /// Items in the first request: mode always or advertised.

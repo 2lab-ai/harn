@@ -28,7 +28,10 @@ pub struct PlannedOp {
 }
 
 /// An item a plan takes out of the request: gone from the tree once the plan is applied, or
-/// still there but switched off. Never an item that was switched off already.
+/// kept but switched off by it (an `off:` signal, or mode none where it had another mode). A
+/// row that already carries an `off:` signal is never listed. Another row that loaded nothing
+/// (mode none and no `off:` signal: a disabled MCP server, an unapproved import) is listed, with
+/// `mode_before` none, when the plan takes it from the tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Leaving {
     pub id: String,
@@ -53,8 +56,8 @@ pub struct ActionPlan {
     #[serde(default)]
     pub items_after: usize,
     pub freed: Freed,
-    /// Every item that leaves, the planned items and what is under them included, in walk order;
-    /// empty in a plan written before the field existed.
+    /// Every item that leaves (see [`Leaving`] for which rows count), the planned items and what
+    /// is under them included, in walk order; empty in a plan written before the field existed.
     #[serde(default)]
     pub leaving: Vec<Leaving>,
     pub side_effects: Vec<String>,
@@ -854,7 +857,8 @@ impl<'a> Delta<'a> {
         }
     }
 
-    /// Every row that leaves, with its mode before the overlay.
+    /// Every row that leaves ([`left`]), with its mode before the overlay: none for a row that
+    /// loaded nothing and goes from the tree.
     fn leaving(&self) -> Vec<Leaving> {
         self.removed
             .iter()
@@ -900,9 +904,10 @@ impl<'a> Delta<'a> {
 /// None), or still there but switched off — mode none with an `off:` signal, or mode none where
 /// it had another mode before. A resolver keeps such an item to say what turned it off (every
 /// hook and the status line under `disableAllHooks`; a disabled MCP server, the reason in its
-/// origin); it leaves all the same. An item already switched off before the overlay never
-/// leaves, whether it stays or goes (a hook of a plugin turned off while every hook is off was
-/// not running).
+/// origin); it leaves all the same. An item that already carries an `off:` signal before the
+/// overlay never leaves, whether it stays or goes (a hook of a plugin turned off while every
+/// hook is off was not running). One with mode none and no such signal (a disabled MCP server
+/// of a plugin the plan turns off) leaves when it goes from the tree.
 fn left(item: &Item, now: Option<&Item>) -> bool {
     !switched_off(item)
         && now.is_none_or(|now| {

@@ -2891,8 +2891,9 @@ fn subtree(item: &Item) -> Vec<&Item> {
 /// What `plan` stops loading, as the plan lists it (each item with its mode before the
 /// change): the picked items with what is under them first, then the rest by kind (skills,
 /// commands, agents, MCP servers, hooks, the rest); and what appears, worded. A picked item
-/// that stays (a denied agent stays in the roster) is not on the plan's list, nor is anything
-/// that was switched off already.
+/// that stays (a denied agent stays in the roster) is not on the plan's list, nor is a row that
+/// already carried an `off:` signal; a row that loaded nothing otherwise and goes is, with its
+/// mode before none (the card's "already off").
 fn leaving<'p>(plan: &'p ActionPlan, tree: &Tree) -> (Vec<&'p crate::plan::Leaving>, Vec<String>) {
     let places = Places::of(tree);
     let added = plan
