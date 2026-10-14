@@ -42,7 +42,7 @@
 //! is a switch: no cost (`—`), no children (each part exists once in the tree), mode `always`
 //! while the plugin loads and `none` otherwise.
 
-use super::{config_knobs, hooks, new_item, Ctx};
+use super::{config_knobs, hooks, json_type, new_item, Ctx};
 use crate::model::{Cost, Item, Kind, Knob, Layer, Mode};
 use crate::resolve::claude::cost_na;
 use crate::resolve::claude::fs::{esc, file_name, Json};
@@ -449,17 +449,6 @@ fn read_manifest(ctx: &Ctx, root: &Path) -> Result<(PathBuf, Value), String> {
     Err("missing or invalid plugin.json".to_string())
 }
 
-fn json_type(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
 /// Why `RawPluginManifest` (`core-plugins/src/manifest.rs:48-73`, camelCase keys, unknown keys
 /// accepted) would not deserialize: a typed field of the wrong type fails the whole manifest.
 /// `skills`, `mcpServers` and `hooks` never fail it (each has an `Invalid` catch-all, :134-158),
@@ -738,13 +727,7 @@ fn mcp_sources(
 
 fn mcp_servers(ctx: &Ctx, p: &Plugin, warnings: &mut Vec<String>) -> Vec<Item> {
     let mut out = Vec::new();
-    let search = ctx
-        .model
-        .catalog
-        .as_ref()
-        .and_then(|c| c.get("supports_search_tool"))
-        .and_then(Value::as_bool)
-        == Some(true);
+    let search = super::mcp::tool_search(ctx).0 == Some(true);
     for (file, prefix, servers) in mcp_sources(ctx, p, warnings) {
         for (name, def) in &servers {
             if !def.is_object() {
@@ -917,46 +900,7 @@ pub(crate) fn blocks(ctx: &Ctx, plugins: &[Plugin], tree_items: &[Item]) -> Vec<
             && walk_items(tree_items).any(|i| i.origin.plugin.as_deref() == Some(p.id.as_str()))
     });
     if with_parts {
-        let flag = ctx
-            .model
-            .catalog
-            .as_ref()
-            .and_then(|c| c.get("include_plugin_usage_instructions"))
-            .and_then(Value::as_bool);
-        if flag != Some(false) {
-            let mut item = new_item(
-                Kind::SystemPrompt,
-                Layer::Builtin,
-                "plugins_instructions",
-                "plugins instructions",
-            );
-            item.origin.why = vec![
-                "`<plugins_instructions>` developer block: fixed text (core/src/context/available_plugins_instructions.rs:30-48)".to_string(),
-                "rendered when a plugin is available and the model's catalog entry sets include_plugin_usage_instructions (core/src/session/world_state.rs:271-272)".to_string(),
-            ];
-            match flag {
-                Some(true) => {
-                    let bytes = PLUGINS_INSTRUCTIONS.len() as u64;
-                    item.cost = Cost {
-                        source: Some(bytes),
-                        predicted: Some(bytes),
-                        predicted_is_estimate: true,
-                        ..Cost::default()
-                    };
-                    item.origin.why.push(
-                        "models_cache.json: include_plugin_usage_instructions = true; plugin availability is decided at startup (estimate)"
-                            .to_string(),
-                    );
-                }
-                _ => item.origin.why.push(format!(
-                    "size {} bytes if rendered; the model's catalog entry does not say include_plugin_usage_instructions (default false, protocol/src/openai_models.rs:434-435)",
-                    PLUGINS_INSTRUCTIONS.len()
-                )),
-            }
-            item.origin.why.extend(bad.clone());
-            item.knobs = knobs.clone();
-            out.push(item);
-        }
+        out.extend(plugins_instructions(ctx, bad.as_deref(), &knobs));
     }
     let mut rec = new_item(
         Kind::SystemPrompt,
@@ -972,6 +916,46 @@ pub(crate) fn blocks(ctx: &Ctx, plugins: &[Plugin], tree_items: &[Item]) -> Vec<
     rec.knobs = knobs;
     out.push(rec);
     out
+}
+
+/// `<plugins_instructions>` while a plugin is available: only when the model's catalog entry sets
+/// `include_plugin_usage_instructions` (`core/src/session/world_state.rs:271-272`), read as codex
+/// reads it ([`Ctx::catalog_flag`]: missing is `false`).
+fn plugins_instructions(ctx: &Ctx, bad: Option<&str>, knobs: &[Knob]) -> Option<Item> {
+    const CONDITION: &str = "include_plugin_usage_instructions = true";
+    let flag = ctx.catalog_flag("include_plugin_usage_instructions");
+    if flag == Ok(false) {
+        return None;
+    }
+    let mut item = new_item(
+        Kind::SystemPrompt,
+        Layer::Builtin,
+        "plugins_instructions",
+        "plugins instructions",
+    );
+    item.origin.why = vec![
+        "`<plugins_instructions>` developer block: fixed text (core/src/context/available_plugins_instructions.rs:30-48)".to_string(),
+        "rendered when a plugin is available and the model's catalog entry sets include_plugin_usage_instructions (core/src/session/world_state.rs:271-272)".to_string(),
+    ];
+    let bytes = PLUGINS_INSTRUCTIONS.len() as u64;
+    if flag == Ok(true) {
+        item.cost = Cost {
+            source: Some(bytes),
+            predicted: Some(bytes),
+            ..Cost::default()
+        };
+        item.origin.why.push(
+            "models_cache.json: include_plugin_usage_instructions = true; whether a plugin is available is decided at startup".to_string(),
+        );
+    } else if let Err(why) = flag {
+        item.signal = Some(Ctx::catalog_gated(CONDITION, &why));
+        item.origin
+            .why
+            .push(format!("size {bytes} bytes if rendered"));
+    }
+    item.origin.why.extend(bad.map(str::to_string));
+    item.knobs = knobs.to_vec();
+    Some(item)
 }
 
 /// One `plugin` row per configured plugin. The row is a switch: its bytes live on its parts

@@ -24,6 +24,12 @@
 //! (`codex/mcp-server/plugin/<server>`) and hooks (`codex/hook/plugin/<state key>`), then one
 //! `codex/plugin/plugin/<name@marketplace>` row per configured plugin.
 //!
+//! Some built-in blocks render only when the model's catalog entry carries their text or flag
+//! (`<collaboration_mode>`, `<multi_agent_role>` + `<multi_agent_mode>`, `<plugins_instructions>`).
+//! `$CODEX_HOME/models_cache.json` is codex's last fetched catalog, a snapshot; the contract for
+//! using it is on [`CacheUse`]. When it holds, the row follows the entry, read with codex's serde
+//! defaults ([`Ctx::catalog_entry`]); otherwise the row is listed with a [`CATALOG_GATED`] signal.
+//!
 //! Knobs are Codex's own config keys. Codex has no local-only config file: the target dir's
 //! `.codex/config.toml` is `project` scope (and takes effect only while that dir is trusted),
 //! `$CODEX_HOME/config.toml` is `user` scope. A knob is listed only where it would take effect
@@ -51,6 +57,13 @@ use std::path::{Path, PathBuf};
 pub use config::PROFILE_ENV;
 pub use skills::CAP_STATE_UNKNOWN;
 
+/// Signal prefix of a row whose presence the model's catalog entry decides while harn does not
+/// know what codex will read there ([`Ctx::catalog_entry`]: no model in config, `model_catalog_json`
+/// set, a `models_cache.json` outside the contract on [`CacheUse`], or the model missing from it). The row stays listed (`always`, its size if rendered in `why`), so a capture
+/// without it is not a prediction miss: verify treats `item.signal.starts_with(CATALOG_GATED)` as
+/// not checkable. The rest of the signal names the catalog condition and why the entry is unknown.
+pub const CATALOG_GATED: &str = "catalog-gated:";
+
 pub(crate) struct Ctx<'a> {
     pub target: &'a Target,
     pub fs: Fs,
@@ -73,8 +86,12 @@ pub(crate) struct ModelFacts {
     /// `"<file>#/model"` when the effective `model` is set but not a string (unknown model).
     pub slug_unreadable: Option<String>,
     pub context_window: Option<u64>,
+    /// Where `context_window` came from; with no window, why it is unknown although config sets
+    /// one.
     pub window_from: Option<String>,
-    /// The catalog entry of the slug in `$CODEX_HOME/models_cache.json`.
+    /// The entry of the slug in `$CODEX_HOME/models_cache.json` as read, accepted or not: catalog
+    /// facts come only through [`Ctx::catalog_entry`], which returns it only for an accepted
+    /// snapshot ([`CacheUse::Used`]). Read directly only to quote the file in an explanation.
     pub catalog: Option<Value>,
     /// `client_version` of `models_cache.json`: the codex that last refreshed the catalog.
     pub catalog_version: Option<String>,
@@ -82,6 +99,68 @@ pub(crate) struct ModelFacts {
     /// so every catalog fact (base instructions, window) stays unknown rather than mixing in
     /// `models_cache.json`.
     pub catalog_unread: Option<String>,
+    /// Whether harn accepts `models_cache.json` as its snapshot ([`CacheUse`], [`cache_use`]).
+    /// Every catalog fact depends on it, without exception: the catalog-gated rows, the skills
+    /// usage section, the tool-search state, the base instructions' size, the context window and
+    /// the `max_context_window` clamp.
+    pub cache_use: CacheUse,
+}
+
+/// The codex on the target's `PATH` ([`installed_codex`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Installed {
+    NotFound,
+    /// Found, but neither an `@openai/codex` `package.json` nor a versioned install dir names it.
+    Unversioned,
+    Version(String),
+}
+
+/// Whether harn uses `$CODEX_HOME/models_cache.json` for the selected model's catalog facts.
+///
+/// CONTRACT: `models_cache.json` is codex's last fetched catalog — a snapshot. Codex treats it as
+/// stale after 300 s (`models-manager/src/manager.rs:35`, fixed at `:310-315`; `cache.rs:90-99`,
+/// `:212-220`) and revalidates it with the server when it starts, so "codex uses this file as it
+/// is" is not a claim harn makes. harn uses its facts for the selected model when
+/// (a) the file exists and is JSON,
+/// (b) its required top-level fields have the right JSON types (`fetched_at` a string, `models` an
+/// array; `client_version`, `identity`, `etag` a string or null),
+/// (c) every entry passes the checks for the fields harn reads ([`validate_cache`]), and
+/// (d) codex is on `PATH` with a known version equal to `client_version` (and `identity` is
+/// present: an unscoped legacy cache is a miss, `manager.rs:747-752`).
+/// A failure in (a)–(d) makes catalog facts unknown ([`CATALOG_GATED`]) with a true reason. When
+/// used ([`CacheUse::Used`]), the `model:` signal says the facts come from codex's catalog fetched
+/// at `fetched_at` (as written: codex writes UTC), that codex re-checks a catalog older than
+/// 5 minutes with the server when it starts, that the cache's `identity` is not compared with the
+/// login (that needs the credentials, which harn does not read), and that
+/// `harn verify --run --agent codex` confirms. harn does not check fields it does not read
+/// (`display_name` and the other `ModelInfo` fields, nested enums) and does not parse `fetched_at`
+/// as a date.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum CacheUse {
+    /// The contract holds: `fetched_at` as written in the file.
+    Used { fetched_at: String },
+    /// No file yet: codex writes it on its first run.
+    #[default]
+    Missing,
+    /// Not accepted, and codex would not load it either: it cannot parse it, or the file belongs
+    /// to another version or login. Why.
+    Refetched(String),
+    /// Not accepted: harn cannot tell whether codex loads it (no codex version, a shape harn does
+    /// not read). Why.
+    Unknown(String),
+}
+
+impl CacheUse {
+    /// Why harn does not accept the file as its snapshot; None when it does.
+    pub fn reason(&self) -> Option<String> {
+        match self {
+            CacheUse::Used { .. } => None,
+            CacheUse::Missing => {
+                Some("no models_cache.json yet (codex writes it on its first run)".to_string())
+            }
+            CacheUse::Refetched(why) | CacheUse::Unknown(why) => Some(why.clone()),
+        }
+    }
 }
 
 impl Ctx<'_> {
@@ -106,6 +185,49 @@ impl Ctx<'_> {
         path.display().to_string()
     }
 
+    /// The model's slug and its entry in harn's accepted snapshot of the catalog, or why harn has
+    /// none: config names its own catalog, there is no (readable) model, `models_cache.json` is
+    /// not accepted ([`ModelFacts::cache_use`]), or the model is not in it. The one gate for
+    /// catalog facts; an entry returned here has passed [`validate_cache`].
+    pub fn catalog_entry(&self) -> Result<(&str, &Value), String> {
+        let m = &self.model;
+        if let Some(at) = &m.catalog_unread {
+            return Err(format!("{at}: that catalog is not read"));
+        }
+        let Some(slug) = m.slug.as_deref() else {
+            return Err(match &m.slug_unreadable {
+                Some(at) => format!("{at} is not a string"),
+                None => "no model in config: codex picks its default at startup".to_string(),
+            });
+        };
+        if let Some(why) = m.cache_use.reason() {
+            return Err(why);
+        }
+        match &m.catalog {
+            Some(entry) => Ok((slug, entry)),
+            None => Err(format!(
+                "{slug} is not in {}",
+                self.display(&self.codex_home.join("models_cache.json"))
+            )),
+        }
+    }
+
+    /// A `#[serde(default)] bool` of the catalog entry as codex reads it
+    /// (`include_skills_usage_instructions`, `include_plugin_usage_instructions`,
+    /// `protocol/src/openai_models.rs:432-435`): missing is `false` (any other type has failed
+    /// [`validate_cache`]); `Err` = unknown, with why ([`Ctx::catalog_entry`]).
+    pub fn catalog_flag(&self, flag: &str) -> Result<bool, String> {
+        let (_, entry) = self.catalog_entry()?;
+        Ok(entry.get(flag).and_then(Value::as_bool).unwrap_or(false))
+    }
+
+    /// The [`CATALOG_GATED`] signal: the row renders only if the catalog entry has `condition`.
+    pub fn catalog_gated(condition: &str, unknown: &str) -> String {
+        format!(
+            "{CATALOG_GATED} renders only if the model's catalog entry has {condition}; {unknown}"
+        )
+    }
+
     pub fn user_config(&self) -> PathBuf {
         self.codex_home.join("config.toml")
     }
@@ -115,6 +237,203 @@ impl Ctx<'_> {
         let dot_codex = self.dir().join(".codex");
         (fs::normalize(&dot_codex) != fs::normalize(&self.codex_home))
             .then(|| dot_codex.join("config.toml"))
+    }
+}
+
+pub(crate) fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// [`CacheUse`] for the file and the installed codex, in the contract's order (a)–(d): the file is
+/// missing or not JSON; [`validate_cache`] fails — codex cannot load it
+/// (`models-manager/src/cache.rs:229-239`, a miss at `manager.rs:725-735`), or harn cannot read a
+/// shape; codex is not on `PATH` or its version is unknown; `client_version` is missing or not the
+/// installed version (`manager.rs:739-746`); `identity` is missing (`manager.rs:747-752`).
+fn cache_use(cache: &Json, installed: &Installed) -> CacheUse {
+    let refetch = "codex fetches the catalog instead (models-manager/src/manager.rs:725-752)";
+    let cache = match cache {
+        Json::Missing => return CacheUse::Missing,
+        Json::Invalid(_) => {
+            return CacheUse::Refetched(format!("models_cache.json is not valid JSON; {refetch}"))
+        }
+        Json::Ok(v) => v,
+    };
+    let fetched_at = match validate_cache(cache) {
+        Ok(fetched_at) => fetched_at.to_string(),
+        Err(Invalid::Rejected(why)) => {
+            return CacheUse::Refetched(format!(
+                "models_cache.json: {why}, so codex cannot parse the file; {refetch}"
+            ))
+        }
+        Err(Invalid::Unreadable(why)) => {
+            return CacheUse::Unknown(format!(
+                "models_cache.json: {why}, a shape harn does not read; catalog facts unknown"
+            ))
+        }
+    };
+    let codex_version = match installed {
+        Installed::Version(v) => v,
+        Installed::NotFound => {
+            return CacheUse::Unknown(
+                "codex not found on PATH: cannot tell whether it accepts models_cache.json"
+                    .to_string(),
+            )
+        }
+        Installed::Unversioned => {
+            return CacheUse::Unknown(
+                "the installed codex's version could not be determined: cannot tell whether it accepts models_cache.json"
+                    .to_string(),
+            )
+        }
+    };
+    match cache.get("client_version").and_then(Value::as_str) {
+        None => {
+            return CacheUse::Refetched(format!(
+                "models_cache.json has no client_version; {refetch}"
+            ))
+        }
+        Some(v) if v != codex_version => {
+            return CacheUse::Refetched(format!(
+                "models_cache.json was written by codex {v}, not {codex_version}; {refetch}"
+            ))
+        }
+        Some(_) => {}
+    }
+    if cache.get("identity").and_then(Value::as_str).is_none() {
+        return CacheUse::Refetched(format!(
+            "models_cache.json has no identity (a legacy cache); {refetch}"
+        ));
+    }
+    CacheUse::Used { fetched_at }
+}
+
+/// Why [`validate_cache`] fails.
+enum Invalid {
+    /// codex's serde rejects the file: a missing required field harn checks, or `null` / a
+    /// scalar of the wrong type for a typed field.
+    Rejected(String),
+    /// A shape harn does not read (an array where an object is expected: serde derive may read a
+    /// struct from a sequence). Whether codex accepts it is not known; the facts stay unknown.
+    Unreadable(String),
+}
+
+/// The JSON type serde accepts for a field harn reads.
+#[derive(Clone, Copy)]
+enum Ty {
+    /// `#[serde(default)] bool`: missing is fine, anything else must be a boolean (`null` fails).
+    Bool,
+    /// `Option<String>` (also `deserialize_optional_model_selector`, which reads an
+    /// `Option<String>` first, `protocol/src/openai_models.rs:352-361`): missing, `null` or a string.
+    OptStr,
+    /// `Option<i64>`: missing, `null` or an integer in range.
+    OptI64,
+    /// `Option<struct>`: missing, `null` or an object.
+    OptObj,
+}
+
+/// The `ModelInfo` fields harn reads (and their parents), parents before children
+/// (`protocol/src/openai_models.rs:404-511`, `:544-561`, `:750-753`, the legacy wrapper `:857-863`).
+const ENTRY_FIELDS: &[(&str, Ty)] = &[
+    ("/include_skills_usage_instructions", Ty::Bool),
+    ("/include_plugin_usage_instructions", Ty::Bool),
+    ("/include_apps_usage_instructions", Ty::Bool),
+    ("/supports_search_tool", Ty::Bool),
+    ("/context_window", Ty::OptI64),
+    ("/max_context_window", Ty::OptI64),
+    ("/multi_agent_version", Ty::OptStr),
+    ("/base_instructions", Ty::OptStr),
+    ("/model_messages", Ty::OptObj),
+    ("/model_messages/instructions_template", Ty::OptStr),
+    ("/model_messages/collaboration_modes", Ty::OptObj),
+    ("/model_messages/collaboration_modes/default", Ty::OptStr),
+    ("/model_messages/collaboration_modes/plan", Ty::OptStr),
+];
+
+/// Contract steps (b) and (c) on [`CacheUse`]: the top-level fields (`ModelsCacheEntry`,
+/// `models-manager/src/cache.rs:64-88`) and, per entry, a string `slug`, [`ENTRY_FIELDS`], and
+/// `base_instructions` or `model_messages.instructions_template`
+/// (`protocol/src/openai_models.rs:904-943`). Codex loads the whole file, so one bad field in any
+/// entry fails it for every model. Only the fields harn reads are checked; `fetched_at` is checked
+/// as a string, not parsed as a date, and returned.
+fn validate_cache(cache: &Value) -> Result<&str, Invalid> {
+    use Invalid::{Rejected, Unreadable};
+    let top = match cache {
+        Value::Object(top) => top,
+        Value::Array(_) => return Err(Unreadable("the file is an array".to_string())),
+        other => return Err(Rejected(format!("the file {}", is(other)))),
+    };
+    let fetched_at = match top.get("fetched_at") {
+        Some(Value::String(at)) => at.as_str(),
+        Some(other) => return Err(Rejected(format!("fetched_at {}", is(other)))),
+        None => return Err(Rejected("fetched_at is missing".to_string())),
+    };
+    for key in ["client_version", "identity", "etag"] {
+        if let Some(v) = top.get(key).filter(|v| !v.is_null() && !v.is_string()) {
+            return Err(Rejected(format!("{key} {}", is(v))));
+        }
+    }
+    let models = match top.get("models") {
+        Some(Value::Array(models)) => models,
+        Some(other) => return Err(Rejected(format!("models {}", is(other)))),
+        None => return Err(Rejected("models is missing".to_string())),
+    };
+    for (i, entry) in models.iter().enumerate() {
+        let map = match entry {
+            Value::Object(map) => map,
+            Value::Array(_) => return Err(Unreadable(format!("models[{i}] is an array"))),
+            other => return Err(Rejected(format!("models[{i}] {}", is(other)))),
+        };
+        let slug = match map.get("slug") {
+            Some(Value::String(slug)) => slug,
+            Some(other) => return Err(Rejected(format!("models[{i}].slug {}", is(other)))),
+            None => return Err(Rejected(format!("models[{i}] has no slug"))),
+        };
+        for (pointer, ty) in ENTRY_FIELDS {
+            let Some(v) = entry.pointer(pointer) else {
+                continue;
+            };
+            let field = || format!("models[{i}] ({slug}) {}", pointer[1..].replace('/', "."));
+            match (ty, v) {
+                (Ty::Bool, Value::Bool(_))
+                | (Ty::OptStr, Value::Null | Value::String(_))
+                | (Ty::OptObj, Value::Null | Value::Object(_)) => {}
+                (Ty::OptI64, Value::Null) => {}
+                (Ty::OptI64, Value::Number(n)) if n.as_i64().is_some() => {}
+                (Ty::OptI64, Value::Number(_)) => {
+                    return Err(Rejected(format!(
+                        "{} is not an integer in i64 range",
+                        field()
+                    )))
+                }
+                (Ty::OptObj, Value::Array(_)) => {
+                    return Err(Unreadable(format!("{} is an array", field())))
+                }
+                (_, other) => return Err(Rejected(format!("{} {}", field(), is(other)))),
+            }
+        }
+        let text = |pointer: &str| entry.pointer(pointer).is_some_and(Value::is_string);
+        if !text("/base_instructions") && !text("/model_messages/instructions_template") {
+            return Err(Rejected(format!(
+                "models[{i}] ({slug}) has neither base_instructions nor model_messages.instructions_template"
+            )));
+        }
+    }
+    Ok(fetched_at)
+}
+
+/// `is null` / `is a string` / `is an array` …
+fn is(v: &Value) -> String {
+    match v {
+        Value::Null => "is null".to_string(),
+        Value::Array(_) | Value::Object(_) => format!("is an {}", json_type(v)),
+        other => format!("is a {}", json_type(other)),
     }
 }
 
@@ -258,7 +577,9 @@ pub(crate) fn resolve_with(
         },
         &mut warnings,
     )?;
-    let model = model_facts(&fs, target, &codex_home, &config, &mut warnings);
+    // The installed codex decides which models_cache.json it accepts.
+    let installed = installed_codex(target);
+    let model = model_facts(&fs, target, &codex_home, &config, &installed, &mut warnings);
     let mut ctx = Ctx {
         target,
         fs,
@@ -315,7 +636,10 @@ pub(crate) fn resolve_with(
             config::PROFILE_ENV
         ));
     }
-    tree.agent_version = agent_version(target);
+    tree.agent_version = match installed {
+        Installed::Version(v) => Some(v),
+        Installed::NotFound | Installed::Unversioned => None,
+    };
     let mut warnings = ctx.warnings;
     if let Some(v) = tree.agent_version.as_deref() {
         if version_key(v) > version_key(super::Codex::VERIFIED_AGAINST) {
@@ -406,25 +730,43 @@ fn model_signal(ctx: &Ctx) -> String {
         (_, _, Some(at)) => {
             format!("{model} · context window unknown ({at}: that catalog is not read)")
         }
+        (None, Some(why), None) => format!("{model} · context window unknown ({why})"),
         _ => format!("{model} · context window unknown"),
     };
     // The cache is rewritten by whichever codex refreshed it last (two installs on one machine
     // take turns), so its version is a fact about the file, not the installed codex.
-    match &m.catalog_version {
+    let model = match &m.catalog_version {
         Some(v) => format!("{model} · models_cache.json written by codex {v}"),
         None => model,
+    };
+    // Every definite catalog-gated row rests on this entry: say what it is and what was not
+    // checked (the contract on `CacheUse`).
+    if let (Ok(_), CacheUse::Used { fetched_at }) = (ctx.catalog_entry(), &m.cache_use) {
+        return format!(
+            "{model} · catalog facts from codex's catalog fetched at {fetched_at} (models_cache.json): codex re-checks a catalog older than 5 minutes with the server when it starts, identity is not compared with your login, and `harn verify --run --agent codex` confirms"
+        );
+    }
+    match (&m.catalog_unread, &m.cache_use) {
+        (None, CacheUse::Refetched(why) | CacheUse::Unknown(why)) => {
+            format!("{model} · models_cache.json not used: {why}")
+        }
+        _ => model,
     }
 }
 
 /// The model (`target.model`, else the effective `model` key), its `models_cache.json` entry,
 /// and the context window: `target.context_window`, else `model_context_window` clamped to the
 /// catalog's `max_context_window` (`models-manager/src/model_info.rs:20-27`), else the catalog's
-/// `context_window`.
+/// `context_window`. The catalog's two values count only from an accepted snapshot
+/// ([`CacheUse::Used`]); without one a configured window is named but unknown, since the
+/// catalog's maximum may lower it. `installed` is the codex whose version the snapshot must
+/// match.
 fn model_facts(
     fs: &Fs,
     target: &Target,
     codex_home: &Path,
     config: &Config,
+    installed: &Installed,
     warnings: &mut Vec<String>,
 ) -> ModelFacts {
     let mut m = ModelFacts::default();
@@ -450,7 +792,9 @@ fn model_facts(
         return m;
     }
     let cache_path = codex_home.join("models_cache.json");
-    let cache = match fs.read_json(&cache_path) {
+    let json = fs.read_json(&cache_path);
+    m.cache_use = cache_use(&json, installed);
+    let cache = match json {
         Json::Ok(v) => Some(v),
         Json::Invalid(err) => {
             warnings.push(format!(
@@ -478,14 +822,15 @@ fn model_facts(
                 .cloned();
         }
     }
-    let catalog_window = m
+    // Catalog facts only from an accepted snapshot (the contract on `CacheUse`).
+    let accepted = m
         .catalog
         .as_ref()
+        .filter(|_| matches!(m.cache_use, CacheUse::Used { .. }));
+    let catalog_window = accepted
         .and_then(|e| e.get("context_window"))
         .and_then(Value::as_u64);
-    let catalog_max = m
-        .catalog
-        .as_ref()
+    let catalog_max = accepted
         .and_then(|e| e.get("max_context_window"))
         .and_then(Value::as_u64);
     if let Some(w) = target.context_window {
@@ -494,14 +839,23 @@ fn model_facts(
     } else if let Some((value, layer)) = config.get("/model_context_window") {
         // Set but not a non-negative integer: unknown, never the catalog's value instead.
         if let Some(w) = value.as_u64() {
-            m.context_window = Some(catalog_max.map_or(w, |max| w.min(max)));
-            m.window_from = Some(match catalog_max {
-                Some(max) if max < w => format!(
-                    "{} clamped to models_cache.json max_context_window {max}",
-                    layer.at("/model_context_window")
-                ),
-                _ => layer.at("/model_context_window"),
-            });
+            let at = layer.at("/model_context_window");
+            match m.cache_use.reason() {
+                Some(why) => {
+                    m.window_from = Some(format!(
+                        "configured {w} ({at}); the catalog's max_context_window may lower it, and models_cache.json is not used: {why}"
+                    ));
+                }
+                None => {
+                    m.context_window = Some(catalog_max.map_or(w, |max| w.min(max)));
+                    m.window_from = Some(match catalog_max {
+                        Some(max) if max < w => {
+                            format!("{at} clamped to models_cache.json max_context_window {max}")
+                        }
+                        _ => at,
+                    });
+                }
+            }
         }
     } else if let Some(w) = catalog_window {
         m.context_window = Some(w);
@@ -510,17 +864,27 @@ fn model_facts(
     m
 }
 
-/// The installed codex version, from files only: the first `codex` on the target's `PATH`,
-/// followed through symlinks, named by the `@openai/codex` `package.json` above it (npm, also
+/// The installed codex, from files only: the first `codex` on the target's `PATH`, followed
+/// through symlinks, its version named by the `@openai/codex` `package.json` above it (npm, also
 /// under a versioned Node such as `…/node/22.1.0/lib/node_modules/…`), else by a `x.y.z` path
-/// component right under a `codex` component (Homebrew: `…/Caskroom/codex/0.160.1/bin/codex`).
-/// Never runs the binary.
-fn agent_version(target: &Target) -> Option<String> {
+/// component right under a `codex` component (Homebrew: `…/Caskroom/codex/0.160.1/bin/codex`);
+/// neither = [`Installed::Unversioned`]. Never runs the binary.
+fn installed_codex(target: &Target) -> Installed {
+    match codex_on_path(target) {
+        None => Installed::NotFound,
+        Some(exe) => version_of(&exe).map_or(Installed::Unversioned, Installed::Version),
+    }
+}
+
+fn codex_on_path(target: &Target) -> Option<PathBuf> {
     let path = target.env.get("PATH")?;
-    let exe = std::env::split_paths(path)
+    std::env::split_paths(path)
         .map(|d| d.join("codex"))
-        .find(|p| is_executable(p))?;
-    let real = std::fs::canonicalize(&exe).ok()?;
+        .find(|p| is_executable(p))
+}
+
+fn version_of(exe: &Path) -> Option<String> {
+    let real = std::fs::canonicalize(exe).ok()?;
     let from_package = real.ancestors().skip(1).find_map(|dir| {
         let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
         let pkg: Value = serde_json::from_str(&text).ok()?;
@@ -689,11 +1053,11 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn agent_version_follows_the_codex_on_path() {
+    fn installed_codex_follows_the_codex_on_path() {
         let t = tmp();
         let root = &t.0;
         let mut target = target(root);
-        assert_eq!(agent_version(&target), None, "no PATH");
+        assert_eq!(installed_codex(&target), Installed::NotFound, "no PATH");
 
         // Homebrew cask layout: the version is a path component of the symlink target.
         use std::os::unix::fs::PermissionsExt;
@@ -712,7 +1076,10 @@ mod tests {
                 root.join("bin").display()
             ),
         );
-        assert_eq!(agent_version(&target).as_deref(), Some("0.161.0"));
+        assert_eq!(
+            installed_codex(&target),
+            Installed::Version("0.161.0".to_string())
+        );
 
         // npm under a versioned Node: the package.json decides, not Node's version component.
         let npm = root.join("Cellar/node/22.1.0");
@@ -734,7 +1101,10 @@ mod tests {
         target
             .env
             .insert("PATH".to_string(), npm.join("bin").display().to_string());
-        assert_eq!(agent_version(&target).as_deref(), Some("0.160.1"));
+        assert_eq!(
+            installed_codex(&target),
+            Installed::Version("0.160.1".to_string())
+        );
 
         // A version component not under `codex`, and no package.json: unknown.
         let other = root.join("other/1.2.3/bin/codex");
@@ -744,7 +1114,7 @@ mod tests {
             "PATH".to_string(),
             other.parent().unwrap().display().to_string(),
         );
-        assert_eq!(agent_version(&target), None);
+        assert_eq!(installed_codex(&target), Installed::Unversioned);
     }
 
     #[test]

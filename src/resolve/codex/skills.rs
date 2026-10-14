@@ -30,8 +30,10 @@
 //! `SKILL.md` path, or `rN/…` against a `### Skill roots` table when that costs fewer tokens
 //! (render.rs:983-1061, `aliases.rs:13-50`, `host_aliases.rs:8-68`). `### How to use skills`
 //! follows only when the model's catalog entry sets `include_skills_usage_instructions`
-//! (`fragments.rs:18-36`; default false, `protocol/src/openai_models.rs:432-433`). SKILL.md bodies
-//! are not loaded (entries are `advertised`).
+//! (`fragments.rs:18-36`; a `#[serde(default)] bool`, `protocol/src/openai_models.rs:432-433`, so
+//! missing is false; unknown while harn does not accept `models_cache.json` as its snapshot —
+//! the contract on `CacheUse` — [`super::Ctx::catalog_flag`]). SKILL.md bodies are not loaded
+//! (entries are `advertised`).
 //!
 //! Budget: `skills.max_context_tokens` capped at 10,000 when set, else 2 % of the context window
 //! (render.rs:126-152), counted in Codex's own tokens, `ceil(bytes / 4)` per line + `\n`
@@ -56,7 +58,7 @@ use std::path::{Path, PathBuf};
 
 /// Pushed to `Tree.warnings` when the budget cannot be computed (the window is unknown to harn).
 pub const CAP_STATE_UNKNOWN: &str =
-    "codex skill listing budget unknown (the model's context window is not in the config or models_cache.json); fit state unknown until a capture";
+    "codex skill listing budget unknown (the model's context window is unknown: see the model: signal); fit state unknown until a capture";
 
 /// The listing container's id name and the framing row's id name.
 pub(crate) const LISTING: &str = "skills";
@@ -1019,16 +1021,6 @@ fn render(
     }
 }
 
-/// `include_skills_usage_instructions` of the model's catalog entry: Some(value) when the entry
-/// is known (a missing field is unknown: the cache may predate it and codex refreshes it).
-fn usage_instructions(ctx: &Ctx) -> Option<bool> {
-    ctx.model
-        .catalog
-        .as_ref()?
-        .get("include_skills_usage_instructions")?
-        .as_bool()
-}
-
 /// The `[[skills.config]]` knob for one skill: appended to the user config (the profile file when
 /// it re-enables the skill, since its rules come later).
 fn skill_knob(ctx: &Ctx, skill: &Skill, rules: &[Rule]) -> Knob {
@@ -1282,8 +1274,8 @@ fn framing_row(ctx: &Ctx, r: &Rendered, knobs: Vec<Knob>) -> Item {
     item.origin.why = vec![
         "`<skills_instructions>` developer block around the listing: `## Skills`, the intro, the roots table when used, `### Available skills` (ext/skills/src/catalog_prompt.rs:81-106)".to_string(),
     ];
-    match usage_instructions(ctx) {
-        Some(usage) => {
+    match ctx.catalog_flag("include_skills_usage_instructions") {
+        Ok(usage) => {
             item.cost = Cost {
                 predicted: Some(framing(usage)),
                 predicted_is_estimate: r.fits == Some(false),
@@ -1294,9 +1286,9 @@ fn framing_row(ctx: &Ctx, r: &Rendered, knobs: Vec<Knob>) -> Item {
                 if usage { "follows" } else { "is left out" }
             ));
         }
-        None => {
+        Err(why) => {
             item.origin.why.push(format!(
-                "size unknown: {} bytes without `### How to use skills`, {} with it; the model's catalog entry does not say include_skills_usage_instructions (fragments.rs:24-30)",
+                "size unknown: {} bytes without `### How to use skills`, {} with it (fragments.rs:24-30); include_skills_usage_instructions unknown: {why}",
                 framing(false),
                 framing(true)
             ));
