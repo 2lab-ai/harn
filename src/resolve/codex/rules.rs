@@ -103,35 +103,52 @@ fn rule_files(ctx: &Ctx, dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether approved prefixes reach the request, and why. A value codex refuses to start with is
-/// warned about; it is never read as unset.
+/// Whether approved prefixes reach the request, and why. The approval policy is validated first,
+/// whatever the switch says: a value codex refuses to start with is warned about and never read
+/// as unset.
 fn prefixes_render(ctx: &mut Ctx) -> (bool, String) {
-    let mut note = String::new();
+    let (policy_renders, policy_why, refused) = approval_policy(ctx);
+    let policy_why = if refused {
+        let why = format!("{policy_why}; codex refuses to start with it");
+        ctx.warnings.push(why.clone());
+        why
+    } else {
+        policy_why
+    };
     match ctx.config.get("/include_permissions_instructions") {
         Some((Value::Bool(false), layer)) => {
-            return (
-                false,
-                format!(
-                    "{} = false: the compact block that replaces the permissions block (core/src/session/world_state.rs:168-201) renders nothing in the first request — it is rendered in full against an absent previous state (core/src/session/mod.rs:4451, core/src/context/world_state/mod.rs:398-399, 440-443) and returns None then (core/src/context/world_state/compact_permissions.rs:39-50); prefixes reach the model only later, as \"approved command prefix saved\" messages",
-                    layer.at("/include_permissions_instructions")
-                ),
+            let switch = format!(
+                "{} = false: the compact block that replaces the permissions block (core/src/session/world_state.rs:168-201) renders nothing in the first request — it is rendered in full against an absent previous state (core/src/session/mod.rs:4451, core/src/context/world_state/mod.rs:398-399, 440-443) and returns None then (core/src/context/world_state/compact_permissions.rs:39-50); prefixes reach the model only later, as \"approved command prefix saved\" messages",
+                layer.at("/include_permissions_instructions")
             );
+            let why = if refused {
+                format!("{switch}; {policy_why}")
+            } else {
+                switch
+            };
+            (false, why)
         }
-        Some((Value::Bool(true), _)) | None => {}
+        Some((Value::Bool(true), _)) | None => (policy_renders, policy_why),
         // The permissions block row (`builtins`) reports this key; here it only qualifies the
-        // policy below.
-        Some((value, layer)) => {
-            note = format!(
-                "{}; codex refuses to start with it; ",
+        // policy.
+        Some((value, layer)) => (
+            policy_renders,
+            format!(
+                "{}; codex refuses to start with it; {policy_why}",
                 not_a(
                     &layer.at("/include_permissions_instructions"),
                     value,
                     "a boolean"
                 )
-            );
-        }
+            ),
+        ),
     }
-    let (renders, why, refused) = match ctx.config.get("/approval_policy") {
+}
+
+/// The effective approval policy: whether it renders approved prefixes, why, and whether codex
+/// refuses to start with it (`core/src/config/mod.rs:3726-3744`).
+fn approval_policy(ctx: &Ctx) -> (bool, String, bool) {
+    match ctx.config.get("/approval_policy") {
         Some((Value::String(policy), layer)) => {
             let at = layer.at("/approval_policy");
             match policy.as_str() {
@@ -175,6 +192,8 @@ fn prefixes_render(ctx: &mut Ctx) -> (bool, String) {
             not_a(&layer.at("/approval_policy"), value, "an approval policy"),
             true,
         ),
+        // The default for an explicitly untrusted project is `untrusted` too, which codex
+        // accepts there (only an explicit setting is refused).
         None if ctx.config.active_project.is_untrusted() => (
             false,
             "approval_policy unset and the project is untrusted: policy `untrusted` has no approved-prefix section (core/src/config/mod.rs:3734-3744)"
@@ -187,15 +206,7 @@ fn prefixes_render(ctx: &mut Ctx) -> (bool, String) {
                 .to_string(),
             false,
         ),
-    };
-    let why = if refused {
-        let why = format!("{why}; codex refuses to start with it");
-        ctx.warnings.push(why.clone());
-        why
-    } else {
-        why
-    };
-    (renders, format!("{note}{why}"))
+    }
 }
 
 #[cfg(test)]
@@ -374,5 +385,73 @@ mod tests {
         assert!(row.origin.why.iter().any(
             |w| w.contains("#/include_permissions_instructions") && w.contains("not a boolean")
         ));
+    }
+
+    fn policy_warnings(tree: &Tree) -> Vec<&String> {
+        tree.warnings
+            .iter()
+            .filter(|w| w.contains("#/approval_policy") && w.contains("codex refuses to start"))
+            .collect()
+    }
+
+    #[test]
+    fn an_explicit_untrusted_policy_is_refused_and_the_project_default_is_not() {
+        let t = tmp();
+        let root = &t.0;
+        write(&root.join("repo/.git/HEAD"), "ref: refs/heads/main\n");
+        let codex = root.join("home/.codex");
+        write(&codex.join("rules/default.rules"), RULE);
+        // Explicit: `UnsupportedUntrustedApprovalPolicyError` (core/src/config/mod.rs:3726-3731).
+        write(
+            &codex.join("config.toml"),
+            "approval_policy = \"untrusted\"\n",
+        );
+        let tree = resolve(root);
+        assert_eq!(rules(&tree)[0].mode, Mode::Runtime);
+        let w = policy_warnings(&tree);
+        assert_eq!(w.len(), 1, "{:?}", tree.warnings);
+        assert!(w[0].contains("no longer supported"), "{}", w[0]);
+        // The untrusted project's default policy is `untrusted` too, but codex accepts it.
+        write(
+            &codex.join("config.toml"),
+            &format!(
+                "[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+                root.join("repo").display()
+            ),
+        );
+        let tree = resolve(root);
+        assert_eq!(rules(&tree)[0].mode, Mode::Runtime);
+        assert!(policy_warnings(&tree).is_empty(), "{:?}", tree.warnings);
+    }
+
+    #[test]
+    fn the_policy_is_validated_even_with_the_permissions_block_off() {
+        let t = tmp();
+        let root = &t.0;
+        write(&root.join("repo/.git/HEAD"), "ref: refs/heads/main\n");
+        let codex = root.join("home/.codex");
+        write(&codex.join("rules/default.rules"), RULE);
+        for policy in ["3", "nan", "\"sometimes\"", "\"untrusted\""] {
+            write(
+                &codex.join("config.toml"),
+                &format!("include_permissions_instructions = false\napproval_policy = {policy}\n"),
+            );
+            let tree = resolve(root);
+            assert_eq!(rules(&tree)[0].mode, Mode::Runtime, "{policy}");
+            assert_eq!(
+                policy_warnings(&tree).len(),
+                1,
+                "{policy}: {:?}",
+                tree.warnings
+            );
+            assert!(
+                rules(&tree)[0]
+                    .origin
+                    .why
+                    .iter()
+                    .any(|w| w.contains("#/approval_policy")),
+                "{policy}"
+            );
+        }
     }
 }

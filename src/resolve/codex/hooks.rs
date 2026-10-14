@@ -896,6 +896,14 @@ fn load_hooks_json(ctx: &mut Ctx, path: &Path) -> Option<(PathBuf, Events)> {
 }
 
 /// `load_toml_hooks_from_layer` (`discovery:382-400`).
+///
+/// TOML mode (`null` = a non-finite float) holds for the whole table: overlay patches come only
+/// from this resolver's knobs (`plan.rs` `overlay_op`; plans pick knobs by index), and no knob
+/// writes under `/hooks/<Event>` or writes `null` (pinned by the test
+/// `no_knob_writes_into_hook_declarations_or_writes_null`; the hook knob writes `false` under
+/// `/hooks/state`, which [`hook_state`] reads through `LayerFile::lookup`). A knob that ever
+/// patches a hook declaration must switch this to per-field provenance, as `mcp.rs` `readable`
+/// does.
 fn load_toml_hooks(ctx: &mut Ctx, file: &Path, table: &Value) -> Option<(PathBuf, Events)> {
     match parse_events(table, true) {
         Ok(events) if !events.is_empty() => Some((file.to_path_buf(), events)),
@@ -1955,5 +1963,68 @@ mod tests {
             "{:?}",
             tree.warnings
         );
+    }
+
+    #[test]
+    fn a_non_finite_inline_hook_field_is_a_parse_error() {
+        let t = tmp();
+        let root = &t.0;
+        let target = setup(root);
+        let config = root.join("home/.codex/config.toml");
+        write(
+            &config,
+            "[[hooks.SessionStart]]\nmatcher = nan\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = \"c\"\n",
+        );
+        let tree = resolve(root, &target, None);
+        assert!(hooks(&tree).is_empty());
+        assert!(
+            tree.warnings.iter().any(|w| w.starts_with(&format!(
+                "failed to parse TOML hooks in {}: `SessionStart`: `matcher`: expected a string, found a non-finite float",
+                config.display()
+            ))),
+            "{:?}",
+            tree.warnings
+        );
+    }
+
+    /// The invariant TOML mode rests on: no knob of this resolver (the only source of overlay
+    /// patches, `plan.rs` `overlay_op`) writes under `/hooks/<Event>`, and none writes `null`, so a
+    /// `null` inside an inline hooks table can only be a non-finite float.
+    #[test]
+    fn no_knob_writes_into_hook_declarations_or_writes_null() {
+        let t = tmp();
+        let root = &t.0;
+        let target = setup(root);
+        let codex = root.join("home/.codex");
+        write(&codex.join("hooks.json"), HOOKS_JSON);
+        write(
+            &codex.join("rules/default.rules"),
+            "prefix_rule(pattern = [\"ls\"])\n",
+        );
+        write(
+            &codex.join("config.toml"),
+            &format!(
+                "developer_instructions = \"x\"\n[mcp_servers.m]\ncommand = \"m\"\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"s\"\n{}",
+                trust_project(root)
+            ),
+        );
+        write(&root.join("repo/AGENTS.md"), "agents");
+        write(&root.join("repo/.codex/hooks.json"), HOOKS_JSON);
+        let tree = resolve(root, &target, None);
+        let mut settings = 0;
+        for item in walk(&tree) {
+            for knob in &item.knobs {
+                if let Knob::Setting { pointer, value, .. } = knob {
+                    settings += 1;
+                    assert!(
+                        !pointer.starts_with("/hooks/") || pointer.starts_with("/hooks/state/"),
+                        "{} writes {pointer}",
+                        item.id
+                    );
+                    assert!(!value.is_null(), "{} writes null at {pointer}", item.id);
+                }
+            }
+        }
+        assert!(settings > 10, "the fixture exercises the knobs: {settings}");
     }
 }
