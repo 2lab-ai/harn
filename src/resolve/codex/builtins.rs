@@ -29,6 +29,20 @@ pub(crate) fn base_instructions(ctx: &mut Ctx) -> Item {
     item.knobs = vec![Knob::None {
         reason: BASE_KNOB.to_string(),
     }];
+    // Set to something that is not a string: codex refuses the config; the size stays unknown
+    // rather than falling back to the next source.
+    for key in ["/model_instructions_file", "/instructions"] {
+        if let Some((value, layer)) = ctx.config.get(key) {
+            if !value.is_string() {
+                let at = layer.at(key);
+                item.origin.setting = Some(at.clone());
+                item.origin.why = vec![format!(
+                    "{at} is not a string; codex refuses to start with it; size unknown"
+                )];
+                return item;
+            }
+        }
+    }
     if let Some((value, layer)) = ctx.config.get_str("/model_instructions_file") {
         let at = layer.at("/model_instructions_file");
         // Relative paths resolve against the layer's own dir (`resolve_relative_paths_in_config_toml`).
@@ -210,6 +224,10 @@ fn block(
         Some((Value::Bool(_), layer)) => format!("{} = true", layer.at(pointer)),
         // Set to a non-boolean: codex refuses the config; harn keeps the row rather than
         // guessing the default.
+        Some((Value::Null, layer)) => format!(
+            "{} is a non-finite float harn cannot read; codex refuses to start with it",
+            layer.at(pointer)
+        ),
         Some((value, layer)) => format!(
             "{} = {value} is not a boolean; codex refuses to start with it",
             layer.at(pointer)

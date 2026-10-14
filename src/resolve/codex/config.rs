@@ -23,8 +23,10 @@
 //! `SetJson` patches applied, so `plan` computes freed bytes by re-resolving: a patch on a missing
 //! file reads as `{}` plus the patch, the way `harn off` would create it. A JSON `null` written by
 //! a patch reads as "key absent" (TOML has no null). A file that is not UTF-8 is unreadable, as it
-//! is to codex (`file-system/src/lib.rs:650-659`); a non-finite float (`nan`, `inf`) reads as its
-//! TOML literal, a string, so the key stays set instead of falling back to a lower layer.
+//! is to codex (`file-system/src/lib.rs:650-659`). A non-finite float (`nan`, `inf`) has no JSON
+//! form: its key stays set — no lower layer shows through — but unreadable as any type
+//! ([`Lookup::Unreadable`]; [`Config::get`] hands it out as JSON `null`, which no typed reader
+//! accepts). The list is taken after the overlay, so a patch that replaces the value clears it.
 //!
 //! Trust (`projects."<path>".trust_level`):
 //! - a project layer in dir `D` is enabled iff the first entry found for `D`, else for the project
@@ -95,7 +97,22 @@ pub(crate) struct LayerFile {
     /// Why Codex skips this layer: a project layer whose dir is not explicitly trusted. A
     /// disabled layer stays listed (its `.codex/skills` still load, `research/02` §3).
     pub disabled: Option<String>,
+    /// Pointers set to a non-finite float: set, but readable as no type (`null` in `value`).
+    pub unreadable: Vec<String>,
 }
+
+/// What one layer says about a pointer.
+pub(crate) enum Lookup<'a> {
+    /// Missing, or `null` (an overlay's "remove the key").
+    Absent,
+    Set(&'a Value),
+    /// The pointer or a parent of it is a non-finite float.
+    Unreadable,
+}
+
+/// [`Config::get`]'s value for a [`Lookup::Unreadable`] key: `null`, rejected by every typed
+/// reader, so no caller mistakes it for a setting and none falls back to a lower layer.
+static UNREADABLE: Value = Value::Null;
 
 impl LayerFile {
     /// `"<file>#<pointer>"` (`"codex defaults#<pointer>"` for the packaged defaults).
@@ -103,6 +120,20 @@ impl LayerFile {
         match &self.path {
             Some(path) => format!("{}#{pointer}", path.display()),
             None => format!("codex defaults#{pointer}"),
+        }
+    }
+
+    pub fn lookup(&self, pointer: &str) -> Lookup<'_> {
+        let blocked = self
+            .unreadable
+            .iter()
+            .any(|u| pointer == u || pointer.starts_with(&format!("{u}/")));
+        if blocked {
+            return Lookup::Unreadable;
+        }
+        match self.value.pointer(pointer) {
+            None | Some(Value::Null) => Lookup::Absent,
+            Some(v) => Lookup::Set(v),
         }
     }
 
@@ -164,10 +195,13 @@ pub(crate) struct Config {
     pub active_project: Decision,
 }
 
+/// Non-finite floats of a document: `(pointer, TOML literal)`.
+type NonFinite = Vec<(String, &'static str)>;
+
 enum Toml {
     Missing,
-    /// The document and the pointers of its non-finite floats.
-    Ok(Value, Vec<String>),
+    /// The document (overlay applied) and its non-finite floats still there: `(pointer, literal)`.
+    Ok(Value, NonFinite),
     /// Not TOML.
     Invalid(String),
     /// Not UTF-8: codex reads config files with `String::from_utf8` and fails on the error
@@ -209,8 +243,10 @@ impl Reader<'_> {
             }
             None => return Toml::Missing,
         };
+        let mut non_finite = non_finite;
         for (_, pointer, patch) in patches {
             fs::set_pointer(&mut value, pointer, patch.clone());
+            non_finite.retain(|(u, _)| !overwrites(pointer, u));
         }
         Toml::Ok(value, non_finite)
     }
@@ -225,6 +261,7 @@ impl Reader<'_> {
                     path: Some(self.fs.realpath(path)),
                     value,
                     disabled: None,
+                    unreadable: non_finite.into_iter().map(|(p, _)| p).collect(),
                 })
             }
             Toml::Ok(..) | Toml::Missing => None,
@@ -239,20 +276,27 @@ impl Reader<'_> {
     }
 }
 
-/// A non-finite float (`nan`, `inf`) has no JSON number: the key reads as the TOML literal (a
-/// string), so it stays set — masking lower layers — and every typed reader sees a wrong type.
-fn warn_non_finite(path: &Path, pointers: &[String], warnings: &mut Vec<String>) {
-    for pointer in pointers {
+/// `set_pointer(patch)` replaces the value at `unreadable`: the same pointer, a parent of it, or
+/// a child of it (descending turns the scalar into a table).
+fn overwrites(patch: &str, unreadable: &str) -> bool {
+    patch.is_empty()
+        || patch == unreadable
+        || unreadable.starts_with(&format!("{patch}/"))
+        || patch.starts_with(&format!("{unreadable}/"))
+}
+
+fn warn_non_finite(path: &Path, found: &[(String, &'static str)], warnings: &mut Vec<String>) {
+    for (pointer, literal) in found {
         warnings.push(format!(
-            "{}#{pointer}: non-finite float; harn keeps the key as set (no fallback to a lower layer) and codex rejects it wherever the key is not a float",
+            "{}#{pointer}: non-finite float `{literal}`; harn keeps the key set but unreadable (no lower layer's value is used) and codex rejects it unless the key takes a float",
             path.display()
         ));
     }
 }
 
 /// A TOML document as JSON: tables and inline tables → objects, arrays of tables → arrays,
-/// datetimes → strings, non-finite floats → their TOML literal as a string (listed by pointer).
-pub(crate) fn parse(text: &str) -> Result<(Value, Vec<String>), String> {
+/// datetimes → strings, non-finite floats → `null`, listed with their pointer and literal.
+pub(crate) fn parse(text: &str) -> Result<(Value, NonFinite), String> {
     let doc = text
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| e.to_string().trim().replace('\n', " "))?;
@@ -261,7 +305,7 @@ pub(crate) fn parse(text: &str) -> Result<(Value, Vec<String>), String> {
     Ok((value, non_finite))
 }
 
-fn table_json(table: &toml_edit::Table, at: &str, non_finite: &mut Vec<String>) -> Value {
+fn table_json(table: &toml_edit::Table, at: &str, non_finite: &mut NonFinite) -> Value {
     let mut map = Map::new();
     for (key, item) in table.iter() {
         let pointer = format!("{at}/{}", fs::esc(key));
@@ -272,7 +316,7 @@ fn table_json(table: &toml_edit::Table, at: &str, non_finite: &mut Vec<String>) 
     Value::Object(map)
 }
 
-fn item_json(item: &toml_edit::Item, at: &str, non_finite: &mut Vec<String>) -> Option<Value> {
+fn item_json(item: &toml_edit::Item, at: &str, non_finite: &mut NonFinite) -> Option<Value> {
     match item {
         toml_edit::Item::None => None,
         toml_edit::Item::Value(v) => Some(value_json(v, at, non_finite)),
@@ -286,7 +330,7 @@ fn item_json(item: &toml_edit::Item, at: &str, non_finite: &mut Vec<String>) -> 
     }
 }
 
-fn value_json(value: &toml_edit::Value, at: &str, non_finite: &mut Vec<String>) -> Value {
+fn value_json(value: &toml_edit::Value, at: &str, non_finite: &mut NonFinite) -> Value {
     match value {
         toml_edit::Value::String(s) => Value::String(s.value().clone()),
         toml_edit::Value::Integer(i) => Value::from(*i.value()),
@@ -295,7 +339,6 @@ fn value_json(value: &toml_edit::Value, at: &str, non_finite: &mut Vec<String>) 
             match serde_json::Number::from_f64(x) {
                 Some(n) => Value::Number(n),
                 None => {
-                    non_finite.push(at.to_string());
                     let literal = if x.is_nan() {
                         "nan"
                     } else if x > 0.0 {
@@ -303,7 +346,8 @@ fn value_json(value: &toml_edit::Value, at: &str, non_finite: &mut Vec<String>) 
                     } else {
                         "-inf"
                     };
-                    Value::String(literal.to_string())
+                    non_finite.push((at.to_string(), literal));
+                    Value::Null
                 }
             }
         }
@@ -359,6 +403,7 @@ impl Config {
             path: None,
             value: parse(DEFAULTS_TOML).expect("the packaged defaults parse").0,
             disabled: None,
+            unreadable: Vec::new(),
         }];
         let system_file = paths.system_dir.join("config.toml");
         layers.extend(reader.layer(Source::System, &system_file, warnings));
@@ -440,11 +485,13 @@ impl Config {
                     user_file.display()
                 ),
             });
+            let mut unreadable = Vec::new();
             let mut value = match reader.read(&config_file) {
                 Toml::Ok(v, non_finite) if v.is_object() => {
                     if disabled.is_none() {
                         warn_non_finite(&config_file, &non_finite, warnings);
                     }
+                    unreadable = non_finite.into_iter().map(|(p, _)| p).collect();
                     v
                 }
                 Toml::Invalid(err) if disabled.is_none() => {
@@ -485,6 +532,7 @@ impl Config {
                 path: Some(fs.realpath(&config_file)),
                 value,
                 disabled,
+                unreadable,
             });
         }
         layers.extend(project_layers);
@@ -514,18 +562,22 @@ impl Config {
     }
 
     /// The effective value at `pointer` and the layer that set it: the highest enabled layer
-    /// where it is present and not null.
+    /// where it is present and not null. A [`Lookup::Unreadable`] key stops the search there and
+    /// comes back as `null` (the only time `get` returns `null`).
     pub fn get(&self, pointer: &str) -> Option<(&Value, &LayerFile)> {
         self.layers
             .iter()
             .rev()
             .filter(|l| l.enabled())
-            .find_map(|l| match l.value.pointer(pointer) {
-                Some(Value::Null) | None => None,
-                Some(v) => Some((v, l)),
+            .find_map(|l| match l.lookup(pointer) {
+                Lookup::Absent => None,
+                Lookup::Set(v) => Some((v, l)),
+                Lookup::Unreadable => Some((&UNREADABLE, l)),
             })
     }
 
+    /// A string setting; None when unset or set to anything else (callers that must not treat
+    /// "set but not a string" as unset match on [`Config::get`]).
     pub fn get_str(&self, pointer: &str) -> Option<(&str, &LayerFile)> {
         self.get(pointer)
             .and_then(|(v, l)| v.as_str().map(|s| (s, l)))
@@ -545,7 +597,7 @@ impl Config {
         self.layers.iter().rev().find(|l| {
             l.enabled()
                 && rank(l.source) > rank(source)
-                && !matches!(l.value.pointer(pointer), None | Some(Value::Null))
+                && !matches!(l.lookup(pointer), Lookup::Absent)
         })
     }
 
@@ -587,12 +639,15 @@ struct Trust<'a> {
 impl Trust<'_> {
     fn lookup(&self, key: &str, warnings: &mut Vec<String>) -> Option<Decision> {
         let pointer = format!("/projects/{}/trust_level", fs::esc(key));
-        let (value, layer) = self.layers.iter().rev().find_map(|l| {
-            l.value
-                .pointer(&pointer)
-                .filter(|v| !v.is_null())
-                .map(|v| (v, *l))
-        })?;
+        let (value, layer) = self
+            .layers
+            .iter()
+            .rev()
+            .find_map(|l| match l.lookup(&pointer) {
+                Lookup::Absent => None,
+                Lookup::Set(v) => Some((v, *l)),
+                Lookup::Unreadable => Some((&UNREADABLE, *l)),
+            })?;
         let level = match value.as_str() {
             Some("trusted") => TrustLevel::Trusted,
             Some("untrusted") => TrustLevel::Untrusted,
@@ -648,12 +703,14 @@ fn keys(path: &Path) -> Vec<String> {
 
 /// `project_root_markers` from the given layers; the default `[".git"]` when unset or invalid.
 fn root_markers(layers: &[&LayerFile], warnings: &mut Vec<String>) -> Vec<String> {
-    let found = layers.iter().rev().find_map(|l| {
-        l.value
-            .get("project_root_markers")
-            .filter(|v| !v.is_null())
-            .map(|v| (v, *l))
-    });
+    let found = layers
+        .iter()
+        .rev()
+        .find_map(|l| match l.lookup("/project_root_markers") {
+            Lookup::Absent => None,
+            Lookup::Set(v) => Some((v, *l)),
+            Lookup::Unreadable => Some((&UNREADABLE, *l)),
+        });
     match found {
         Some((Value::Array(items), layer)) => {
             let markers: Option<Vec<String>> = items
@@ -806,9 +863,22 @@ mod tests {
             parse("a = nan\n[t]\nb = [1.0, -inf]\n[\"x/y\"]\nc = { d = +inf }\n").unwrap();
         assert_eq!(
             v,
-            json!({"a": "nan", "t": {"b": [1.0, "-inf"]}, "x/y": {"c": {"d": "inf"}}})
+            json!({"a": null, "t": {"b": [1.0, null]}, "x/y": {"c": {"d": null}}})
         );
-        assert_eq!(non_finite, ["/a", "/t/b/1", "/x~1y/c/d"]);
+        assert_eq!(
+            non_finite,
+            [
+                ("/a".to_string(), "nan"),
+                ("/t/b/1".to_string(), "-inf"),
+                ("/x~1y/c/d".to_string(), "inf")
+            ]
+        );
+        assert!(overwrites("/t", "/t/b/1"));
+        assert!(overwrites("/a", "/a"));
+        assert!(overwrites("/a/x", "/a"));
+        assert!(overwrites("", "/a"));
+        assert!(!overwrites("/t/b/-", "/t/b/1"));
+        assert!(!overwrites("/ab", "/a"));
     }
 
     #[test]
@@ -826,7 +896,7 @@ mod tests {
         );
         let (c, warnings) = load(root, None);
         let (v, from) = c.get("/project_doc_max_bytes").unwrap();
-        assert_eq!(v, &json!("nan"));
+        assert_eq!(v, &Value::Null, "set, readable as no type");
         assert_eq!(from.source, Source::User);
         assert_eq!(c.get("/project_doc_max_bytes").unwrap().0.as_u64(), None);
         assert!(

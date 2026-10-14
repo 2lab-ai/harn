@@ -54,6 +54,8 @@ pub(crate) struct ModelFacts {
     pub slug: Option<String>,
     /// Where the slug came from (`"<file>#/model"` or `"target"`).
     pub slug_from: Option<String>,
+    /// `"<file>#/model"` when the effective `model` is set but not a string (unknown model).
+    pub slug_unreadable: Option<String>,
     pub context_window: Option<u64>,
     pub window_from: Option<String>,
     /// The catalog entry of the slug in `$CODEX_HOME/models_cache.json`.
@@ -343,9 +345,12 @@ fn json_key(key: &str) -> String {
 
 fn model_signal(ctx: &Ctx) -> String {
     let m = &ctx.model;
-    let model = match (&m.slug, &m.slug_from) {
-        (Some(slug), Some(from)) => format!("model: {slug} ({from})"),
-        (Some(slug), None) => format!("model: {slug}"),
+    let model = match (&m.slug, &m.slug_from, &m.slug_unreadable) {
+        (Some(slug), Some(from), _) => format!("model: {slug} ({from})"),
+        (Some(slug), None, _) => format!("model: {slug}"),
+        (None, _, Some(at)) => {
+            format!("model: unknown ({at} is not a string; codex refuses to start with it)")
+        }
         _ => "model: not set in config (codex picks its default from the catalog at startup)"
             .to_string(),
     };
@@ -379,9 +384,15 @@ fn model_facts(
     if let Some(slug) = &target.model {
         m.slug = Some(slug.clone());
         m.slug_from = Some("target".to_string());
-    } else if let Some((slug, layer)) = config.get_str("/model") {
-        m.slug = Some(slug.to_string());
-        m.slug_from = Some(layer.at("/model"));
+    } else if let Some((value, layer)) = config.get("/model") {
+        match value.as_str() {
+            Some(slug) => {
+                m.slug = Some(slug.to_string());
+                m.slug_from = Some(layer.at("/model"));
+            }
+            // Set but unreadable: unknown, never a lower layer's model.
+            None => m.slug_unreadable = Some(layer.at("/model")),
+        }
     }
     if let Some((_, layer)) = config.get("/model_catalog_json") {
         m.catalog_unread = Some(layer.at("/model_catalog_json"));

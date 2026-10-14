@@ -359,9 +359,16 @@ fn project_chain(ctx: &mut Ctx) -> (Vec<Item>, usize) {
 fn candidate_names(ctx: &mut Ctx) -> Vec<(String, Option<String>)> {
     let mut names: Vec<(String, Option<String>)> =
         vec![(OVERRIDE.to_string(), None), (DEFAULT.to_string(), None)];
-    let Some((Value::Array(entries), layer)) = ctx.config.get("/project_doc_fallback_filenames")
-    else {
-        return names;
+    let (entries, layer) = match ctx.config.get("/project_doc_fallback_filenames") {
+        Some((Value::Array(entries), layer)) => (entries, layer),
+        Some((_, layer)) => {
+            ctx.warnings.push(format!(
+                "{}: not an array of file names; codex refuses to start with it",
+                layer.at("/project_doc_fallback_filenames")
+            ));
+            return names;
+        }
+        None => return names,
     };
     let at = layer.at("/project_doc_fallback_filenames");
     for entry in entries {

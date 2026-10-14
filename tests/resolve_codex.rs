@@ -887,7 +887,7 @@ fn review_non_finite_float_is_set_not_absent() {
         env.origin
             .why
             .iter()
-            .any(|w| w.contains("is not a boolean")),
+            .any(|w| w.contains("non-finite float harn cannot read")),
         "{:?}",
         env.origin.why
     );
@@ -1158,4 +1158,67 @@ fn review_message_children_are_in_request_order() {
         ]
     );
     assert_eq!(message.cost.predicted, Some(framing(Some(&b), true, 2)));
+}
+
+// Review round 2 (C1): fail on 9ae1390.
+
+/// A non-finite float in a string-valued key is set (no lower layer shows through) and readable
+/// as no type: not the string "nan".
+#[test]
+fn review2_non_finite_string_key_is_unknown_not_a_string() {
+    let f = fx();
+    write(
+        &f.repo.join(".codex/config.toml"),
+        "model = nan\ndeveloper_instructions = inf\n",
+    );
+    user_config(
+        &f,
+        Some((&f.repo, "trusted")),
+        "model = \"user-model\"\ndeveloper_instructions = \"lower\"\n",
+    );
+    let t = resolve(&target(&f), None);
+    let model = signal(&t, "model:");
+    let at = format!("{}#/model", f.repo.join(".codex/config.toml").display());
+    assert!(
+        model.starts_with(&format!("model: unknown ({at} is not a string")),
+        "{model}"
+    );
+    assert!(!model.contains("user-model"), "{model}");
+    assert!(
+        t.warnings
+            .iter()
+            .any(|w| w.starts_with(&at) && w.contains("non-finite float `nan`")),
+        "{:?}",
+        t.warnings
+    );
+    assert!(
+        find(&t, "#/developer_instructions").is_none(),
+        "neither \"inf\" nor the user layer's value"
+    );
+}
+
+/// The non-finite list is taken after the overlay: a patch that replaces the value clears the
+/// warning and makes the key readable again.
+#[test]
+fn review2_overlay_replacing_a_non_finite_value_clears_it() {
+    let f = fx();
+    user_config(&f, None, "include_environment_context = nan\n");
+    let t = resolve(&target(&f), None);
+    assert!(t.warnings.iter().any(|w| w.contains("non-finite")));
+    let env = row(&t, "/environment_context");
+    let (file, pointer, value, _) = setting(&env.knobs[0]);
+    let overlay = Overlay {
+        ops: vec![OverlayOp::SetJson {
+            file: file.to_path_buf(),
+            pointer: pointer.to_string(),
+            value: value.clone(),
+        }],
+    };
+    let after = resolve(&target(&f), Some(&overlay));
+    assert!(find(&after, "/environment_context").is_none());
+    assert!(
+        !after.warnings.iter().any(|w| w.contains("non-finite")),
+        "{:?}",
+        after.warnings
+    );
 }
