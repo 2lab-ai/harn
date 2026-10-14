@@ -1292,10 +1292,11 @@ fn listing_with(ctx: &Ctx, plugins: &[Plugin], warnings: &mut Vec<String>) -> Ve
 }
 
 /// What happens to the `.system` folder when codex starts, as far as harn knows which codex:
-/// codex replaces the set when its marker names another version (`skills/src/lib.rs:84-99`), not
-/// when the files differ.
+/// codex reinstalls its embedded set when the folder's marker (a fingerprint of the embedded set)
+/// differs from its own (`skills/src/lib.rs:84-99`) — not when the files differ, and not on every
+/// version change (two versions with the same set share a fingerprint).
 fn writes_at_start(ctx: &Ctx) -> String {
-    let replaces = "replaces them with its own if another Codex version wrote them";
+    let replaces = "may replace them with its own built-in skills";
     match &ctx.installed {
         Installed::Version(v) => format!("when codex {v} starts it {replaces}"),
         Installed::Unversioned => format!("when the installed codex starts it {replaces}"),
