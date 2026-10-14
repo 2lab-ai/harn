@@ -763,9 +763,10 @@ fn an_unlisted_skill_and_an_unknown_block_are_seen_not_predicted() {
 }
 
 #[test]
-fn a_predicted_block_codex_did_not_render_is_predicted_not_seen() {
-    // The same as the fixture with the collaboration-mode switch left on (C1 predicts it on by
-    // default; codex 0.160.1 renders it only when the model's catalog carries its message).
+fn a_catalog_gated_block_codex_did_not_render_is_not_a_miss() {
+    // The same as the fixture with the collaboration-mode switch left on. Codex 0.160.1 renders
+    // the block only when the model's catalog carries its message; with no catalog harn marks
+    // the row catalog-gated (C7), so its absence from the capture is not checkable, not a miss.
     let f = fx();
     write(
         &f.home.join(".codex/config.toml"),
@@ -774,13 +775,14 @@ fn a_predicted_block_codex_did_not_render_is_predicted_not_seen() {
     let c = capture(&f, |_| {});
     let mut tree = statics(&f);
     let report = verify_codex(&mut tree, &c);
-    assert_eq!(
-        failing(&report),
-        vec![&(
-            id(Kind::SystemPrompt, Layer::Builtin, "collaboration_mode"),
-            RowVerdict::PredictedNotSeen
-        )]
-    );
+    assert!(failing(&report).is_empty(), "{:?}", failing(&report));
+    assert!(matches!(
+        verdict(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "collaboration_mode")
+        ),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
 }
 
 #[test]

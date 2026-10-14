@@ -64,8 +64,8 @@ pub const RUNTIME_DECIDED: &[(&str, &str)] = &[
 ];
 
 /// Prefix of a row's `signal` when its presence depends on a model-catalog entry harn could not
-/// read (the resolver's `CATALOG_GATED`): such a row codex did not render is not checkable.
-pub const CATALOG_GATED: &str = "catalog-gated:";
+/// read: such a row codex did not render is not checkable. Defined by the resolver.
+pub use crate::resolve::codex::CATALOG_GATED;
 
 /// The AGENTS.md message framing (`core/src/context/user_instructions.rs:23-34`).
 const AGENTS_HEADER: &str = "# AGENTS.md instructions";
