@@ -111,10 +111,14 @@ src/
                      for byte, each skill listing line as text, every other exactly predicted row
                      by size only, to the byte: a change of the same length there is not
                      detected); not-checkable rows with their reason, never a failure: outside the
-                     dump (tools[], base instructions, hook output), rules files, runtime-decided
-                     blocks, catalog-gated rows, bundled .system skills, MCP servers when `mcp
-                     list` gave no list, plugins `plugin list` does not show and no listed skill
-                     is provably their own, account plugins (source remote)
+                     dump (tools[], base instructions, hook output), AGENTS files whose place in
+                     the message cannot be established because its framing is not where predicted
+                     (the framing row still fails), rules files, runtime-decided blocks,
+                     catalog-gated rows, bundled .system skills (and listing lines or framing that
+                     differ only by the .system root's line, on one side only, and the aliases it
+                     renumbers), MCP servers when `mcp list` gave no list, plugins `plugin list`
+                     does not show and no listed skill is provably their own, account plugins
+                     (source remote)
   render/
     common.rs        shared cells: costs, freed, compact knobs (JSON pointer for Claude Code
                      settings, the dotted TOML key for Codex config.toml), header facts per agent

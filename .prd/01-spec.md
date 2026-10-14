@@ -253,6 +253,9 @@ until a bound capture turns it into `observed`.
   - *outside the dump*: tool schemas (`tools[]`, built-in and MCP), the base instructions (the
     request's `instructions` field; `debug models` has the catalog's template, not the text
     sent) and hook output (`debug prompt-input` does not run hooks);
+  - *unplaced AGENTS files*: an AGENTS file row, when the AGENTS.md message's opening or closing
+    framing is not where harn predicts, so where the file is in the message cannot be
+    established; the framing row itself is still a `content-mismatch`;
   - *rules files*: their allow prefixes render inside the permissions block, whose text harn
     does not predict;
   - *runtime-decided blocks*: `apps_instructions` and `recommended_plugins` render from the
@@ -263,7 +266,11 @@ until a bound capture turns it into `observed`.
   - *bundled skills*: `$CODEX_HOME/skills/.system` holds the set written by whichever Codex last
     started, so a bundled skill that is missing on one side or listed with another line is not
     checkable; the exemption needs proof on both sides (the row's signal, and the entry's path
-    under the bundled root recorded at capture time);
+    under the bundled root recorded at capture time). When the bundled root's line is in only one
+    of the two `### Skill roots` tables, the roots after it are renumbered, so a listing line that
+    differs only by its root's alias, and the listing's framing whose size differs only by that
+    table, are not checkable either; this needs the tables to agree without that line, and any
+    other difference still fails;
   - *no MCP list*: an MCP server row harn predicted, when `codex mcp list --json` gave no list in
     the capture;
   - *unlisted plugins*: a plugin harn predicted that `codex plugin list --json` does not report (it

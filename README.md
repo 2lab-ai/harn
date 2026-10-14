@@ -113,6 +113,9 @@ says whether Codex trusts the folder, because that decides whether the project's
   report lists each one with its reason instead of failing:
   - tool schemas, the base instructions and hook output, because Codex's dump does not contain
     them;
+  - an AGENTS file, when the AGENTS.md message's opening or closing framing is not where harn
+    predicts, because where the file sits in the message cannot be established then (the framing
+    itself is still reported as a mismatch);
   - rules files, because they land inside the permissions block, whose text harn does not
     predict;
   - the apps and recommended-plugins blocks when Codex leaves them out, because it decides them at
@@ -120,7 +123,9 @@ says whether Codex trusts the folder, because that decides whether the project's
   - blocks that follow the model catalog, when harn could not use the catalog (above) and Codex
     left them out;
   - Codex's bundled skills (`$CODEX_HOME/skills/.system`) that differ, because whichever Codex
-    started last wrote them;
+    started last wrote them; for the same reason, a listing line or the listing's framing that
+    differs only because that folder's root is in one `### Skill roots` table and not the other,
+    which renumbers the root aliases after it;
   - MCP servers, when `codex mcp list --json` gave no list in the capture;
   - plugins harn finds that `codex plugin list` does not show (it lists configured marketplaces
     only), unless a skill in the listing is provably theirs; then the plugin counts as seen;

@@ -341,7 +341,7 @@
       <span class="num" aria-hidden="true">01</span>
       <div class="row-copy">
         <h3>See everything it loads.</h3>
-        <p>harn reads Claude Code's config layers without starting a session and groups what lands in the first request by kind: the skill listing, project files, memory, agents, plugins, hooks and built-ins, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code> until <code>harn verify --run</code> measures one real session.</p>
+        <p>harn reads your agent's config without starting a session, Claude Code's settings layers or Codex's <code>config.toml</code> layers, and groups what lands in the first request by kind: the skill listing, project files, plugins, hooks, built-ins and more, each with its size, a bar and its share. What files cannot size reads <code>unmeasured</code>; <code>harn verify --run</code> measures what the agent's own view of the first request shows.</p>
       </div>
       <figure class="ev">
         <figcaption>First screen · excerpt</figcaption>
@@ -438,8 +438,8 @@ apply? [y/N]</pre>
       <p><kbd>u</kbd> on the screen undoes the last change, <kbd>o</kbd> turns an item back on, and <code>harn undo</code> works from the shell. Each one restores the file byte for byte.</p>
     </div>
     <div class="qa">
-      <h3>Does it start Claude Code?</h3>
-      <p>No. It reads the config layers and sizes what files can size. Two commands start your agent: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request).</p>
+      <h3>Does it start your agent?</h3>
+      <p>No. It reads the config layers and sizes what files can size. Claude Code starts on two commands: <code>harn trim</code> (one headless request for a plan) and <code>harn verify --run</code> (one real session, which may cost one model request). For Codex, <code>harn verify --run</code> runs four of Codex's inspection commands: no model request, but <code>codex debug prompt-input</code> starts your MCP servers and may write into <code>~/.codex</code>.</p>
     </div>
     <div class="qa">
       <h3>Does it send anything anywhere?</h3>
