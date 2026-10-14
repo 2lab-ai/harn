@@ -5,7 +5,7 @@
 
 use harn::model::{self, Item, Kind, Knob, Layer, Mode, Overlay, OverlayOp, Scope, Target, Tree};
 use harn::resolve::codex::{
-    BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV,
+    BUNDLED_SKILL, BUNDLED_SKILLS_WHY, CAP_STATE_UNKNOWN, CATALOG_GATED, PROFILE_ENV, ROOT_PREFIX,
 };
 use harn::resolve::{Codex, Resolver};
 use serde_json::{json, Value};
@@ -392,6 +392,19 @@ fn entry_and_framing_bytes_match_a_hand_rendered_block() {
         block.len() as u64,
         "framing + entries = the whole block"
     );
+    // The roots table it predicts, line by line (verify compares it with codex's).
+    let roots: Vec<&str> = framing
+        .origin
+        .why
+        .iter()
+        .filter_map(|w| w.strip_prefix(ROOT_PREFIX))
+        .collect();
+    let table = format!("- `r0` = `{r}`");
+    if block.contains("### Skill roots") {
+        assert_eq!(roots, [table.as_str()]);
+    } else {
+        assert!(roots.is_empty(), "{roots:?}");
+    }
     // The container is skipped by the totals; framing and entries are counted once each.
     assert!(tree.predicted_known >= block.len() as u64);
     // Request order: the block right after the base instructions (no developer_instructions).

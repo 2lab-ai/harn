@@ -1023,8 +1023,7 @@ fn classify(
 /// (`` - `rN` = `<dir>` ``) or is absolute.
 pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
     let mut out = Vec::new();
-    let mut roots: BTreeMap<&str, &str> = BTreeMap::new();
-    let mut section = "";
+    let roots: BTreeMap<&str, &str> = parse_skill_roots(text).into_iter().collect();
     let mut inside = false;
     for line in text.split('\n') {
         if line == "### Available skills" {
@@ -1032,17 +1031,6 @@ pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
             continue;
         }
         if !inside {
-            if line.starts_with("### ") {
-                section = line;
-            } else if section == "### Skill roots" {
-                let alias_root = line
-                    .strip_prefix("- `")
-                    .and_then(|rest| rest.split_once("` = `"))
-                    .and_then(|(alias, root)| Some((alias, root.strip_suffix('`')?)));
-                if let Some((alias, root)) = alias_root {
-                    roots.insert(alias, root);
-                }
-            }
             continue;
         }
         if line.starts_with("### ") || line.starts_with("</skills_instructions>") {
@@ -1073,6 +1061,32 @@ pub fn parse_listing(text: &str) -> Vec<ListedSkill> {
         });
     }
     out
+}
+
+/// The `### Skill roots` table of a `<skills_instructions>` block, `(alias, root)` in order: the
+/// `` - `rN` = `<dir>` `` lines of that section before `### Available skills` (empty when codex
+/// lists absolute paths).
+pub fn parse_skill_roots(text: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut section = "";
+    for line in text.split('\n') {
+        if line == "### Available skills" {
+            break;
+        }
+        if line.starts_with("### ") {
+            section = line;
+        } else if section == "### Skill roots" {
+            out.extend(parse_root_line(line));
+        }
+    }
+    out
+}
+
+/// One roots-table line, `` - `rN` = `<dir>` `` → `(rN, dir)`.
+pub fn parse_root_line(line: &str) -> Option<(&str, &str)> {
+    line.strip_prefix("- `")
+        .and_then(|rest| rest.split_once("` = `"))
+        .and_then(|(alias, root)| Some((alias, root.strip_suffix('`')?)))
 }
 
 /// `codex mcp list --json`: an array of `{name, enabled, disabled_reason, …}`.

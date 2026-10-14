@@ -23,7 +23,13 @@
 //!   set of whichever codex started last, so a `.system` skill harn predicted and codex did not
 //!   list, one codex listed from its `.system` root that harn did not predict, and one listed with
 //!   another line are not checkable, never a failure. The static side is known by the row's
-//!   signal, the capture side by the entry's `SKILL.md` path ([`in_bundled_root`]).
+//!   signal, the capture side by the entry's `SKILL.md` path ([`in_bundled_root`]). When the
+//!   bundled root's line is in only one of the two `### Skill roots` tables ([`RootShift`]: codex
+//!   installs `.system` at start where harn read none, or lists none where harn read some), the
+//!   roots after it are renumbered: the framing row whose difference is only that line and those
+//!   aliases, and an entry whose line differs only by its root's alias, are not checkable with a
+//!   [`BUNDLED_SKILL`] reason; any other difference still fails. A listing codex renders where
+//!   harn predicts none is not checkable when every entry in it is from the bundled root.
 //!   Rows whose mode (or an ancestor's) is `runtime`, `none` or `on-demand` are expected absent; a
 //!   plugin row's mode is its load state. Blocks in [`RUNTIME_DECIDED`] that did not render are
 //!   a warning, not a diff.
@@ -51,7 +57,9 @@
 
 use super::{flatten, get, get_mut, id_parts, Node, RowVerdict, VerifyReport};
 use crate::model::{item_id, Agent, Item, Kind, Layer, Mode, Tree};
-use crate::oracle::codex::{names, CodexCapture, LISTED_PREFIX, REMOTE_SOURCE};
+use crate::oracle::codex::{
+    names, parse_root_line, parse_skill_roots, CodexCapture, LISTED_PREFIX, REMOTE_SOURCE,
+};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -76,6 +84,7 @@ pub const RUNTIME_DECIDED: &[(&str, &str)] = &[
 /// read: such a row codex did not render is not checkable. Defined by the resolver.
 pub use crate::resolve::codex::CATALOG_GATED;
 
+use crate::resolve::codex::ROOT_PREFIX;
 /// Prefix of a `.system` skill row's `signal`; defined by the resolver (see the module docs).
 pub use crate::resolve::codex::{BUNDLED_SKILL, BUNDLED_SKILLS_WHY};
 
@@ -247,6 +256,7 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
     }
 
     // ---- static side ---------------------------------------------------------------------------
+    let shift = RootShift::new(static_tree, &statics, capture);
     let mut trimmed = 0usize;
     for (si, s) in statics.iter().enumerate() {
         if in_agents(si) {
@@ -311,13 +321,26 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                 None => p != o,
             };
             if differs {
-                verdict = match bundled(s) {
-                    Some(signal) => RowVerdict::NotCheckable {
+                // Only the bundled root's line and the aliases it renumbers differ.
+                let shifted = shift.as_ref().and_then(|shift| match lines {
+                    Some((predicted, listed)) => shift
+                        .explains_line(predicted, listed)
+                        .then(|| shift.reason("its line differs only by its root's alias")),
+                    None if s.kind == Kind::SystemPrompt && s.name == names::SKILLS_FRAMING => {
+                        shift.explains_framing(p, o).then(|| {
+                            shift.reason("the framing differs only in its `### Skill roots` table")
+                        })
+                    }
+                    None => None,
+                });
+                verdict = match (bundled(s), shifted) {
+                    (Some(signal), _) => RowVerdict::NotCheckable {
                         reason: format!(
                             "codex lists it with another line (see the note); {signal}"
                         ),
                     },
-                    None => RowVerdict::ContentMismatch {
+                    (None, Some(reason)) => RowVerdict::NotCheckable { reason },
+                    (None, None) => RowVerdict::ContentMismatch {
                         predicted: p,
                         observed: Some(o),
                     },
@@ -382,6 +405,24 @@ pub fn verify_codex(static_tree: &mut Tree, capture: &CodexCapture) -> VerifyRep
                                 .agent_version
                                 .as_deref()
                                 .map_or_else(|| "codex".to_string(), |v| format!("codex {v}"))
+                        ),
+                    },
+                ));
+            }
+            // The whole block, where harn read no skill: every entry is a bundled one.
+            _ if (c.kind == Kind::SkillListing
+                || (c.kind == Kind::SystemPrompt && c.name == names::SKILLS_FRAMING))
+                && !capture.skills.is_empty()
+                && capture
+                    .skills
+                    .iter()
+                    .all(|e| in_bundled_root(e.path.as_deref())) =>
+            {
+                out.rows.push((
+                    c.id.clone(),
+                    RowVerdict::NotCheckable {
+                        reason: format!(
+                            "{BUNDLED_SKILL} every entry codex lists is from its skills/.system folder, and harn read no skill to list: that folder {BUNDLED_SKILLS_WHY}"
                         ),
                     },
                 ));
@@ -530,10 +571,123 @@ fn in_bundled_root(path: Option<&Path>) -> bool {
             .is_some_and(|n| n.starts_with('.'))
     };
     path.and_then(|p| p.ancestors().skip(1).find(hidden))
-        .is_some_and(|dir| {
-            dir.file_name() == Some(OsStr::new(".system"))
-                && dir.parent().and_then(Path::file_name) == Some(OsStr::new("skills"))
+        .is_some_and(bundled_dir)
+}
+
+/// `…/skills/.system`: the bundled root.
+fn bundled_dir(dir: &Path) -> bool {
+    dir.file_name() == Some(OsStr::new(".system"))
+        && dir.parent().and_then(Path::file_name) == Some(OsStr::new("skills"))
+}
+
+/// The roots table harn predicts (its framing row's [`ROOT_PREFIX`] lines) and codex's, when the
+/// bundled root's line is in one of them only. Codex numbers the aliases in the order it found
+/// the roots (`ext/skills/src/render.rs:983-1009`), `.system` after the user roots and before
+/// the admin, plugin and repo ones, so that line also renumbers every root after it.
+struct RootShift {
+    predicted: Vec<(String, String)>,
+    listed: Vec<(String, String)>,
+    /// Whether the bundled root's line is codex's (else harn's).
+    in_listing: bool,
+}
+
+impl RootShift {
+    fn new(tree: &Tree, statics: &[Node], capture: &CodexCapture) -> Option<RootShift> {
+        let framing = statics
+            .iter()
+            .find(|s| s.kind == Kind::SystemPrompt && s.name == names::SKILLS_FRAMING)?;
+        let owned = |(alias, root): (&str, &str)| (alias.to_string(), root.to_string());
+        let predicted: Vec<(String, String)> = get(&tree.items, &framing.path)
+            .origin
+            .why
+            .iter()
+            .filter_map(|w| w.strip_prefix(ROOT_PREFIX))
+            .filter_map(parse_root_line)
+            .map(owned)
+            .collect();
+        let listed: Vec<(String, String)> =
+            parse_skill_roots(&capture.block(names::SKILLS_FRAMING)?.text)
+                .into_iter()
+                .map(owned)
+                .collect();
+        let bundled =
+            |roots: &[(String, String)]| roots.iter().any(|(_, r)| bundled_dir(Path::new(r)));
+        let in_listing = bundled(&listed);
+        (in_listing != bundled(&predicted)).then_some(RootShift {
+            predicted,
+            listed,
+            in_listing,
         })
+    }
+
+    /// A framing of `p` predicted and `o` observed bytes: the same size without the roots
+    /// section, and the same tables once the bundled root's line is dropped and the aliases
+    /// renumbered.
+    fn explains_framing(&self, p: u64, o: u64) -> bool {
+        let rest = |total: u64, roots: &[(String, String)]| total as i128 - section(roots) as i128;
+        rest(p, &self.predicted) == rest(o, &self.listed)
+            && renumbered(&self.predicted) == renumbered(&self.listed)
+    }
+
+    /// Two listing lines that name the same file once each alias is expanded.
+    fn explains_line(&self, predicted: &str, listed: &str) -> bool {
+        expand(predicted, &self.predicted) == expand(listed, &self.listed)
+    }
+
+    fn reason(&self, what: &str) -> String {
+        format!(
+            "{BUNDLED_SKILL} {what}: the skills/.system root's line, which {}, and the aliases it renumbers; that folder {BUNDLED_SKILLS_WHY}",
+            if self.in_listing {
+                "only codex's listing has (harn read no bundled skill)"
+            } else {
+                "only harn's prediction has (codex lists no bundled skill)"
+            }
+        )
+    }
+}
+
+/// Bytes of the `### Skill roots` section: the heading and one line per root, each with its
+/// `\n` (`ext/skills/src/catalog_prompt.rs:81-106`); none without roots.
+fn section(roots: &[(String, String)]) -> u64 {
+    if roots.is_empty() {
+        return 0;
+    }
+    ("### Skill roots".len()
+        + 1
+        + roots
+            .iter()
+            .map(|(alias, root)| root_line(alias, root).len() + 1)
+            .sum::<usize>()) as u64
+}
+
+fn root_line(alias: &str, root: &str) -> String {
+    format!("- `{alias}` = `{root}`")
+}
+
+/// The table without the bundled root, aliases numbered again from `r0`.
+fn renumbered(roots: &[(String, String)]) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|(_, root)| !bundled_dir(Path::new(root)))
+        .enumerate()
+        .map(|(i, (_, root))| root_line(&format!("r{i}"), root))
+        .collect()
+}
+
+/// A listing line with its `rN/…` locator expanded through `roots` (unchanged otherwise).
+fn expand(line: &str, roots: &[(String, String)]) -> String {
+    let expanded = line
+        .strip_suffix(')')
+        .and_then(|l| l.rsplit_once(" (file: "))
+        .and_then(|(head, locator)| {
+            let (alias, rest) = locator.split_once('/')?;
+            let (_, root) = roots.iter().find(|(a, _)| a == alias)?;
+            Some(format!(
+                "{head} (file: {}/{rest})",
+                root.trim_end_matches('/')
+            ))
+        });
+    expanded.unwrap_or_else(|| line.to_string())
 }
 
 /// Whether codex lists `id` as a plugin installed for the account (source `remote`).

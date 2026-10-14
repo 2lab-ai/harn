@@ -78,6 +78,10 @@ pub const BUNDLED_SKILL: &str = "bundled-skill:";
 /// verify's reasons.
 pub const BUNDLED_SKILLS_WHY: &str = "holds the system skills of the codex that started last (each codex rewrites it with its own embedded set when it starts, skills/src/lib.rs:59-121)";
 
+/// The `origin.why` prefix under which the framing row records each line of the roots table it
+/// predicts (`` - `rN` = `<dir>` ``).
+pub const ROOT_PREFIX: &str = "rendered root: ";
+
 /// The listing container's id name and the framing row's id name.
 pub(crate) const LISTING: &str = "skills";
 pub(crate) const FRAMING: &str = "skills_instructions";
@@ -1332,6 +1336,11 @@ fn framing_row(ctx: &Ctx, r: &Rendered, knobs: Vec<Knob>) -> Item {
     item.origin.why = vec![
         "`<skills_instructions>` developer block around the listing: `## Skills`, the intro, the roots table when used, `### Available skills` (ext/skills/src/catalog_prompt.rs:81-106)".to_string(),
     ];
+    // The roots table as rendered: verify compares it with codex's when the bundled root's line
+    // is on one side only.
+    item.origin
+        .why
+        .extend(r.roots.iter().map(|line| format!("{ROOT_PREFIX}{line}")));
     match ctx.catalog_flag("include_skills_usage_instructions") {
         Ok(usage) => {
             item.cost = Cost {

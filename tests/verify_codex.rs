@@ -7,6 +7,7 @@
 
 use harn::model::{item_id, walk, Agent, Cost, Item, Kind, Layer, Mode, Origin, Target, Tree};
 use harn::oracle::codex::{self as oracle, CodexCapture};
+use harn::resolve::codex::ROOT_PREFIX;
 use harn::resolve::{Codex, Resolver};
 use harn::verify::{
     verify_codex, RowVerdict, VerifyReport, ACCOUNT_PLUGIN, BUNDLED_SKILL, BUNDLED_SKILLS_WHY,
@@ -187,13 +188,24 @@ fn statics(f: &Fx) -> Tree {
     let mut tree = Codex.resolve(&target(f), None).expect("resolve");
     let block = pristine_block(f, "skills_instructions");
     let entries = (ALPHA.len() + 1 + BETA.len() + 1) as u64;
-    tree.items.push(row(
+    let mut framing = row(
         Kind::SystemPrompt,
         Layer::Builtin,
         "skills_instructions",
         Mode::Always,
         exact(block.len() as u64 - entries),
-    ));
+    );
+    // The roots table the resolver predicts, as it records it.
+    framing.origin.why = [
+        f.home.join(".codex/skills"),
+        f.home
+            .join(".codex/plugins/cache/demo-mkt/demo-plugin/local/skills"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, root)| format!("{ROOT_PREFIX}- `r{i}` = `{}`", root.display()))
+    .collect();
+    tree.items.push(framing);
     let mut listing = row(
         Kind::SkillListing,
         Layer::Builtin,
@@ -1729,11 +1741,16 @@ fn bundled_case(f: &Fx, edit: impl FnOnce(&mut Value)) -> (Tree, CodexCapture) {
     let mut tree = statics(f);
     let entries: u64 = c.skills.iter().map(|s| s.bytes()).sum();
     let observed_framing = c.block("skills_instructions").unwrap().bytes() - entries;
-    tree.items
+    let framing = tree
+        .items
         .iter_mut()
         .find(|i| i.id.ends_with("/skills_instructions"))
-        .unwrap()
-        .cost = exact(observed_framing);
+        .unwrap();
+    framing.cost = exact(observed_framing);
+    framing
+        .origin
+        .why
+        .push(format!("{ROOT_PREFIX}- `r2` = `{}`", system.display()));
     let listing = tree
         .items
         .iter_mut()
@@ -2059,4 +2076,269 @@ fn a_local_plugin_harn_did_not_predict_is_still_seen_not_predicted() {
         ),
         Some(RowVerdict::NotCheckable { .. })
     ));
+}
+
+// ---- the roots table when only one side has the bundled root -------------------------------------
+
+/// The `.system` root's place in codex's roots table: after the user roots, before the plugin
+/// ones, so the plugin root of the fixture becomes `r2`.
+fn system_root_added(f: &Fx, items: &mut Value) {
+    let system = f.home.join(".codex/skills/.system");
+    replace_in(
+        items,
+        0,
+        1,
+        "- `r1` = `",
+        &format!("- `r1` = `{}`\n- `r2` = `", system.display()),
+    );
+    replace_in(
+        items,
+        0,
+        1,
+        "(file: r1/beta/SKILL.md)",
+        "(file: r2/beta/SKILL.md)",
+    );
+    replace_in(
+        items,
+        0,
+        1,
+        "### Available skills\n",
+        "### Available skills\n- imagegen: Generate images. (file: r1/imagegen/SKILL.md)\n",
+    );
+}
+
+fn shift_reason(what: &str, side: &str) -> String {
+    format!(
+        "{BUNDLED_SKILL} {what}: the skills/.system root's line, which {side}, and the aliases it renumbers; that folder {BUNDLED_SKILLS_WHY}"
+    )
+}
+
+const CODEX_ONLY: &str = "only codex's listing has (harn read no bundled skill)";
+
+#[test]
+fn a_bundled_root_only_codex_lists_is_not_a_framing_or_alias_failure() {
+    // harn read no `.system` folder (codex has not started here yet); the codex of the run
+    // installs one, lists a bundled skill, and the plugin root moves from r1 to r2.
+    let f = fx();
+    let c = capture(&f, |items| system_root_added(&f, items));
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(failing(&report).is_empty(), "{:#?}", failing(&report));
+    assert!(report.passed);
+    assert_eq!(
+        reason(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions")
+        ),
+        shift_reason(
+            "the framing differs only in its `### Skill roots` table",
+            CODEX_ONLY
+        )
+    );
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Plugin, "demo-plugin:beta")),
+        shift_reason("its line differs only by its root's alias", CODEX_ONLY)
+    );
+    assert!(matches!(
+        verdict(&report, &id(Kind::Skill, Layer::Unresolved, "imagegen")),
+        Some(RowVerdict::NotCheckable { .. })
+    ));
+    for row in [
+        id(Kind::Skill, Layer::User, "alpha"),
+        id(Kind::SkillListing, Layer::Builtin, "skills"),
+        id(Kind::Plugin, Layer::Plugin, "demo-plugin@demo-mkt"),
+    ] {
+        assert_eq!(verdict(&report, &row), Some(&RowVerdict::Seen), "{row}");
+    }
+}
+
+#[test]
+fn any_other_framing_or_line_difference_beside_the_bundled_root_still_fails() {
+    let f = fx();
+    let framing = id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions");
+    // An unrelated framing edit.
+    let c = capture(&f, |items| {
+        system_root_added(&f, items);
+        replace_in(
+            items,
+            0,
+            1,
+            "Below is the list of skills that can be used.",
+            "Below are the skills.",
+        );
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let failing_ids: Vec<&str> = failing(&report).iter().map(|(i, _)| i.as_str()).collect();
+    assert_eq!(failing_ids, vec![framing.as_str()]);
+    assert!(matches!(
+        verdict(&report, &framing),
+        Some(RowVerdict::ContentMismatch { .. })
+    ));
+    assert!(!report.passed);
+
+    // A renumbered line whose text changed too.
+    let f = fx();
+    let c = capture(&f, |items| {
+        system_root_added(&f, items);
+        replace_in(items, 0, 1, "The beta skill.", "The beta skill!");
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let failing_ids: Vec<&str> = failing(&report).iter().map(|(i, _)| i.as_str()).collect();
+    assert_eq!(
+        failing_ids,
+        vec![id(Kind::Skill, Layer::Plugin, "demo-plugin:beta").as_str()]
+    );
+
+    // The roots renumbered with no bundled root: a real difference (as r11).
+    let f = fx();
+    let c = capture(&f, |items| {
+        replace_in(
+            items,
+            0,
+            1,
+            "- `r1` = `",
+            &format!(
+                "- `r1` = `{}`\n- `r2` = `",
+                f.repo.join(".agents/skills").display()
+            ),
+        );
+        replace_in(
+            items,
+            0,
+            1,
+            "(file: r1/beta/SKILL.md)",
+            "(file: r2/beta/SKILL.md)",
+        );
+    });
+    let mut tree = statics(&f);
+    let report = verify_codex(&mut tree, &c);
+    let mut failing_ids: Vec<&str> = failing(&report).iter().map(|(i, _)| i.as_str()).collect();
+    failing_ids.sort();
+    assert_eq!(
+        failing_ids,
+        vec![
+            id(Kind::Skill, Layer::Plugin, "demo-plugin:beta").as_str(),
+            framing.as_str()
+        ]
+    );
+}
+
+#[test]
+fn a_bundled_root_only_harn_read_is_not_a_framing_or_alias_failure() {
+    // The other way round: the folder harn read had a bundled skill (r1), codex lists none.
+    let f = fx();
+    let system = f.home.join(".codex/skills/.system");
+    let c = capture(&f, |_| {});
+    let mut tree = statics(&f);
+    let added = format!("- `r1` = `{}`", system.display());
+    let framing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.id.ends_with("/skills_instructions"))
+        .unwrap();
+    framing.cost.predicted = framing.cost.predicted.map(|p| p + added.len() as u64 + 1);
+    let plugin_root = framing
+        .origin
+        .why
+        .pop()
+        .unwrap()
+        .replacen("`r1`", "`r2`", 1);
+    framing.origin.why.push(format!("{ROOT_PREFIX}{added}"));
+    framing.origin.why.push(plugin_root);
+    let listing = tree
+        .items
+        .iter_mut()
+        .find(|i| i.kind == Kind::SkillListing)
+        .unwrap();
+    let beta = listing
+        .children
+        .iter_mut()
+        .find(|c| c.label == "demo-plugin:beta")
+        .unwrap();
+    beta.origin.why = vec![format!("rendered: {}", BETA.replacen("r1/", "r2/", 1))];
+    let line = "- imagegen: Generate images. (file: r1/imagegen/SKILL.md)";
+    let mut sys = row(
+        Kind::Skill,
+        Layer::Builtin,
+        "imagegen",
+        Mode::Advertised,
+        exact(line.len() as u64 + 1),
+    );
+    sys.origin.why = vec![format!("rendered: {line}")];
+    sys.origin.path = Some(system.join("imagegen/SKILL.md"));
+    sys.signal = Some(bundled_signal());
+    listing.children.insert(0, sys);
+    listing.cost.predicted = listing.cost.predicted.map(|p| p + line.len() as u64 + 1);
+    let report = verify_codex(&mut tree, &c);
+    assert!(failing(&report).is_empty(), "{:#?}", failing(&report));
+    let side = "only harn's prediction has (codex lists no bundled skill)";
+    assert_eq!(
+        reason(
+            &report,
+            &id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions")
+        ),
+        shift_reason(
+            "the framing differs only in its `### Skill roots` table",
+            side
+        )
+    );
+    assert_eq!(
+        reason(&report, &id(Kind::Skill, Layer::Plugin, "demo-plugin:beta")),
+        shift_reason("its line differs only by its root's alias", side)
+    );
+}
+
+#[test]
+fn a_listing_of_bundled_skills_only_where_harn_predicts_none_is_not_checkable() {
+    // harn read no skill at all; the codex of the run lists only its bundled ones.
+    let f = fx();
+    let system = f.home.join(".codex/skills/.system");
+    let only_bundled = |extra: &str| {
+        format!(
+            "<skills_instructions>\n## Skills\nA skill is a set of local instructions.\n### Skill roots\n- `r0` = `{}`\n### Available skills\n- imagegen: Generate images. (file: r0/imagegen/SKILL.md)\n{extra}</skills_instructions>",
+            system.display()
+        )
+    };
+    let without_listing = |f: &Fx| {
+        let mut tree = statics(f);
+        tree.items
+            .retain(|i| !i.id.ends_with("/skills_instructions") && i.kind != Kind::SkillListing);
+        tree
+    };
+    let block = only_bundled("");
+    let c = capture(&f, |items| *text_mut(items, 0, 1) = Value::String(block));
+    let mut tree = without_listing(&f);
+    let report = verify_codex(&mut tree, &c);
+    assert!(report.passed, "{:#?}", failing(&report));
+    let why = format!(
+        "{BUNDLED_SKILL} every entry codex lists is from its skills/.system folder, and harn read no skill to list: that folder {BUNDLED_SKILLS_WHY}"
+    );
+    for row in [
+        id(Kind::SystemPrompt, Layer::Builtin, "skills_instructions"),
+        id(Kind::SkillListing, Layer::Builtin, "skills"),
+    ] {
+        assert_eq!(reason(&report, &row), why, "{row}");
+    }
+
+    // One entry of another root: the listing is a prediction miss again.
+    let f = fx();
+    let block = only_bundled(&format!(
+        "- alpha: The alpha skill. (file: {})\n",
+        f.home.join(".codex/skills/alpha/SKILL.md").display()
+    ));
+    let c = capture(&f, |items| *text_mut(items, 0, 1) = Value::String(block));
+    let mut tree = without_listing(&f);
+    let report = verify_codex(&mut tree, &c);
+    let mut failing_ids: Vec<&str> = failing(&report).iter().map(|(i, _)| i.as_str()).collect();
+    failing_ids.sort();
+    assert_eq!(
+        failing_ids,
+        vec![
+            "codex/skill-listing/builtin/skills",
+            "codex/skill/unresolved/alpha",
+            "codex/system-prompt/builtin/skills_instructions",
+        ]
+    );
 }
